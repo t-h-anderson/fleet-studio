@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 import uuid
 from workflow_spec import digest
+from studio_trackers import tracker_label
 
 
 class EntryPoints:
@@ -38,7 +39,7 @@ class EntryPoints:
                 "The deployed workflow replaces workflow instructions in the older roles, agent backlog and handoff documents. "
                 "Continue to read repository AGENTS.md and applicable engineering guides for coding/testing requirements, source/publication restrictions and safety. "
                 "Preserve explicit task stops, current ticket/file custody, claims and host recovery rules. A workflow deployment does not grant new source permissions or resume stopped work. "
-                "Report conflicts or missing assignments at a safe boundary. GitLab remains the live task, claim and evidence record.\n")
+                "Report conflicts or missing assignments at a safe boundary. " + tracker_label(fleet) + " remains the live task, claim and evidence record.\n")
 
     @staticmethod
     def target(directory):

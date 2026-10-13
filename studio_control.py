@@ -1,4 +1,4 @@
-"""Explicit operator controls using supported Codex commands, never native DB writes."""
+"""Explicit operator controls using each agent backend's supported commands, never native DB writes."""
 from copy import deepcopy
 import hashlib
 import json
@@ -165,6 +165,8 @@ class Controls:
         for agent in agents:
             if not agent["sessionId"]:
                 raise ValueError(agent["name"] + " needs a linked session.")
+            if action == "rename" and not self.app.runtimes.for_agent(agent).capabilities["rename"]:
+                raise ValueError(agent["name"] + " uses a backend whose sessions cannot be renamed from Studio.")
             body = assignment_text(fleet, agent) if action == "assignment" else agent["name"] if action == "rename" else message.strip()
             # Windows has a finite command-line length; queue is an argument-based CLI.
             if len(body) > 16000:
@@ -233,9 +235,8 @@ class Controls:
         return self.app.deployments.adoption_hold(fleet["id"], ids) or self.app.triggers.hold_reason(agents, monitor, preview.get("idleOnly", False), preview["id"])
 
     def _dispatch(self, preview):
-        codex = self.app.store.legacy["codexPath"]
         for index, target in enumerate(preview["targets"]):
-            status, detail = "queued", "Accepted by Codex queue; agent adoption is not yet confirmed."
+            status, detail = "failed", "Not dispatched."
             try:
                 if preview.get("deploymentId"):
                     if preview["deploymentId"] != self.app.deployments.data["active"].get(preview["fleetId"]):
@@ -251,15 +252,13 @@ class Controls:
                     reason = self.automatic_hold(preview, target)
                     if reason:
                         raise AutomationHeld(reason)
+                # Route by the agent's current backend and host binding.
+                agent = next((a for a in self.app.store.fleet(preview["fleetId"])["agents"] if a["id"] == target["agentId"]), {})
+                backend = self.app.runtimes.for_agent(agent)
                 if preview["action"] == "rename":
-                    rename_session(codex, target["sessionId"], target["text"])
-                    status, detail = "renamed", "Codex acknowledged the conversation name."
+                    status, detail = backend.rename(target["sessionId"], target["text"])
                 else:
-                    run = subprocess.run([codex, "queue", "--thread", target["sessionId"], "--message", target["text"]],
-                                         capture_output=True, encoding="utf-8", errors="replace", timeout=30,
-                                         creationflags=CREATE_NO_WINDOW)
-                    if run.returncode:
-                        raise RuntimeError((run.stderr or run.stdout or "Codex rejected the message.")[-1500:])
+                    status, detail = backend.send(target["sessionId"], target["text"], agent.get("directory", ""))
             except AutomationHeld as exc:
                 status, detail = "held", str(exc)
             except (subprocess.TimeoutExpired, TimeoutError, queue.Empty):

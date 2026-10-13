@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 import time
 import uuid
-from workflow_spec import assignment_document, apply_spec, digest, diff, export_spec, metadata, render, validate
+from studio_agents import runtime_binding
+from workflow_spec import assignment_document, apply_spec, digest, diff, export_spec, metadata, render, runtime_problems, validate
 
 INTEGRATION_POLICY = {
     'id': 'integration-coordination', 'name': 'Coordinate changes during final integration', 'roles': [], 'sources': [],
@@ -45,7 +46,8 @@ class Deployments:
             for agent in result["agents"]:
                 local = current.get(agent["id"])
                 # A release must never send to a newly rebound conversation.
-                agent["enabled"] = bool(agent["enabled"] and local and local["enabled"] and local["sessionId"] == agent["sessionId"] and local["directory"] == agent["directory"])
+                agent["enabled"] = bool(agent["enabled"] and local and local["enabled"] and local["sessionId"] == agent["sessionId"] and local["directory"] == agent["directory"]
+                                        and runtime_binding(local) == runtime_binding(agent))
         else:
             result = deepcopy(fleet)
         for rule in result.get("triggers", []):
@@ -99,7 +101,9 @@ class Deployments:
 
     @staticmethod
     def binding_digest(fleet):
-        return digest({"agents": [{k: a.get(k) for k in ("id", "name", "sessionId", "directory", "enabled", "roleIds", "notes")} for a in fleet["agents"]],
+        # Runtime defaults keep digests of releases made before backend bindings unchanged.
+        return digest({"agents": [{**{k: a.get(k) for k in ("id", "name", "sessionId", "directory", "enabled", "roleIds", "notes")},
+                                   **runtime_binding(a)} for a in fleet["agents"]],
                        "triggers": [{"id": t["id"], "enabled": t["enabled"]} for t in fleet.get("triggers", [])]})
 
     def preview(self, payload):
@@ -155,6 +159,7 @@ class Deployments:
                 from studio_workflow import contract_problem
                 problems = [contract_problem(fleet, t) for t in fleet.get("triggers", []) if t["enabled"] and contract_problem(fleet, t)]
                 problems += [g["summary"] for g in spec["gaps"] if g["blocking"] and g["resolution"] == "open"]
+                problems += runtime_problems(fleet)
                 if problems:
                     raise ValueError("Resolve before deployment: " + "; ".join(problems))
                 updated = deepcopy(fleet)

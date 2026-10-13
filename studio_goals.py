@@ -10,6 +10,7 @@ import time
 import uuid
 
 from studio_progress import configuration, link, plain, task_key
+from studio_trackers import issue_prefix
 from studio_runtime import normalize_goal_status, observe
 
 BLOCKERS = ('dependency', 'approval', 'restricted', 'host', 'capacity', 'other')
@@ -190,7 +191,7 @@ class Goals:
                     'summary': plain(payload.get('summary', ''), 'summary'), 'kind': 'goal-linked',
                     'source': 'operator-link', 'agentId': agent['id'], 'releaseId': rid, 'at': self.app.progress.clock()}
             config, _ = configuration(fleet)
-            if config['projectUrl'] and not data['taskUrl'].startswith(task_key(config['projectUrl']) + '/-/issues/'):
+            if config['projectUrl'] and not data['taskUrl'].startswith(task_key(issue_prefix(config))):
                 raise ValueError('Task must belong to the configured tracker project.')
             with self.app.progress.lock, closing(self.app.progress.connect()) as db, db:
                 self.link_report(db, fleet, agent, data)
@@ -216,6 +217,8 @@ class Goals:
 
     def preflight(self, fid, aid):
         fleet, agent, rid = self.binding(fid, aid)
+        if agent.get('backend', 'codex') != 'codex' or agent.get('hostId', 'local') != 'local':
+            raise ValueError('Native goal controls are available only for local Codex agents.')
         sid = agent['sessionId']
         observed = observe(self.app.codex_root, [sid])['sessions'].get(sid, {})
         goal = self.validate_observation(observed, time.time())

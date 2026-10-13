@@ -9,6 +9,8 @@ import threading
 import time
 from urllib.parse import urlsplit, urlunsplit
 
+from studio_trackers import issue_prefix
+
 KINDS = ('task-started', 'progress-updated', 'blocked', 'unblocked', 'handoff-received', 'work-finished', 'test-result')
 DEFAULTS = {'handoffMinutes': 30, 'quietMinutes': 60, 'retentionDays': 90}
 
@@ -207,7 +209,7 @@ class Progress:
             event = plain(payload.get('eventId'), 'eventId', 200, True)
             task = link(payload.get('taskUrl'), 'taskUrl')
             config, _ = configuration(fleet)
-            if config['projectUrl'] and not task_key(task).startswith(task_key(config['projectUrl']) + '/-/issues/'):
+            if config['projectUrl'] and not task_key(task).startswith(task_key(issue_prefix(config))):
                 raise ValueError('Task must belong to the configured tracker project.')
             data = {'kind': kind, 'agentId': aid, 'agentName': agent['name'], 'sessionId': agent['sessionId'],
                     'directory': agent['directory'], 'releaseId': rid, 'eventId': event,

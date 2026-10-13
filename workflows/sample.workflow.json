@@ -1,0 +1,246 @@
+{
+  "schemaVersion": 1,
+  "id": "example-delivery",
+  "name": "Reviewed delivery",
+  "version": "1.0.0",
+  "description": "A supervised workflow for bounded implementation, review and delivery.",
+  "sources": [],
+  "states": [
+    {
+      "id": "closed",
+      "name": "Closed",
+      "roles": [],
+      "issueState": "closed",
+      "labelsAny": [],
+      "labelPrefixes": [],
+      "fallback": false
+    },
+    {
+      "id": "blocked",
+      "name": "Blocked",
+      "roles": [
+        "coordinator"
+      ],
+      "issueState": "opened",
+      "labelsAny": [
+        "AI Blocked"
+      ],
+      "labelPrefixes": [],
+      "fallback": false
+    },
+    {
+      "id": "integration",
+      "name": "Awaiting merge",
+      "roles": [
+        "integrator"
+      ],
+      "issueState": "opened",
+      "labelsAny": [
+        "AI Awaiting Merge"
+      ],
+      "labelPrefixes": [],
+      "fallback": false
+    },
+    {
+      "id": "active",
+      "name": "In progress",
+      "roles": [
+        "writer"
+      ],
+      "issueState": "opened",
+      "labelsAny": [
+        "AI Claimed"
+      ],
+      "labelPrefixes": [],
+      "fallback": false
+    },
+    {
+      "id": "ready",
+      "name": "Ready",
+      "roles": [
+        "writer"
+      ],
+      "issueState": "opened",
+      "labelsAny": [
+        "AI Ready"
+      ],
+      "labelPrefixes": [],
+      "fallback": false
+    },
+    {
+      "id": "backlog",
+      "name": "Backlog",
+      "roles": [
+        "coordinator"
+      ],
+      "issueState": "any",
+      "labelsAny": [],
+      "labelPrefixes": [],
+      "fallback": true
+    }
+  ],
+  "transitions": [],
+  "policies": [
+    {
+      "id": "progress-reporting",
+      "name": "Meaningful progress reports",
+      "roles": [],
+      "sources": [],
+      "text": "At task start, meaningful progress, blocker changes, handoff receipt and work completion, report a structured milestone with the canonical tracker evidence link. Tracker records remain authoritative. Reported completion is not technical acceptance. Do not produce repeated no-change updates."
+    }
+  ],
+  "gaps": [],
+  "roles": [
+    {
+      "id": "coordinator",
+      "name": "Coordinator",
+      "kind": "agent",
+      "responsibilities": "Set bounded work, assign owners and resolve blockers.",
+      "authority": "Own scope and assignments.",
+      "sources": []
+    },
+    {
+      "id": "writer",
+      "name": "Writer",
+      "kind": "agent",
+      "responsibilities": "Implement assigned work, verify it and resolve review findings.",
+      "authority": "Own only assigned files and scope.",
+      "sources": []
+    },
+    {
+      "id": "subagent-reviewers",
+      "name": "Subagent reviewers",
+      "kind": "subagent",
+      "responsibilities": "Review changes independently and return concrete findings.",
+      "authority": "Read-only review; implementation stays with the parent.",
+      "sources": []
+    },
+    {
+      "id": "integrator",
+      "name": "Integrator",
+      "kind": "agent",
+      "responsibilities": "Integrate reviewed work and complete delivery.",
+      "authority": "Own assigned integration and delivery.",
+      "sources": []
+    }
+  ],
+  "handoffs": [
+    {
+      "id": "assign-scoped-packet",
+      "source": "coordinator",
+      "target": "writer",
+      "action": "Assign scoped packet",
+      "when": "An eligible, unclaimed packet is ready",
+      "artifact": "Ticket with source, file scope and unit acceptance",
+      "guard": "One writer per owned file",
+      "sources": []
+    },
+    {
+      "id": "request-static-review",
+      "source": "writer",
+      "target": "subagent-reviewers",
+      "action": "Request static review",
+      "when": "Implementation, tests and drafts are ready",
+      "artifact": "Exact diff, source basis, tests and draft documentation",
+      "guard": "Read-only reviewers; no independent execution",
+      "sources": []
+    },
+    {
+      "id": "return-findings",
+      "source": "subagent-reviewers",
+      "target": "writer",
+      "action": "Return findings",
+      "when": "Independent review is complete",
+      "artifact": "Concrete findings and coverage gaps",
+      "guard": "Writer fixes findings and renews affected evidence",
+      "sources": []
+    },
+    {
+      "id": "submit-reviewed-packet",
+      "source": "writer",
+      "target": "integrator",
+      "action": "Submit reviewed packet",
+      "when": "Reviewed packet is AI Awaiting Merge",
+      "artifact": "Exact head, test and analysis evidence and usable drafts",
+      "guard": "Integrator checks evidence and records bundle ownership",
+      "sources": []
+    },
+    {
+      "id": "review-integrated-diff",
+      "source": "integrator",
+      "target": "subagent-reviewers",
+      "action": "Review integrated diff",
+      "when": "Substantive bundle changes are ready",
+      "artifact": "Integrated diff and evidence applicability",
+      "guard": "Read-only; reuse valid completed review",
+      "sources": []
+    },
+    {
+      "id": "return-bundle-findings",
+      "source": "subagent-reviewers",
+      "target": "integrator",
+      "action": "Return bundle findings",
+      "when": "Integration review is complete",
+      "artifact": "Findings, corrections and remaining limits",
+      "guard": "Integrator renews checks invalidated by changes",
+      "sources": []
+    },
+    {
+      "id": "escalate-scope-exception",
+      "source": "integrator",
+      "target": "coordinator",
+      "action": "Escalate scope exception",
+      "when": "A cross-bundle or acceptance exception remains",
+      "artifact": "Concrete conflict, evidence and requested decision",
+      "guard": "Ordinary acceptance and merge remain with Integrator",
+      "sources": []
+    }
+  ],
+  "triggers": [
+    {
+      "recipientMode": "single",
+      "id": "assign-scoped-packet",
+      "name": "Assign scoped packet",
+      "kind": "event",
+      "source": "coordinator",
+      "target": "writer",
+      "event": "handoff-9e32e493",
+      "condition": "turn-completed",
+      "minutes": 30,
+      "message": "Workflow action: Assign scoped packet\nFrom: Coordinator\nTo: Writer\nWhen: An eligible, unclaimed packet is ready\nRequired artifact: Ticket with source, file scope and unit acceptance\nRequired condition: One writer per owned file\n\nRead the reported ticket and current handoff before acting. Confirm named custody, scope, evidence and explicit stops. A reported event is a notification, not proof of acceptance. Record work in the existing ticket/MR; do not invent missing assignments or transfer another agent's runtime.",
+      "mode": "automatic",
+      "handoff": "assign-scoped-packet",
+      "contract": "7eabed42f262ef51632a1150ed85dfb44a7db6e8375bbf08ebf3652c0a838abc"
+    },
+    {
+      "recipientMode": "single",
+      "id": "submit-reviewed-packet",
+      "name": "Submit reviewed packet",
+      "kind": "event",
+      "source": "writer",
+      "target": "integrator",
+      "event": "handoff-8253bbf2",
+      "condition": "turn-completed",
+      "minutes": 30,
+      "message": "Workflow action: Submit reviewed packet\nFrom: Writer\nTo: Integrator\nWhen: Reviewed packet is AI Awaiting Merge\nRequired artifact: Exact head, unit/Analyzer evidence and usable drafts\nRequired condition: Integrator checks evidence and records bundle ownership\n\nRead the reported ticket and current handoff before acting. Confirm named custody, scope, evidence and explicit stops. A reported event is a notification, not proof of acceptance. Record work in the existing ticket/MR; do not invent missing assignments or transfer another agent's runtime.",
+      "mode": "automatic",
+      "handoff": "submit-reviewed-packet",
+      "contract": "5c685ecf3bd049743b605fe27568a4573f407d16bf9cf9eefc64709f20e0827c"
+    },
+    {
+      "recipientMode": "single",
+      "id": "escalate-scope-exception",
+      "name": "Escalate scope exception",
+      "kind": "event",
+      "source": "integrator",
+      "target": "coordinator",
+      "event": "handoff-4709c619",
+      "condition": "turn-completed",
+      "minutes": 30,
+      "message": "Workflow action: Escalate scope exception\nFrom: Integrator\nTo: Coordinator\nWhen: A cross-bundle or acceptance exception remains\nRequired artifact: Concrete conflict, evidence and requested decision\nRequired condition: Ordinary acceptance and merge remain with Integrator\n\nRead the reported ticket and current handoff before acting. Confirm named custody, scope, evidence and explicit stops. A reported event is a notification, not proof of acceptance. Record work in the existing ticket/MR; do not invent missing assignments or transfer another agent's runtime.",
+      "mode": "automatic",
+      "handoff": "escalate-scope-exception",
+      "contract": "1a6dc5fb2d813165a3fb8a491123050eb9240c277046fc723d4201d1276d04d1"
+    }
+  ]
+}

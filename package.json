@@ -1,0 +1,13 @@
+{
+  "private": true,
+  "name": "codex-fleet-studio",
+  "version": "1.0.0",
+  "description": "Local fleet browser app; Node dependencies are for browser tests only.",
+  "scripts": {
+    "test:ui": "node tests/ui.mjs",
+    "test:layout": "node tests/layout.cjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
+}

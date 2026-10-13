@@ -1,0 +1,15 @@
+node_modules/
+__pycache__/
+.runtime/
+.launches/
+.test-*/
+tests/.test-*/
+tests/*-results.json
+tests/*.png
+fleet.json
+fleet-studio.json
+workflow-releases/
+workflows/eds.workflow.json
+workflows/EDS_WORKFLOW.md
+*.sqlite*
+*.log

@@ -32,6 +32,7 @@ from studio_backlog import Backlog, clean_config
 from studio_activity import activity
 from studio_progress import Progress, clean_settings
 from studio_reconciliation import Reconciliation
+from studio_goals import Goals
 
 APP_ID = "codex-fleet-studio"
 ROOT = Path(__file__).resolve().parent
@@ -286,6 +287,7 @@ class Application:
         self.controls = Controls(self)
         self.triggers = Triggers(self)
         self.progress = Progress(self)
+        self.goals = Goals(self)
         self.reconciliation = Reconciliation(self)
         self.backlog = Backlog(self, backlog_fixture)
         self.activity_fixture = activity_fixture
@@ -337,6 +339,11 @@ class Application:
             return deepcopy(self.monitor["catalogue"])
 
     def launch(self, payload):
+        # Serialize scheduling with reviewed goal controls, including the job reservation.
+        with self.store.lock:
+            return self._launch(payload)
+
+    def _launch(self, payload):
         if not self.launch_enabled:
             raise ValidationError("Launching is disabled in this test instance.")
         fleet = self.store.fleet(payload.get("fleetId"))
@@ -447,7 +454,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, app.backlog.snapshot(fleet_id))
             if path == "/api/sessions":
                 return self.json(200, {"sessions": app.catalogue()})
-            if path in ("/", "/app.js", "/roles.js", "/layout.js", "/backlog.js", "/activity.js", "/workflow.js", "/progress.js", "/metrics.js", "/reconciliation.js", "/app.css", "/icon.svg"):
+            if path in ("/", "/app.js", "/roles.js", "/layout.js", "/backlog.js", "/activity.js", "/workflow.js", "/progress.js", "/metrics.js", "/reconciliation.js", "/goals.js", "/app.css", "/icon.svg"):
                 name = "index.html" if path == "/" else path[1:]
                 mime = {".html": "text/html", ".js": "application/javascript",
                         ".css": "text/css", ".svg": "image/svg+xml"}[Path(name).suffix]
@@ -481,6 +488,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/progress/report":
                 app.progress.observe_handoffs(app.triggers.snapshot().get("actions", []))
                 return self.json(200, app.progress.report(payload))
+            if path == '/api/goals/link':
+                return self.json(200, app.goals.link_metadata(payload))
+            if path == '/api/goals/preview':
+                return self.json(200, app.goals.preview(payload))
+            if path == '/api/goals/apply':
+                return self.json(200, app.goals.apply(payload.get('previewId')))
             if path == "/api/workflow/entrypoints/preview":
                 return self.json(200, app.entrypoints.preview(payload))
             if path == "/api/workflow/entrypoints/apply":

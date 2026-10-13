@@ -223,6 +223,15 @@ class Progress:
             if kind == 'test-result':
                 from studio_metrics import clean_test
                 data.update(clean_test(payload))
+            if payload.get('goalId'):
+                from studio_goals import BLOCKERS, DETAILS
+                if kind in ('test-result', 'handoff-received'):
+                    raise ValueError('Receipts and test reports are separate from goal updates; omit goalId.')
+                data['goalId'] = plain(payload['goalId'], 'goalId', 200, True)
+                for key in DETAILS:
+                    data[key] = plain(payload.get(key, ''), key, required=kind == 'blocked' and key != 'completionCriteria')
+                if kind == 'blocked' and data['blockerCategory'] not in BLOCKERS:
+                    raise ValueError('Choose a supported blockerCategory.')
             digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
             with self.lock, closing(self.connect()) as db, db:
                 prior = db.execute('SELECT digest FROM identities WHERE fleet=? AND agent=? AND event=?', (fid, aid, event)).fetchone()
@@ -232,6 +241,8 @@ class Progress:
                     return {'duplicate': True, 'eventId': event}
                 now = self.clock()
                 data['at'] = now
+                if data.get('goalId'):
+                    self.app.goals.link_report(db, fleet, agent, data)
                 if kind == 'handoff-received':
                     row = db.execute('SELECT data FROM handoffs WHERE fleet=? AND id=?', (fid, data['handoffId'])).fetchone()
                     handoff = json.loads(row['data']) if row else None
@@ -248,8 +259,8 @@ class Progress:
                     previous = json.loads(prior_row['data']) if prior_row else {}
                     data['blockedSince'] = (previous.get('blockedSince') or now) if kind == 'blocked' else previous.get('blockedSince') if kind == 'progress-updated' else None
                     if kind == 'progress-updated' and data['blockedSince']:
-                        for k in ('reason', 'nextAction', 'dependsOn'):
-                            data[k] = data[k] or previous.get(k)
+                        for k in ('reason', 'nextAction', 'dependsOn', 'blockerCategory', 'blockerOwner', 'resumeCondition'):
+                            data[k] = data.get(k) or previous.get(k)
                     db.execute('INSERT OR REPLACE INTO agent_tasks VALUES(?,?,?,?)', (fid, aid, data['taskUrl'], json.dumps(data)))
                 db.execute('INSERT INTO identities VALUES(?,?,?,?)', (fid, aid, event, digest))
                 self.record(db, fid, 'agent-report', aid + ':' + event, now, data)
@@ -275,6 +286,7 @@ class Progress:
     def tick(self, state, monitor):
         self.observe_handoffs(monitor.get('automation', {}).get('actions', []))
         self.observe_sessions(state['fleets'], monitor)
+        self.app.goals.observe(state['fleets'], monitor)
         self.metrics.observe_tokens(state['fleets'], monitor)
         for fleet in state['fleets']:
             # Backlog refresh is asynchronous and coalesces concurrent browser requests.
@@ -381,10 +393,19 @@ class Progress:
             ids = {a['id'] for a in agents if role['id'] in a['roleIds']}
             roles.append({**role,'queueCount':len(role_tasks),'waitingCount':sum(h['awaitingReceipt'] and h['targetAgentId'] in ids for h in handoffs)})
         metrics = self.metrics.snapshot(fleet, tasks, agents, handoffs, source, rid)
+        goals = self.app.goals.snapshot(fleet, monitor, settings['quietMinutes'])
+        for g in goals['records']:
+            if g['current'] and g['native']['status'] != 'complete' and (g['staleGoal'] or not g.get('taskUrl')):
+                attention.append({'kind': 'stale-goal' if g['staleGoal'] else 'goal-link', 'agentId': g['agentId'],
+                                  'at': g.get('lastReportAt') or g['firstObservedAt'],
+                                  'message': g['agentName'] + ': ' + ('Goal needs evidence review; no automatic clearing.' if g['staleGoal'] else 'Goal has no linked ticket or completion criterion.'),
+                                  'nextAction': 'Inspect the goal, blocker owner and resume condition.'})
         return {'fleetId':fleet_id,'observedAt':now,'observationError':self.observation_error,'settings':settings,'agents':agents,'tasks':tasks,'roles':roles,'metrics':metrics,
+                'goals':goals,
                 'roleLinks':runtime.get('roleLinks',[]),'handoffs':sorted(handoffs,key=lambda h:h['createdAt'],reverse=True),
                 'attention':sorted(attention,key=lambda a:a.get('at') or now),'deployment':{**{k:deployment[k] for k in ('active','draftChanged','paused','enabledTriggers','adoption','migrationComplete')},
-                    'reportingEnabled':bool(rid and any(p['id']=='progress-reporting' for p in self.app.deployments.release(rid)['spec']['policies']))},
+                    'reportingEnabled':bool(rid and any(p['id']=='progress-reporting' for p in self.app.deployments.release(rid)['spec']['policies'])),
+                    'boundedGoalsEnabled':bool(rid and any(p['id']=='bounded-goals' for p in self.app.deployments.release(rid)['spec']['policies']))},
                 'tracker':{'url':config['projectUrl'],'observedAt':backlog.get('observedAt'),'stale':backlog.get('stale',False),
                            'partial':backlog.get('partial',False),'error':backlog.get('error',''),'loading':backlog.get('loading',False)},
                 'summary':{'openTasks':sum(t['state']!='closed' for t in tasks),'blockedTasks':sum(t['stage']=='blocked' for t in tasks),

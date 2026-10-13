@@ -22,6 +22,8 @@ missing or stale information must remain visible.
 | Adoption and data freshness | Current binding acknowledgements, workflow drift, last successful tracker/CI refresh, errors and gaps. |
 | Execution blockers versus other holds | Current structured blocker reports or claimed blocked tasks count as execution blockers; restrictions, deferred/sign-off work and unclaimed dependency holds are separate. No label or ownership changes. |
 | Workflow availability | Distinct from session activity: an idle session with a blocked, paused or limited goal remains held, with its current reason or an explicit missing-reason notice. |
+| Bounded goal evidence | Exact native goal identity, ticket, done criterion, blocker category/owner/dependencies/resume condition and usage. Quiet goals flag a review; stops are never automatically cleared. Missing or replaced goals are not assumed complete. |
+| Goal recovery audit | Reviewed complete/cancel/resume intent, ticket evidence and verified or uncertain outcome. Native usage is preserved for status changes; cancellation retains a Studio snapshot. No automatic retry. |
 | Receipt reconciliation | Operator-recorded acknowledgement evidence and source repair retain the original event identity and prior delivery state. They do not repeat delivery or confer technical acceptance. |
 
 ## Recommended next measurements

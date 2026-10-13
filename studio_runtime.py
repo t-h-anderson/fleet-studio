@@ -131,12 +131,18 @@ def observe(root, session_ids):
                     item["turnStatus"] = turn["status"]
                     item["turnStartedAt"] = turn["started_at"]
                     item["turnCompletedAt"] = turn["completed_at"]
-                goal = goals.execute("SELECT status FROM thread_goals WHERE thread_id=?",
+                goal = goals.execute("SELECT * FROM thread_goals WHERE thread_id=?",
                                      (session_id,)).fetchone() if goals else None
                 if goals:
                     item["goalKnown"] = True
                 if goal:
-                    item["goalStatus"] = goal["status"]
+                    row = dict(goal)
+                    item["goalStatus"] = normalize_goal_status(row['status'])
+                    item['goal'] = {target: row.get(source) for source, target in (
+                        ('goal_id', 'id'), ('objective', 'objective'), ('token_budget', 'tokenBudget'),
+                        ('tokens_used', 'tokensUsed'), ('time_used_seconds', 'timeUsedSeconds'))}
+                    item['goal'].update(status=item['goalStatus'], createdAt=(row.get('created_at_ms') or 0) / 1000,
+                                        updatedAt=(row.get('updated_at_ms') or 0) / 1000)
                 if queued:
                     item["queueCount"] = queued.execute("SELECT count(*) FROM queued_items WHERE thread_id=?", (session_id,)).fetchone()[0]
                 if not item["pids"]:
@@ -159,6 +165,10 @@ def observe(root, session_ids):
         if queued:
             queued.close()
     return {"observedAt": time.time(), "sessions": output, "catalogue": recent, "errors": errors}
+
+
+def normalize_goal_status(status):
+    return {'usageLimited': 'usage_limited', 'budgetLimited': 'budget_limited'}.get(status, status)
 
 
 def session_usage(root, session_ids):

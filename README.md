@@ -209,6 +209,54 @@ not replace an active release until explicitly deployed. Existing local
 configurations, releases, acknowledgement records and delivery identities remain
 in their data directory; none are distributed with this repository.
 
+## Bounded goals
+
+Progress → Goals shows observed native objectives, ticket links, completion
+criteria, blocker owners/dependencies/resume conditions and token usage. A role
+is a continuing workflow responsibility; a goal is one authorized work packet.
+Goal age uses the meaningful-report threshold to flag review, never automatic
+clearing. Missing native data is shown as unknown; removed/replaced goals remain
+in history and are not inferred to be complete.
+
+Link a goal in the UI, or add `--goal-id` and `--completion-criteria` to a
+substantive `fleet_progress.py` report. Goal-linked blocked reports also require
+`--blocker-category`, `--blocker-owner`, `--resume-condition`, `--reason` and
+`--next-action`; `--depends-on` can be repeated. Receipt and test reports omit
+goal fields. An `unblocked` report records dependency resolution without
+resuming the native goal. Operator links are labelled separately from reports.
+
+Complete, cancel and resume each require ticket evidence, an explicit decision,
+a fresh preview and final apply. Close the session at a safe boundary and empty
+its queue first. Complete/resume use supported Codex app-server metadata APIs
+without setting an objective or budget, preserving usage. Cancel clears the
+native goal and retains its evidence and usage snapshot in Studio. Resume is
+available for blocked/paused goals; it does not override budget/usage limits or
+launch a session. None of these actions changes tracker state or acceptance.
+
+The installed Codex protocol lacks an atomic expected-goal check. Studio checks
+identity, binding, release, evidence, queue and process state before apply, then
+rechecks immediately before the native write. Keep other clients away from the
+closed session during apply; that external race cannot be eliminated by Studio.
+Intent and outcome are retained in `.runtime/goal-actions.json`. Timeouts or
+interrupted actions remain unknown and are never retried automatically. Goal
+records and action receipts survive observation retention.
+
+`POST /api/goals/link` records an operator link; `/api/goals/preview` prepares a
+decision and `/api/goals/apply` consumes its `previewId`. All writes require the
+instance token and local-origin checks. `--no-launch` disables native apply.
+The Goals view offers a policy-only `bounded-goals` deployment after reporting
+is set up; it rejects unrelated draft changes and preserves existing stops,
+roles, routes and automation pause state. Agents acknowledge the new release
+at their next safe boundary. Deployment itself sends no messages.
+
+The policy-only `coordination` deployment adds final-integration coordination:
+the Integrator records a bounded reservation on the current ticket with owner,
+candidate/base revisions, affected files/interfaces, tested revisions and a
+review/expiry time. Overlapping changes, including externally managed work,
+are sequenced with that owner. Changed candidates require an applicability
+assessment and refreshed affected evidence. This is an agent workflow policy;
+Studio does not enforce Git locks or assume an external contributor agreed.
+
 ## Validation
 
 ```powershell

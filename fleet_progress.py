@@ -33,6 +33,10 @@ def report_progress(args, root=None):
     if args.kind == 'test-result':
         payload.update(testStatus=args.test_status, suite=args.suite, revision=args.revision,
                        durationSeconds=args.duration_seconds, passed=args.passed, failed=args.failed, skipped=args.skipped)
+    for name in ('goalId', 'completionCriteria', 'blockerCategory', 'blockerOwner', 'resumeCondition'):
+        attr = re.sub(r'([A-Z])', lambda m: '_' + m[1].lower(), name)
+        if getattr(args, attr, None):
+            payload[name] = getattr(args, attr)
     request = Request(url + '/api/progress/report', data=json.dumps(payload).encode('utf-8'),
                       headers={'Content-Type': 'application/json', 'X-Fleet-Token': bootstrap['token']})
     with urlopen(request, timeout=30) as response:
@@ -47,6 +51,10 @@ def main():
     for name in ('summary', 'reason', 'next-action', 'handoff'):
         parser.add_argument('--' + name, default='')
     parser.add_argument('--depends-on', action='append', default=[])
+    for name in ('goal-id', 'completion-criteria', 'blocker-owner', 'resume-condition'):
+        parser.add_argument('--' + name, default='')
+    from studio_goals import BLOCKERS
+    parser.add_argument('--blocker-category', choices=BLOCKERS)
     parser.add_argument('--test-status', choices=('passed', 'failed', 'blocked', 'running', 'skipped'))
     parser.add_argument('--suite')
     parser.add_argument('--revision', help='Full Git commit SHA tested; describe any working-tree changes in the evidence.')

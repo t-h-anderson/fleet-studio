@@ -6,6 +6,10 @@ import time
 import uuid
 from workflow_spec import assignment_document, apply_spec, digest, diff, export_spec, metadata, render, validate
 
+INTEGRATION_POLICY = {
+    'id': 'integration-coordination', 'name': 'Coordinate changes during final integration', 'roles': [], 'sources': [],
+    'text': 'Before final integration or acceptance checks, the Integrator records a bounded integration reservation in the existing ticket: responsible integration owner, candidate and base revisions, affected files and shared interfaces, required checks and the exact revisions tested, start time, next review/expiry time and release condition. This is coordination of current custody, not a global freeze or transfer of ownership. Before merging, rebasing or changing overlapping files/interfaces, Writers, the Coordinator and agents arranging externally managed work consult that record and agree sequencing with the integration owner. Non-overlapping authorized work may continue. The Coordinator brings externally managed changes into the same overlap check; an unacknowledged external reservation is a reported risk, not an assumed lock. An urgent overlapping change requires an explicit recorded decision identifying which evidence it invalidates. When the candidate or relevant main dependencies change, the Integrator records impacted checks and withdraws superseded acceptance requests; refresh affected evidence against the new submitted revision before requesting acceptance again. Keep unaffected evidence only with a documented applicability assessment. Rebase completion, passing tests at an older revision, cleared goals and workflow adoption do not establish current acceptance. Release the reservation when integration completes, is withdrawn or is deliberately rescheduled; review expired reservations with the owner rather than automatically completing, resuming or transferring work. Preserve genuine blockers, explicit stops, source/publication restrictions and serialized runtime ownership. Existing progress and blocked/unblocked reports should link the reservation evidence, owner, dependency and bounded next action.'}
+
 
 class Deployments:
     def __init__(self, app):
@@ -119,8 +123,23 @@ class Deployments:
                 spec = validate(spec)
                 updated = apply_spec(fleet, spec)
                 changes = diff(before, spec)
-            elif kind in ("deploy", "reporting"):
+            elif kind in ("deploy", "reporting", "bounded-goals", "coordination"):
                 spec = deepcopy(before)
+                if kind in ('bounded-goals', 'coordination'):
+                    from studio_goals import POLICY
+                    policy = POLICY if kind == 'bounded-goals' else INTEGRATION_POLICY
+                    active_id = self.data['active'].get(fleet['id'])
+                    if not active_id or digest(before) != self.release(active_id)['digest'] or self.binding_digest(fleet) != self.binding_digest(self.release(active_id)['fleet']):
+                        raise ValueError('Deploy or discard unrelated draft changes before adding workflow instructions.')
+                    if any(p['id'] == policy['id'] for p in spec['policies']):
+                        raise ValueError(policy['name'] + ' instructions are already deployed.')
+                    if not any(p['id'] == 'progress-reporting' for p in spec['policies']):
+                        raise ValueError('Set up progress reporting before bounded goals.')
+                    spec['policies'].append(deepcopy(policy))
+                    version = spec['version'].split('.')
+                    if len(version) == 3 and all(v.isdigit() for v in version):
+                        spec['version'] = '.'.join(version[:2] + [str(int(version[2]) + 1)])
+                    spec = validate(spec)
                 if kind == 'reporting':
                     active_id = self.data['active'].get(fleet['id'])
                     if not active_id or digest(before) != self.release(active_id)['digest'] or self.binding_digest(fleet) != self.binding_digest(self.release(active_id)['fleet']):
@@ -147,7 +166,7 @@ class Deployments:
                 raise ValueError("Unknown workflow preview action.")
             preview = {"id": uuid.uuid4().hex, "fleetId": fleet["id"], "kind": kind, "revision": state["revision"],
                        "createdAt": time.time(), "spec": spec, "fleet": updated, "changes": changes,
-                       "previousSpec": baseline if kind in ("deploy", "reporting") else before,
+                       "previousSpec": baseline if kind in ("deploy", "reporting", "bounded-goals", "coordination") else before,
                        "pendingHandoffs": self.app.progress.pending_handoffs(fleet["id"]) if hasattr(self.app, "progress") else [],
                        "bindingChanges": {"before": self.release(self.data["active"][fleet["id"]])["fleet"]["agents"] if fleet["id"] in self.data["active"] else [], "after": updated["agents"]},
                        "activeAtPreview": self.data["active"].get(fleet["id"]),

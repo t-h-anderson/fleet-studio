@@ -40,6 +40,24 @@ class SpecificationTests(unittest.TestCase):
             with self.assertRaises(ValueError): validate(broken)
         self.assertEqual(validate(spec), spec)
 
+    def test_reporting_setup_preserves_routing_custody_and_explicit_automation_pause(self):
+        app=self.app();self.deploy(app)
+        before=app.store.snapshot();f=before['fleets'][0]
+        app.deployments.pause({'fleetId':f['id'],'paused':True})
+        p=app.deployments.preview({'fleetId':f['id'],'revision':before['revision'],'kind':'reporting'})
+        self.assertEqual(p['changes']['policies']['added'],['progress-reporting'])
+        for section in ('roles','handoffs','states','triggers'):
+            self.assertFalse(p['changes'][section]['changed'])
+        with patch.object(app.controls,'send') as send:
+            result=app.deployments.apply(p['id']);send.assert_not_called()
+        after=app.store.fleet(f['id'])
+        self.assertEqual(after['agents'],f['agents']);self.assertEqual(after['triggers'],f['triggers'])
+        self.assertTrue(app.deployments.data['paused'][f['id']])
+        doc=Path(result['release']['directory'],'agents',f['agents'][0]['id']+'.md').read_text(encoding='utf-8')
+        self.assertIn('## Progress reports',doc);self.assertIn('handoff-received',doc)
+        with self.assertRaisesRegex(ValueError,'already deployed'):
+            app.deployments.preview({'fleetId':f['id'],'revision':app.store.snapshot()['revision'],'kind':'reporting'})
+
     def test_roundtrip_rename_preserves_bindings_positions_and_baselines(self):
         app = self.app();f = app.store.snapshot()["fleets"][0];spec = export_spec(f)
         spec["roles"][1]["name"] = "Renamed role"

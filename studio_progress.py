@@ -79,6 +79,8 @@ class Progress:
                 CREATE TABLE IF NOT EXISTS agent_tasks (
                     fleet TEXT NOT NULL, agent TEXT NOT NULL, url TEXT NOT NULL, data TEXT NOT NULL,
                     PRIMARY KEY(fleet,agent,url));
+                CREATE TABLE IF NOT EXISTS tracking_windows (
+                    fleet TEXT, source TEXT, first_at REAL, PRIMARY KEY(fleet,source));
             ''')
         from studio_metrics import Metrics
         self.metrics = Metrics(self)
@@ -112,6 +114,8 @@ class Progress:
                 db.execute('DELETE FROM tasks WHERE fleet=?', (fid,))
             gap = not previous or now - previous['at'] > 180
             old = {r['url']: json.loads(r['data']) for r in db.execute('SELECT * FROM tasks WHERE fleet=?', (fid,))}
+            first = min((t.get('timingStartedAt') or t.get('stageObservedAt') or t['observedAt'] for t in old.values()), default=now)
+            db.execute('INSERT OR IGNORE INTO tracking_windows VALUES(?,?,?)', (fid, source, first))
             for issue in snapshot['items']:
                 issue = deepcopy(issue)
                 if runtime.get('workflow', {}).get('states'):
@@ -151,8 +155,13 @@ class Progress:
                 prior = db.execute('SELECT data FROM handoffs WHERE fleet=? AND id=?', (fid, aid)).fetchone()
                 old = json.loads(prior['data']) if prior else {}
                 value = {k: action.get(k) for k in ('id', 'name', 'createdAt', 'status', 'detail', 'ticket', 'eventId',
-                         'targetAgentId', 'targetName', 'targetSessionId', 'targetDirectory', 'triggerId', 'sourceAgentId', 'deploymentId')}
+                         'targetAgentId', 'targetName', 'targetSessionId', 'targetDirectory', 'triggerId', 'sourceAgentId', 'deploymentId', 'reconciliation')}
                 value['receivedAt'] = old.get('receivedAt')
+                for key in ('receiptSource', 'receiptEvidence'):
+                    value[key] = old.get(key)
+                if action.get('reconciliation', {}).get('mode') == 'record-receipt':
+                    record = action['reconciliation']
+                    value.update(receivedAt=old.get('receivedAt') or record['at'], receiptSource=record['source'], receiptEvidence=record['evidenceUrl'])
                 value['observedAt'] = self.clock()
                 comparison = {k: v for k, v in value.items() if k != 'observedAt'}
                 if comparison != {k: v for k, v in old.items() if k != 'observedAt'}:
@@ -229,6 +238,8 @@ class Progress:
                     if not handoff or handoff['targetAgentId'] != aid or handoff.get('targetSessionId') != agent['sessionId'] or handoff.get('targetDirectory') != agent['directory'] or task_key(handoff.get('ticket') or '') != data['taskUrl']:
                         raise ValueError('Receipt must match this agent, task and original handoff binding.')
                     handoff['receivedAt'] = now
+                    handoff['receiptSource'] = 'agent-report'
+                    handoff['receiptEvidence'] = data['evidenceUrl']
                     db.execute('UPDATE handoffs SET data=? WHERE fleet=? AND id=?', (json.dumps(handoff), fid, data['handoffId']))
                 elif kind == 'test-result':
                     db.execute('INSERT INTO test_runs VALUES(?,?,?,?,?)', (fid, aid, event, now, json.dumps(data)))
@@ -302,6 +313,7 @@ class Progress:
             reports = [json.loads(r['data']) for r in db.execute('SELECT data FROM agent_tasks WHERE fleet=?', (fleet_id,))]
             handoffs = [json.loads(r['data']) for r in db.execute('SELECT data FROM handoffs WHERE fleet=?', (fleet_id,))]
             changes = [dict(r) for r in db.execute("SELECT at,data FROM observations WHERE fleet=? AND category='tracker' AND at>=?", (fleet_id, now - 604800))]
+            window = db.execute('SELECT first_at FROM tracking_windows WHERE fleet=? AND source=?', (fleet_id, source)).fetchone()
         tasks = [t for t in tasks if t.get('sourceKey') == source]
         for t in tasks:
             if runtime.get('workflow', {}).get('states'):
@@ -335,17 +347,29 @@ class Progress:
                     attention.append({'kind':'quiet','agentId':agent['id'],'taskUrl':r['taskUrl'],'at':r['at'],'message':'No recent meaningful report; inspect activity before intervening.'})
             observed = deepcopy(monitor.get('sessions', {}).get(agent['sessionId'], {}))
             observed['stale'] = not observed.get('observedAt') or now - observed['observedAt'] > 20
+            stopped = not observed['stale'] and observed.get('goalStatus') in ('blocked', 'paused', 'budget_limited', 'usage_limited')
+            blocked_report = next((r for r in rs if r.get('bindingCurrent') and r.get('blockedSince') and r.get('trackerState') != 'closed'), None)
+            if stopped:
+                reason = 'Goal is ' + observed['goalStatus'] + '. ' + (blocked_report['reason'] if blocked_report else 'No current structured blocker reason; inspect activity and task evidence. Preserve the stop.')
+                attention.append({'kind':'goal-stop','agentId':agent['id'],'at':None,'message':agent['name'] + ': ' + reason})
+            else:
+                reason = ('Workflow automation is paused.' if deployment['paused'] else '') or self.app.triggers.hold_reason([agent], monitor, idle_only=True) or self.app.deployments.adoption_hold(fleet_id,[agent['id']])
+            availability = {'state':'held' if stopped else 'busy' if observed.get('status') == 'working' else 'held' if reason else 'eligible',
+                            'reason':reason or 'Eligible for an idle workflow check; task scope still applies.'}
             agents.append({'id':agent['id'],'name':agent['name'],'roleIds':agent.get('roleIds',[]),'enabled':agent['enabled'],
-                           'session':observed,'reports':rs,'adoption':next((a for a in deployment['adoption'] if a['agentId']==agent['id']),None)})
+                           'session':observed,'reports':rs,'availability':availability,'adoption':next((a for a in deployment['adoption'] if a['agentId']==agent['id']),None)})
         for h in handoffs:
             h['awaitingReceipt'] = not h.get('receivedAt') and h['status'] != 'dismissed'
             h['overdue'] = h['awaitingReceipt'] and now - h['createdAt'] >= settings['handoffMinutes'] * 60
             if h['overdue'] or h['status'] == 'needs-attention':
                 attention.append({'kind':'handoff','handoffId':h['id'],'agentId':h['targetAgentId'],'taskUrl':h.get('ticket'), 'at':h['createdAt'],
                                   'message':h.get('detail') or 'Handoff has no agent receipt.'})
+        from studio_metrics import blocker_category
+        execution = {a['taskUrl'] for a in attention if a['kind'] == 'blocked'}
         for t in tasks:
-            if t['stage'] == 'blocked' and not any(a.get('taskUrl') == t['url'] and a['kind'] == 'blocked' for a in attention):
-                attention.append({'kind':'tracker-blocked','taskUrl':t['url'],'at':t.get('stageObservedAt'),'message':'Tracker marks this task blocked; no current structured reason is available.'})
+            t['blockerCategory'] = blocker_category(t, t['url'] in execution)
+            if t['blockerCategory'] == 'execution' and t['url'] not in execution:
+                attention.append({'kind':'tracker-blocked','taskUrl':t['url'],'at':t.get('stageObservedAt'),'message':'Claimed work is blocked in the tracker; inspect the current blocker reason.'})
         for a in deployment['adoption']:
             if a['required'] and (not a['acknowledged'] or not a['bindingMatches'] or a['entryPoint'] != 'installed'):
                 attention.append({'kind':'adoption','agentId':a['agentId'],'at':None,'message':'Workflow adoption needs attention: ' + a['name']})
@@ -359,10 +383,18 @@ class Progress:
         metrics = self.metrics.snapshot(fleet, tasks, agents, handoffs, source, rid)
         return {'fleetId':fleet_id,'observedAt':now,'observationError':self.observation_error,'settings':settings,'agents':agents,'tasks':tasks,'roles':roles,'metrics':metrics,
                 'roleLinks':runtime.get('roleLinks',[]),'handoffs':sorted(handoffs,key=lambda h:h['createdAt'],reverse=True),
-                'attention':sorted(attention,key=lambda a:a.get('at') or now),'deployment':{k:deployment[k] for k in ('active','draftChanged','paused','enabledTriggers','adoption','migrationComplete')},
+                'attention':sorted(attention,key=lambda a:a.get('at') or now),'deployment':{**{k:deployment[k] for k in ('active','draftChanged','paused','enabledTriggers','adoption','migrationComplete')},
+                    'reportingEnabled':bool(rid and any(p['id']=='progress-reporting' for p in self.app.deployments.release(rid)['spec']['policies']))},
                 'tracker':{'url':config['projectUrl'],'observedAt':backlog.get('observedAt'),'stale':backlog.get('stale',False),
                            'partial':backlog.get('partial',False),'error':backlog.get('error',''),'loading':backlog.get('loading',False)},
                 'summary':{'openTasks':sum(t['state']!='closed' for t in tasks),'blockedTasks':sum(t['stage']=='blocked' for t in tasks),
+                           'executionBlockedTasks':sum(t['blockerCategory']=='execution' for t in tasks),
+                           'restrictedTasks':sum(t['blockerCategory']=='restricted' for t in tasks),
+                           'deferredBlockedTasks':sum(t['blockerCategory']=='deferred' for t in tasks),
+                           'unclaimedBlockedTasks':sum(t['blockerCategory']=='unclaimed' for t in tasks),
+                           'observationStartedAt':window['first_at'] if window else None,
+                           'closureWindow24h':max(now-86400,now-settings['retentionDays']*86400,window['first_at']) if window else None,
+                           'closureWindow7d':max(now-604800,now-settings['retentionDays']*86400,window['first_at']) if window else None,
                            'pendingHandoffs':sum(h['awaitingReceipt'] for h in handoffs),
                            'completed24h':len({d['taskUrl'] for at,d in completed if at>=now-86400}),
                            'completed7d':len({d['taskUrl'] for at,d in completed})},

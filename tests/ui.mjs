@@ -28,6 +28,8 @@ try{
  await until(async()=>(await page.locator('.progress-attention-list').innerText()).includes('Waiting for reviewed input'),'Missing blocker');
  assert.equal(await page.locator('#fleet-title').innerText(),'Progress');
  assert.match(await page.locator('.progress-metrics').innerText(),/Awaiting handoff receipt/);
+ assert.match(await page.locator('.progress-metrics').innerText(),/Active execution blockers/);
+ assert.match(await page.locator('.progress-qualification').innerText(),/Counts exclude earlier deliveries/);
  await page.locator('[data-progress-tab="agents"]').click();
  await page.locator('[data-progress-agent="'+fixture.writerId+'"]').click();
  await page.locator('#progress-detail').waitFor({state:'visible'});
@@ -62,6 +64,15 @@ try{
  await page.unroute('**/api/progress?**');await page.evaluate(()=>loadProgress(true));
  checks.push('Monitoring exposes backlog samples, token availability, CI provenance and commit-linked local test results');
  await page.locator('[data-progress-tab="handoffs"]').click();
+ await page.locator('[data-progress-handoff="legacy-receipt"]').click();
+ await page.locator('[data-reconcile-handoff="legacy-receipt"]').click();
+ await page.locator('#reconcile-note').fill('Recipient acknowledged the exact decision in the existing ticket. No new review.');
+ await page.locator('#reconcile-evidence').fill('https://gitlab.example/team/project/-/issues/101#note_2');
+ await page.locator('#reconcile-form button[type="submit"]').click();
+ await page.locator('#apply-reconciliation').click();
+ await page.locator('#progress-detail').waitFor({state:'hidden'});
+ assert.match(await page.locator('#content').innerText(),/Receipt reconciled/);
+ checks.push('External receipt reconciliation preserves the event and does not send instructions');
  assert.match(await page.locator('#content').innerText(),/No agent receipt/);
  await page.locator('[data-progress-handoff="synthetic-handoff"]').click();
  assert.match(await page.locator('#progress-detail-body').innerText(),/queued/);

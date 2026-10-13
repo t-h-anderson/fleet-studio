@@ -8,6 +8,23 @@ import re
 import threading
 
 
+def blocker_category(task, execution_reported=False):
+    """Qualify tracker holds without changing workflow state or inferring ownership."""
+    if task['state'] == 'closed':
+        return None
+    labels = set(task.get('labels', []))
+    restricted = 'AI Banned' in labels or 'Access::AI read-only' in labels or any(l.startswith('Restriction::') for l in labels)
+    if restricted:
+        return 'restricted'
+    if execution_reported or task.get('stage') == 'blocked' and 'AI Claimed' in labels:
+        return 'execution'
+    if task.get('stage') != 'blocked':
+        return None
+    if 'Deferred' in labels or 'Sign-off' in labels:
+        return 'deferred'
+    return 'unclaimed'
+
+
 def state_timings(prior, row, gap):
     compatible = prior and prior.get('sourceKey') == row['sourceKey'] and prior.get('releaseId') == row['releaseId']
     totals = dict(prior.get('stateSeconds', {})) if compatible else {}
@@ -187,6 +204,7 @@ class Metrics:
         unassigned = sum(t['state'] != 'closed' and not t.get('assignees') for t in tasks)
         return {'backlogTrend': trend, 'openByStage': dict(stage_counts), 'unassigned': unassigned,
                 'sessions': dict(Counter('unknown' if a['session']['stale'] else a['session'].get('status', 'unknown') for a in agents)),
+                'availability': dict(Counter(a.get('availability', {}).get('state', 'unknown') for a in agents)),
                 'tokens': {'agents': token_rows, 'total': sum(r['tokensUsed'] for r in available) if available else None,
                            'observed': sum(r['observedTokens'] for r in available if r['observedTokens'] is not None) if any(r['observedTokens'] is not None for r in available) else None,
                            'availableSessions': len(available), 'boundSessions': len({a['sessionId'] for a in fleet['agents'] if a['sessionId']})},

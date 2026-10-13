@@ -220,7 +220,7 @@ class Triggers:
             return
         source_ids = [action["sourceAgentId"]] if action.get("sourceAgentId") else []
         if rule["kind"] == "event" and not source_ids and rule.get("deploymentId"):
-            action.update(status="needs-attention", detail="Legacy handoff has no source identity; review and report it again.")
+            action.update(status="needs-attention", detail="Legacy handoff has no source identity. Reconcile existing recipient evidence or repair the original unsent event before considering delivery.")
             return
         reason = contract_problem(fleet, rule) or self.app.deployments.adoption_hold(fleet["id"], source_ids + [a["id"] for a in agents]) or self.hold_reason(agents, monitor, rule["kind"] == "idle")
         if reason:
@@ -257,7 +257,7 @@ class Triggers:
             controls = {c["id"]: c for c in self.app.controls.snapshot(full=True)}
             for action in self.data["actions"]:
                 receipt = controls.get(action.get("controlId"))
-                if receipt and action["status"] != "dismissed":
+                if receipt and action["status"] not in ("dismissed", "reconciled"):
                     status = receipt["status"]
                     action["status"] = "sending" if status == "sending" else "queued" if status == "completed" else "needs-attention"
                     action["detail"] = "; ".join(t.get("detail", t["status"]) for t in receipt["targets"])
@@ -396,6 +396,8 @@ class Triggers:
             problem = contract_problem(fleet, rule)
             if problem:
                 raise ValueError(problem)
+            if rule['kind'] == 'event' and rule.get('deploymentId') and not action.get('sourceAgentId'):
+                raise ValueError('Reconcile the missing source identity before reviewing delivery.')
             agents = self.targets(fleet, rule, action.get("targetAgentId"))
             if len(agents) != 1 or not agents[0]["enabled"] or agents[0]["sessionId"] != action.get("targetSessionId") or agents[0]["directory"] != action.get("targetDirectory"):
                 raise ValueError("The original recipient was excluded or rebound. Review current scope and report a new handoff; this action cannot be redirected.")

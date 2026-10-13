@@ -295,6 +295,27 @@ class ProgressTests(unittest.TestCase):
         usage=session_usage(self.root,[f['agents'][0]['sessionId']])
         self.assertEqual(usage[f['agents'][0]['sessionId']],{})
 
+    def test_blocker_qualification_does_not_count_restricted_or_unclaimed_work_as_execution(self):
+        from studio_metrics import blocker_category
+        base={'state':'opened','stage':'blocked','labels':['AI Blocked']}
+        self.assertEqual(blocker_category(base),'unclaimed')
+        self.assertEqual(blocker_category({**base,'labels':['AI Banned','AI Claimed']}),'restricted')
+        self.assertEqual(blocker_category({**base,'labels':['AI Blocked','Deferred']}),'deferred')
+        self.assertEqual(blocker_category({**base,'labels':['AI Blocked','AI Claimed']}),'execution')
+        self.assertEqual(blocker_category(base,True),'execution')
+        self.assertIsNone(blocker_category({**base,'state':'closed'},True))
+
+    def test_idle_blocked_goal_is_held_and_observation_window_survives_restart(self):
+        app,f=self.app();self.observe(app,f);first=self.now;a=f['agents'][0]
+        app.monitor.update(observedAt=self.now,sessions={a['sessionId']:{'sessionId':a['sessionId'],'status':'idle','goalStatus':'blocked','goalKnown':True,'queueCount':0,'pids':[123],'observedAt':self.now}})
+        d=self.snapshot(app,f)
+        self.assertEqual(d['agents'][0]['availability']['state'],'held')
+        self.assertIn('No current structured blocker reason',d['agents'][0]['availability']['reason'])
+        self.assertTrue(any(a['kind']=='goal-stop' for a in d['attention']))
+        self.assertEqual(d['summary']['closureWindow7d'],first)
+        app.progress=Progress(app,lambda:self.now);self.now+=90;self.observe(app,f,'closed','closed')
+        self.assertEqual(self.snapshot(app,f)['summary']['observationStartedAt'],first)
+
     def test_native_usage_reads_only_linked_sessions_and_handles_older_schema(self):
         import sqlite3
         from studio_runtime import session_usage

@@ -76,3 +76,54 @@ class ReconciliationTests(unittest.TestCase):
         p=app.reconciliation.preview(request);app.reconciliation.apply(p['id'])
         app.triggers.tick(app.store.snapshot(),{})
         self.assertEqual(a['status'],'reconciled')
+
+    def deployed_handoff(self):
+        app, f = self.app(); f = self.save_rules(app, f, [self.rule(f, 'event')])
+        p = app.deployments.preview({'fleetId': f['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'})
+        app.deployments.apply(p['id'])
+        app.triggers.report({'fleetId': f['id'], 'agentId': f['agents'][0]['id'], 'eventName': 'packet-ready',
+                             'eventId': 'original', 'ticket': 'https://gitlab.example/p/-/issues/1',
+                             'artifact': 'Same reviewed packet', 'context': 'Existing bounded handoff'})
+        a = app.triggers.data['actions'][0]
+        app.progress.observe_handoffs([a])
+        p = app.deployments.preview({'fleetId': f['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'reporting'})
+        app.deployments.apply(p['id'])
+        app.triggers.tick(app.store.snapshot(), {})
+        request = {'actionId': a['id'], 'mode': 'refresh-release', 'note': 'Original handoff remains current under the new reporting policy.',
+                   'evidenceUrl': a['ticket'] + '#note_2'}
+        return app, f, a, request
+
+    def test_policy_release_revalidation_preserves_event_and_availability_guards(self):
+        app, f, a, request = self.deployed_handoff()
+        before = deepcopy(a); seen = deepcopy(app.triggers.data['seenEvents'])
+        with patch.object(app.controls, 'send') as send:
+            p = app.reconciliation.preview(request)
+            app.reconciliation.apply(p['id'])
+            app.triggers.tick(app.store.snapshot(), fixtures.DesignTests.monitor(self, f))
+            send.assert_not_called()  # Adoption is still required, despite a successful revalidation.
+        self.assertEqual(a['status'], 'held')
+        for key in ('id', 'eventKey', 'eventId', 'message', 'targetSessionId', 'targetDirectory', 'sourceAgentId'):
+            self.assertEqual(a[key], before[key])
+        self.assertEqual(app.triggers.data['seenEvents'], seen)
+        self.assertEqual(a['releaseRevalidations'][0]['previousDeploymentId'], before['deploymentId'])
+        self.assertNotEqual(a['deploymentId'], before['deploymentId'])
+        self.assertFalse(app.progress.pending_handoffs(f['id'])[0].get('receivedAt'))
+
+    def test_release_revalidation_rejects_any_dispatch_and_changed_custody(self):
+        app, f, a, request = self.deployed_handoff()
+        a['controlId'] = 'unconfirmed'
+        with self.assertRaisesRegex(ValueError, 'proven unsent'):
+            app.reconciliation.preview(request)
+        a.pop('controlId')
+        p = app.reconciliation.preview(request)
+        state = app.store.snapshot();state['fleets'][0]['agents'][0]['notes'] = 'Changed custody';app.store.save(state)
+        with self.assertRaisesRegex(ValueError, 'binding changed'):
+            app.reconciliation.apply(p['id'])
+
+    def test_release_revalidation_refuses_changed_routing_contract(self):
+        app, f, a, request = self.deployed_handoff()
+        state = app.store.snapshot();state['fleets'][0]['triggers'][0]['message'] = 'Different work';app.store.save(state)
+        p = app.deployments.preview({'fleetId': f['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'})
+        app.deployments.apply(p['id'])
+        with self.assertRaisesRegex(ValueError, 'contracts changed'):
+            app.reconciliation.preview(request)

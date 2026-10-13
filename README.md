@@ -257,6 +257,13 @@ are sequenced with that owner. Changed candidates require an applicability
 assessment and refreshed affected evidence. This is an agent workflow policy;
 Studio does not enforce Git locks or assume an external contributor agreed.
 
+For an unsent handoff held by a policy-only release, **Reconcile receipt or
+source → Revalidate an unsent event** offers a separate evidence review. It
+requires unchanged routing contracts and source/recipient bindings, a verified
+original trigger and no prior dispatch attempt. Apply retains the event ID,
+message and audit trail, then returns it to normal delivery with adoption and
+availability checks. It neither creates a receipt nor repeats technical review.
+
 ## Validation
 
 ```powershell

@@ -40,6 +40,13 @@ rule=next(t for t in f['triggers'] if t['sourceRoleId']==writer['roleIds'][0] an
 app.progress.observe_handoffs([{'id':'synthetic-handoff','fleetId':f['id'],'eventId':'packet-101','name':'Submit reviewed packet','createdAt':now-4000,
     'status':'queued','ticket':url,'targetAgentId':integrator['id'],'targetName':integrator['name'],'targetSessionId':integrator['sessionId'],
     'targetDirectory':integrator['directory'],'triggerId':rule['id'],'deploymentId':rid,'sourceAgentId':writer['id'],'detail':'Accepted by queue; agent receipt pending.'}])
+legacy_key=f['id']+':'+writer['id']+':packet-ready:legacy-event'
+app.triggers.data['events'].append({'key':legacy_key,'eventId':'legacy-event','eventName':'packet-ready','agent':writer['name'],'ticket':url,'createdAt':now-300})
+app.triggers.data['actions'].append({'id':'legacy-receipt','fleetId':f['id'],'eventId':'legacy-event','eventKey':legacy_key,'name':'Legacy decision',
+    'createdAt':now-300,'status':'needs-attention','ticket':url,'targetAgentId':integrator['id'],'targetName':integrator['name'],
+    'targetSessionId':integrator['sessionId'],'targetDirectory':integrator['directory'],'triggerId':rule['id'],
+    'deploymentId':rid,'mode':'review','message':'Existing decision','detail':'Source identity missing.'})
+app.triggers.persist()
 issues=[{'iid':101,'title':'Confirm the input contract','state':'opened','labels':['AI Blocked'],'updated_at':'2026-10-13T12:00:00Z','assignees':[]},
         {'iid':102,'title':'Deliver reviewed helper','state':'closed','labels':[],'updated_at':'2026-10-13T12:00:00Z','assignees':[]}]
 (root/'issues.json').write_text(json.dumps(issues),encoding='utf-8')

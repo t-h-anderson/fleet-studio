@@ -119,8 +119,20 @@ class Deployments:
                 spec = validate(spec)
                 updated = apply_spec(fleet, spec)
                 changes = diff(before, spec)
-            elif kind == "deploy":
-                spec = before
+            elif kind in ("deploy", "reporting"):
+                spec = deepcopy(before)
+                if kind == 'reporting':
+                    active_id = self.data['active'].get(fleet['id'])
+                    if not active_id or digest(before) != self.release(active_id)['digest'] or self.binding_digest(fleet) != self.binding_digest(self.release(active_id)['fleet']):
+                        raise ValueError('Deploy or discard unrelated draft changes before adding reporting instructions.')
+                    if any(p['id'] == 'progress-reporting' for p in spec['policies']):
+                        raise ValueError('Progress reporting is already deployed.')
+                    spec['policies'].append({'id':'progress-reporting','name':'Meaningful progress and receipt reports','roles':[],'sources':[],
+                        'text':'After recording substantive evidence in the existing tracker, report task start, meaningful progress, blocker changes, handoff receipt and work completion through fleet_progress.py. Record one brief handoff-received receipt after reading the exact handoff and its evidence; receiving work is separate from technical acceptance, execution and issue closure. Report existing local test results with suite, exact commit and evidence. Reuse identical event IDs for retries. Do not repeat technical review, tests, unchanged updates or historical deliveries to populate metrics. Preserve actual blocker reasons, explicit paused/blocked/limited goals, task and file custody, source/publication restrictions and serialized runtime ownership. Adoption and receipts do not resume stopped work.'})
+                    version = spec['version'].split('.')
+                    if len(version) == 3 and all(v.isdigit() for v in version):
+                        spec['version'] = '.'.join(version[:2] + [str(int(version[2]) + 1)])
+                    spec = validate(spec)
                 from studio_workflow import contract_problem
                 problems = [contract_problem(fleet, t) for t in fleet.get("triggers", []) if t["enabled"] and contract_problem(fleet, t)]
                 problems += [g["summary"] for g in spec["gaps"] if g["blocking"] and g["resolution"] == "open"]
@@ -135,7 +147,7 @@ class Deployments:
                 raise ValueError("Unknown workflow preview action.")
             preview = {"id": uuid.uuid4().hex, "fleetId": fleet["id"], "kind": kind, "revision": state["revision"],
                        "createdAt": time.time(), "spec": spec, "fleet": updated, "changes": changes,
-                       "previousSpec": baseline if kind == "deploy" else before,
+                       "previousSpec": baseline if kind in ("deploy", "reporting") else before,
                        "pendingHandoffs": self.app.progress.pending_handoffs(fleet["id"]) if hasattr(self.app, "progress") else [],
                        "bindingChanges": {"before": self.release(self.data["active"][fleet["id"]])["fleet"]["agents"] if fleet["id"] in self.data["active"] else [], "after": updated["agents"]},
                        "activeAtPreview": self.data["active"].get(fleet["id"]),
@@ -182,7 +194,7 @@ class Deployments:
                 saved = self.app.store.save(state)
                 previous = deepcopy(self.data)
                 self.data["active"][fleet["id"]] = rid
-                self.data["paused"][fleet["id"]] = False
+                self.data["paused"].setdefault(fleet["id"], False)
                 self.data["history"].append({k: release[k] for k in ("id", "fleetId", "version", "createdAt", "digest")})
                 try:
                     self.persist()

@@ -40,6 +40,15 @@ The deployed workflow graph shows role queues and pending receipts. Its detail
 panels link to the corresponding draft editors. Draft changes affect routing
 only after a reviewed deployment.
 
+The headline blocker count covers active execution evidence: a current blocked
+agent report or a claimed task marked blocked. Restricted work (`AI Banned`,
+`Restriction::…`, `Access::AI read-only`), deferred/sign-off holds and unclaimed
+dependency holds are listed separately. These display qualifications do not
+change tracker labels or authorize work. Closure cards show their actual
+observation windows; zero observed closures does not mean zero delivered work.
+Idle sessions with blocked, paused or limited goals remain held. Inspect the
+agent's current blocker report/activity before considering availability.
+
 Monitoring settings default to 30 minutes without a handoff receipt, 60 minutes
 without a meaningful task report, and 90 days of observation history. These are
 attention thresholds: they do not stop agents, reassign work or infer failure.
@@ -114,6 +123,30 @@ delivery process with structured progress reporting.
 3. Deploy an immutable local release.
 4. Review/install agent entry points and review/send adoption notifications.
 5. Agents read their assignments and acknowledge the release at a safe boundary.
+
+If reporting is missing, **Progress → Set up reporting** previews a release that
+adds only the progress-reporting policy (and increments a numeric patch version).
+It refuses unrelated draft changes and preserves roles, bindings, enabled-trigger
+settings and any explicit automation pause. Deployment does not send adoption
+messages or acknowledge on behalf of agents. Existing installed folder entry
+points resolve the new active release at the next safe boundary.
+
+### Reconcile existing handoffs
+
+Open a handoff in Progress and choose **Reconcile receipt or source**. Link the
+actual recipient acknowledgement on the original ticket, optionally selecting
+a public message from the original recipient session. Preview the effect before
+applying. The record is labelled **operator reconciliation**, retaining the
+evidence, previous delivery state and original event identity. It does not claim
+technical acceptance, resume a goal or resend instructions. A missing source is
+recovered only from the exact retained event and its namespaced identity.
+
+Alternatively repair the source on a proven unsent event; it remains awaiting
+delivery review. An active dispatch must settle first. Reconciliation rejects
+stale previews and keeps existing event deduplication. The local authenticated
+API exposes `POST /api/handoffs/reconcile/preview` (`actionId`, `mode`,
+`evidenceUrl`, `note`, optional `receiptMessageId`) and
+`POST /api/handoffs/reconcile/apply` (`previewId`).
 
 Automatic event delivery requires both reporting agent and recipient to have
 acknowledged their current deployed bindings. Timer/idle delivery requires the

@@ -155,7 +155,7 @@ class Progress:
                 prior = db.execute('SELECT data FROM handoffs WHERE fleet=? AND id=?', (fid, aid)).fetchone()
                 old = json.loads(prior['data']) if prior else {}
                 value = {k: action.get(k) for k in ('id', 'name', 'createdAt', 'status', 'detail', 'ticket', 'eventId',
-                         'targetAgentId', 'targetName', 'targetSessionId', 'targetDirectory', 'triggerId', 'sourceAgentId', 'deploymentId', 'reconciliation')}
+                         'targetAgentId', 'targetName', 'targetSessionId', 'targetDirectory', 'triggerId', 'sourceAgentId', 'deploymentId', 'reconciliation', 'releaseRevalidations')}
                 value['receivedAt'] = old.get('receivedAt')
                 for key in ('receiptSource', 'receiptEvidence'):
                     value[key] = old.get(key)

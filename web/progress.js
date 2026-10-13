@@ -92,6 +92,7 @@ async function openProgressDetail(detail,append=false){
   const h=d.handoffs.find(h=>h.id===detail.handoffId);if(!h)return;
   title=h.name;task=h.ticket;
   body='<p>Delivery: <strong>'+esc(h.status)+'</strong> · '+esc(h.detail||'')+'</p><p>Agent receipt: '+(h.receivedAt?esc(new Date(h.receivedAt*1000).toLocaleString()):'Not reported')+'</p><p>Recipient: '+esc(h.targetName)+'</p>'+stamp('Delivery observation',h.observedAt)+evidenceLink(task,'Open tracker task');
+  if(h.releaseRevalidations?.length)body+='<p>Unsent event revalidated across '+h.releaseRevalidations.length+' policy release(s); original event identity retained.</p>'+h.releaseRevalidations.map(r=>evidenceLink(r.evidenceUrl,'Revalidation evidence')).join('');
   if(h.receiptSource)body+='<p>Receipt source: '+esc(h.receiptSource)+'</p>'+evidenceLink(h.receiptEvidence,'Inspect receipt evidence');
   if(h.reconciliation)body+='<p>'+esc(h.reconciliation.note)+'</p><p>Original delivery state: '+esc(h.reconciliation.previousStatus)+'. Technical acceptance remains separate.</p>';
   if(h.awaitingReceipt&&h.status!=='sending')body+='<button class="button small" data-reconcile-handoff="'+h.id+'">Reconcile receipt or source</button>';

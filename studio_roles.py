@@ -123,6 +123,12 @@ def enrich_state(state):
     return changed
 
 
+def runtime_constraint(value):
+    from workflow_spec import RUNTIME, validate_node
+    validate_node(value, RUNTIME, "$.runtime")
+    return deepcopy(value)
+
+
 def clean_design(raw, agents):
     def bounded(value, label, limit, empty=True):
         if not isinstance(value, str) or len(value) > limit or (not empty and not value.strip()):
@@ -155,7 +161,8 @@ def clean_design(raw, agents):
                       "responsibilities": bounded(row.get("responsibilities", ""), "responsibilities", 12000),
                       "authority": bounded(row.get("authority", ""), "authority", 12000),
                       "baseline": baseline, "position": xy,
-                      **{k: deepcopy(row[k]) for k in ("specId", "kind", "sources") if k in row}})
+                      **{k: deepcopy(row[k]) for k in ("specId", "kind", "sources") if k in row},
+                      **({"runtime": runtime_constraint(row["runtime"])} if row.get("runtime") else {})})
     for original, agent in zip(raw.get("agents", []), agents):
         assigned = original.get("roleIds", [])
         if not isinstance(assigned, list) or len(assigned) != len(set(assigned)) or any(rid not in ids for rid in assigned):

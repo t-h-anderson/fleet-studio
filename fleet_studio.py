@@ -23,7 +23,6 @@ import webbrowser
 from studio_entrypoints import EntryPoints
 from studio_deployments import Deployments
 from workflow_spec import export_spec, metadata, validate_node, ID, REFS
-from studio_runtime import observe
 from studio_roles import enrich_state, clean_design, refresh_roles, policy_proposal
 from studio_control import Controls
 from studio_triggers import Triggers, validate_triggers
@@ -33,6 +32,7 @@ from studio_activity import activity
 from studio_progress import Progress, clean_settings
 from studio_reconciliation import Reconciliation
 from studio_goals import Goals
+from studio_agents import Runtimes, clean_binding, clean_hosts, tmux_launch, LOCAL_HOST
 
 APP_ID = "codex-fleet-studio"
 ROOT = Path(__file__).resolve().parent
@@ -69,7 +69,7 @@ def text(value, label, limit=200, required=True):
     return value.strip()
 
 
-def validate_fleets(value):
+def validate_fleets(value, host_ids=()):
     if not isinstance(value, list) or not 1 <= len(value) <= 30:
         raise ValidationError("Keep between 1 and 30 fleets.")
     output, fleet_ids = [], set()
@@ -99,10 +99,15 @@ def validate_fleets(value):
                 raise ValidationError("A session can only appear once in a fleet.")
             if session_id:
                 session_ids.add(session_id)
+            try:
+                backend, host = clean_binding(agent, host_ids)
+            except ValueError as exc:
+                raise ValidationError(str(exc)) from None
             directory = text(agent.get("directory", ""), "Folder", 1000, required=False)
-            if directory and not Path(directory).is_dir():
+            # A remote folder is checked by its own node, not on this computer.
+            if host == LOCAL_HOST and directory and not Path(directory).is_dir():
                 raise ValidationError("Folder does not exist: " + directory)
-            if directory:
+            if host == LOCAL_HOST and directory:
                 directory = str(Path(directory).resolve())
             position = agent.get("position", {})
             coordinates = {}
@@ -115,7 +120,7 @@ def validate_fleets(value):
                 raise ValidationError("Enabled must be true or false.")
             agents.append({
                 "id": aid, "name": name, "sessionId": session_id, "directory": directory,
-                "enabled": agent.get("enabled", True),
+                "enabled": agent.get("enabled", True), "backend": backend, "hostId": host,
                 "role": text(agent.get("role", "Agent"), "Role", 60),
                 "notes": text(agent.get("notes", ""), "Notes", 4000, required=False),
                 "position": coordinates,
@@ -198,6 +203,11 @@ def seed_state(legacy):
     return {"version": 1, "revision": 1, "defaultFleetId": fleet_id, "fleets": [fleet]}
 
 
+def windows_codex(agent):
+    """The PowerShell launcher and fleet.json only cover local Codex agents."""
+    return agent.get("backend", "codex") == "codex" and agent.get("hostId", LOCAL_HOST) == LOCAL_HOST
+
+
 class Store:
     def __init__(self, root):
         self.root = root
@@ -216,7 +226,12 @@ class Store:
             return deepcopy(self.state)
 
     def save(self, payload):
-        fleets = validate_fleets(payload.get("fleets"))
+        try:
+            # Older clients omit hosts; keep the saved remote nodes rather than dropping them.
+            hosts = clean_hosts(payload["hosts"] if "hosts" in payload else self.state.get("hosts", []))
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from None
+        fleets = validate_fleets(payload.get("fleets"), {h["id"] for h in hosts})
         default = identifier(payload.get("defaultFleetId"))
         if default not in {fleet["id"] for fleet in fleets}:
             raise ValidationError("Choose an existing default fleet.")
@@ -224,14 +239,14 @@ class Store:
             if payload.get("revision") != self.state["revision"]:
                 raise ConflictError("The fleet changed in another window. Reload before saving your changes.")
             state = {"version": 1, "revision": self.state["revision"] + 1,
-                     "defaultFleetId": default, "fleets": fleets}
+                     "defaultFleetId": default, "fleets": fleets, "hosts": hosts}
             # Keep the existing one-click launcher aligned with the default fleet.
             default_fleet = next(fleet for fleet in fleets if fleet["id"] == default)
             compatible = {
                 "version": 1, "windowName": default_fleet["windowName"],
                 "codexPath": self.legacy["codexPath"],
                 "agents": [{key: agent[key] for key in ("name", "directory", "sessionId", "enabled")}
-                           for agent in default_fleet["agents"] if agent["sessionId"] and agent["directory"]],
+                           for agent in default_fleet["agents"] if agent["sessionId"] and agent["directory"] and windows_codex(agent)],
             }
             previous_legacy = self.legacy
             atomic_json(self.root / "fleet.json", compatible)
@@ -260,11 +275,13 @@ class Store:
         for agent in selected:
             if not agent["enabled"] or not agent["sessionId"] or not agent["directory"]:
                 raise ValidationError(agent["name"] + " needs an enabled session and folder before launch.")
-            if not Path(agent["directory"]).is_dir():
+            if agent.get("hostId", LOCAL_HOST) == LOCAL_HOST and not Path(agent["directory"]).is_dir():
                 raise ValidationError("Folder no longer exists: " + agent["directory"])
         return {
             "version": 1, "windowName": fleet["windowName"], "codexPath": self.legacy["codexPath"],
             "agents": [{key: agent[key] for key in ("name", "directory", "sessionId", "enabled")} for agent in selected],
+            "bindings": [{key: agent.get(key, default) for key, default in (("name", ""), ("directory", ""), ("sessionId", ""),
+                          ("backend", "codex"), ("hostId", LOCAL_HOST))} for agent in selected],
         }
 
 
@@ -276,6 +293,10 @@ class Application:
         self.instance_id = uuid.uuid4().hex
         self.root_id = hashlib.sha256(str(root).encode()).hexdigest()[:16]
         self.codex_root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+        self.windows = os.name == "nt"
+        self.runtimes = Runtimes(root, self.store.legacy["codexPath"], self.codex_root)
+        self.runtimes.configure(self.store.state.get("hosts", []))
+        self.remote_catalogue_at = 0
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.events = deque(maxlen=120)
@@ -304,9 +325,13 @@ class Application:
     def monitor_loop(self):
         while not self.stop.is_set():
             state = self.store.snapshot()
-            ids = [agent["sessionId"] for fleet in state["fleets"] for agent in fleet["agents"] if agent["sessionId"]]
             try:
-                latest = observe(self.codex_root, ids)
+                self.runtimes.configure(state.get("hosts", []))
+                if self.runtimes.hosts and time.time() - self.remote_catalogue_at > 60:
+                    # Remote catalogues only help link sessions, so refresh them less often.
+                    self.remote_catalogue_at = time.time()
+                    self.runtimes.refresh_remote_catalogue()
+                latest = self.runtimes.observe([agent for fleet in state["fleets"] for agent in fleet["agents"]])
                 with self.lock:
                     previous = self.monitor["sessions"]
                     self.monitor = latest
@@ -356,30 +381,33 @@ class Application:
                 raise ConflictError("A launch is already in progress. Wait for it to finish.")
             job_id = uuid.uuid4().hex
             self.jobs[job_id] = {"id": job_id, "status": "running", "fleetId": fleet["id"],
-                                 "count": len(ids), "startedAt": time.time(), "message": "Opening PowerShell tabs..."}
+                                 "count": len(ids), "startedAt": time.time(), "message": "Opening agent terminals..."}
         threading.Thread(target=self._run_launch, args=(job_id, fleet, config), daemon=True).start()
         return deepcopy(self.jobs[job_id])
 
     def _run_launch(self, job_id, fleet, config):
-        request_root = self.root / ".launches"
-        request_path = request_root / (job_id + ".json")
         try:
-            request_root.mkdir(exist_ok=True)
-            atomic_json(request_path, config)
-            shell = str(Path(os.environ["WINDIR"]) / "System32/WindowsPowerShell/v1.0/powershell.exe")
-            command = [shell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                       str(self.root / "Start-CodexFleet.ps1"), "-ConfigPath", str(request_path)]
-            run = subprocess.run(command, capture_output=True, text=True, timeout=180,
-                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), cwd=self.root)
-            (request_root / (job_id + ".log")).write_text(run.stdout + run.stderr, encoding="utf-8")
-            match = re.search(r"Opened (\d+) tab", run.stdout)
-            opened = int(match.group(1)) if match else 0
-            if run.returncode:
-                status, message = "failed", "Launch failed. Check that Codex and Windows Terminal are installed."
-                detail = (run.stderr or run.stdout).strip()[-1800:]
+            bindings = config.get("bindings", [])
+            legacy = [b for b in bindings if self.windows and windows_codex(b)]
+            opened, failures = 0, []
+            if legacy:
+                names = {b["name"] for b in legacy}
+                opened, failure = self._launch_powershell(job_id, {**{k: v for k, v in config.items() if k != "bindings"},
+                    "agents": [a for a in config["agents"] if a["name"] in names]})
+                failures += [failure] if failure else []
+            for binding in bindings:
+                if binding in legacy:
+                    continue
+                try:
+                    opened += int(self._launch_agent(fleet, binding))
+                except Exception as exc:
+                    failures.append(binding["name"] + ": " + str(exc)[-600:])
+            if failures:
+                status, message = "failed", "Launch failed. Check that the agent CLI and terminal are installed."
+                detail = "\n".join(failures)[-1800:]
             else:
                 status = "completed"
-                message = str(opened) + " tab(s) opened. " + str(len(config["agents"]) - opened) + " already open."
+                message = str(opened) + " tab(s) opened. " + str(len(bindings) - opened) + " already open."
                 detail = message
             with self.lock:
                 self.jobs[job_id].update(status=status, message=message, detail=detail, finishedAt=time.time())
@@ -389,6 +417,42 @@ class Application:
             with self.lock:
                 self.jobs[job_id].update(status="failed", message=str(exc), finishedAt=time.time())
             self.event("Launch needs attention", str(exc), fleet["id"])
+
+    def _launch_powershell(self, job_id, config):
+        """Existing Windows Terminal launcher for local Codex agents, with its mutex and lock checks."""
+        request_root = self.root / ".launches"
+        request_path = request_root / (job_id + ".json")
+        request_root.mkdir(exist_ok=True)
+        atomic_json(request_path, config)
+        shell = str(Path(os.environ["WINDIR"]) / "System32/WindowsPowerShell/v1.0/powershell.exe")
+        command = [shell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                   str(ROOT / "Start-CodexFleet.ps1"), "-ConfigPath", str(request_path)]
+        # The scripts ship with Studio; only the request snapshot lives in the data root.
+        run = subprocess.run(command, capture_output=True, text=True, timeout=180,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), cwd=ROOT)
+        (request_root / (job_id + ".log")).write_text(run.stdout + run.stderr, encoding="utf-8")
+        match = re.search(r"Opened (\d+) tab", run.stdout)
+        failure = (run.stderr or run.stdout).strip()[-1800:] if run.returncode else ""
+        return (int(match.group(1)) if match else 0), failure
+
+    def _launch_agent(self, fleet, binding):
+        """Open one agent interactively. Returns False when it is already open."""
+        session = self.status()["sessions"].get(binding["sessionId"], {})
+        if session.get("pids"):
+            return False
+        backend = self.runtimes.backend(binding["backend"], binding["hostId"])
+        if binding["hostId"] != LOCAL_HOST:
+            result = backend.host.call("/node/launch", {"backend": binding["backend"], "sessionId": binding["sessionId"],
+                                                        "directory": binding["directory"], "name": binding["name"],
+                                                        "window": fleet["windowName"]})
+            return bool(result.get("opened"))
+        command = backend.resume_command(binding["sessionId"], binding["directory"])
+        if self.windows:
+            subprocess.run(["wt.exe", "-w", fleet["windowName"], "new-tab", "--title", binding["name"],
+                            "-d", binding["directory"], *command], check=True, timeout=60,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return True
+        return tmux_launch(fleet["windowName"], binding, command)
 
 
 class Server(ThreadingHTTPServer):
@@ -431,7 +495,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, {"appId": APP_ID, "rootId": app.root_id, "instanceId": app.instance_id})
             if path == "/api/bootstrap":
                 return self.json(200, {"token": app.token, "state": app.store.snapshot(),
-                                      "status": app.status(), "sessions": app.catalogue()})
+                                      "status": app.status(), "sessions": app.catalogue(),
+                                      "runtimes": app.runtimes.describe()})
             if path == "/api/status":
                 return self.json(200, app.status())
             if path == "/api/activity":
@@ -441,8 +506,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not agent:
                     return self.json(404, {"error": "Agent not found in this fleet."})
                 if not agent["sessionId"]:
-                    return self.json(200, {"messages": [], "error": "Link a Codex session to see this agent's activity."})
-                return self.json(200, activity(app.codex_root, agent["sessionId"], app.activity_fixture))
+                    return self.json(200, {"messages": [], "error": "Link an agent session to see this agent's activity."})
+                if app.activity_fixture:
+                    return self.json(200, activity(app.codex_root, agent["sessionId"], app.activity_fixture))
+                try:
+                    return self.json(200, app.runtimes.for_agent(agent).activity(agent["sessionId"]))
+                except (RuntimeError, TimeoutError) as exc:
+                    return self.json(200, {"messages": [], "error": str(exc)})
             if path in ("/api/progress", "/api/progress/history"):
                 query = parse_qs(urlsplit(self.path).query)
                 fid = query.get("fleetId", [None])[0]

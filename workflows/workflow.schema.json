@@ -108,6 +108,36 @@
             },
             "maxItems": 300,
             "uniqueItems": true
+          },
+          "runtime": {
+            "type": "object",
+            "properties": {
+              "backends": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "codex",
+                    "claude-code"
+                  ]
+                },
+                "maxItems": 2,
+                "uniqueItems": true
+              },
+              "location": {
+                "type": "string",
+                "enum": [
+                  "any",
+                  "local",
+                  "remote"
+                ]
+              }
+            },
+            "required": [
+              "backends",
+              "location"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [

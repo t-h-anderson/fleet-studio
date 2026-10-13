@@ -205,3 +205,109 @@ class ProgressTests(unittest.TestCase):
         app.triggers.persist()
         app.triggers.data['actions']=[];app.triggers.persist()
         self.assertEqual(len(app.progress.pending_handoffs(f['id'])),110)
+
+    def test_state_time_accumulates_revisits_but_excludes_gaps_and_transition_intervals(self):
+        app,f=self.app();self.observe(app,f)
+        self.now+=90;self.observe(app,f)
+        self.now+=90;self.observe(app,f,'blocked')
+        self.now+=90;self.observe(app,f,'blocked')
+        self.now+=90;self.observe(app,f)
+        self.now+=90;self.observe(app,f)
+        self.now+=600;self.observe(app,f)
+        task=self.snapshot(app,f)['tasks'][0]
+        self.assertEqual(task['stateSeconds'],{'active':180,'blocked':90})
+        self.assertTrue(task['observationGap'])
+        app.progress=Progress(app,lambda:self.now)
+        self.assertEqual(self.snapshot(app,f)['tasks'][0]['stateSeconds'],task['stateSeconds'])
+
+    def test_backlog_trend_is_hourly_and_marks_incomplete_snapshots(self):
+        app,f=self.app();self.observe(app,f)
+        self.now+=5;self.observe(app,f,'blocked',partial=True)
+        points=self.snapshot(app,f)['metrics']['backlogTrend']
+        self.assertEqual(len(points),1)
+        self.assertEqual(points[0]['open'],1);self.assertTrue(points[0]['partial'])
+        self.now+=3600;self.observe(app,f,'closed','closed')
+        self.assertEqual([p['open'] for p in self.snapshot(app,f)['metrics']['backlogTrend']],[1,0])
+        state=app.store.snapshot();state['fleets'][0]['backlog']['projectUrl']='https://gitlab.example/other/repo';app.store.save(state)
+        self.assertEqual(self.snapshot(app,f)['metrics']['backlogTrend'],[])
+
+    def test_tokens_use_baselines_deduplicate_sessions_and_detect_resets(self):
+        app,f=self.app();a=f['agents'][0]
+        duplicate=deepcopy(f);duplicate['agents'][1]['sessionId']=a['sessionId']
+        def observe(total):
+            monitor={'observedAt':self.now,'sessions':{a['sessionId']:{'sessionId':a['sessionId'],'status':'working','observedAt':self.now,'usage':{'tokensUsed':total}}}}
+            app.monitor.update(monitor)
+            app.progress.metrics.observe_tokens([duplicate],monitor)
+        observe(1000)
+        self.assertEqual(self.snapshot(app,f)['metrics']['tokens']['observed'],0)
+        self.now+=10;observe(1500);observe(1500)
+        self.now+=10;observe(50)
+        self.now+=10;observe(75)
+        app.progress=Progress(app,lambda:self.now)
+        tokens=self.snapshot(app,f)['metrics']['tokens']
+        self.assertEqual(tokens['observed'],525)
+        self.assertEqual(tokens['total'],75)
+        self.assertEqual(tokens['agents'][0]['resets'],1)
+        self.now+=30
+        self.assertIsNone(self.snapshot(app,f)['metrics']['tokens']['total'])
+
+    def test_test_results_preserve_blockers_and_require_specific_evidence(self):
+        app,f=self.app()
+        app.progress.report({**self.payload,'kind':'blocked','reason':'Host unavailable','nextAction':'Owner recovers host'})
+        result={**self.payload,'eventId':'unit-run','kind':'test-result','suite':'Unit checks','testStatus':'passed',
+                'revision':'a'*40,'passed':12,'failed':0,'durationSeconds':2.5}
+        with patch.object(app.controls,'send') as send:
+            self.assertFalse(app.progress.report(result)['duplicate'])
+            self.assertTrue(app.progress.report(result)['duplicate'])
+            send.assert_not_called()
+        d=self.snapshot(app,f)
+        self.assertEqual(d['metrics']['tests'][0]['passed'],12)
+        self.assertEqual(d['agents'][0]['reports'][0]['kind'],'blocked')
+        for change in ({'revision':'main'},{'failed':1},{'passed':True},{'durationSeconds':float('nan')}):
+            with self.assertRaises(ValueError):app.progress.report({**result,**change,'eventId':'bad'})
+        with closing(app.progress.connect()) as db,db:app.progress.metrics.prune(db,f['id'],self.now+1)
+        self.assertEqual(self.snapshot(app,f)['metrics']['tests'],[])
+        self.assertTrue(app.progress.report(result)['duplicate'])
+
+    def test_ci_no_test_report_is_not_a_pass_and_outage_retains_last_snapshot(self):
+        app,f=self.app();metrics=app.progress.metrics
+        item=metrics.ci_snapshot(f);metrics.ci[f['id']]=item
+        responses=[[{'id':4,'status':'success','sha':'a'*40,'ref':'main','web_url':'https://gitlab.example/pipelines/4'}],
+                   {'duration':5,'queued_duration':3},{'total':{'total_count':0}}]
+        with patch('studio_backlog.gitlab_get',side_effect=responses):metrics._refresh_ci(f['id'],item)
+        self.assertEqual(item['pipelines'][0]['status'],'success')
+        self.assertIsNone(item['testSummary'])
+        self.assertIn('No published test report',item['testNotice'])
+        responses[2]={'total':{'total_count':10,'success_count':9,'failed_count':1,'skipped_count':0,'error_count':0,'time':5}}
+        with patch('studio_backlog.gitlab_get',side_effect=responses):metrics._refresh_ci(f['id'],item)
+        self.assertEqual(item['testSummary']['failed_count'],1)
+        self.assertEqual(item['pipelines'][0]['queued_duration'],3)
+        with patch('studio_backlog.gitlab_get',side_effect=ValueError('unavailable')):metrics._refresh_ci(f['id'],item)
+        self.assertEqual(item['pipelines'][0]['id'],4)
+        self.assertTrue(metrics.ci_snapshot(f)['stale'])
+        app.progress=Progress(app,lambda:self.now)
+        self.assertEqual(app.progress.metrics.ci_snapshot(f)['pipelines'][0]['id'],4)
+
+    def test_missing_usage_is_unknown_not_zero(self):
+        app,f=self.app()
+        self.assertIsNone(self.snapshot(app,f)['metrics']['tokens']['total'])
+        from studio_runtime import session_usage
+        usage=session_usage(self.root,[f['agents'][0]['sessionId']])
+        self.assertEqual(usage[f['agents'][0]['sessionId']],{})
+
+    def test_native_usage_reads_only_linked_sessions_and_handles_older_schema(self):
+        import sqlite3
+        from studio_runtime import session_usage
+        with closing(sqlite3.connect(self.root/'state_5.sqlite')) as db, db:
+            db.execute('CREATE TABLE threads (id TEXT, tokens_used INTEGER, model TEXT)')
+            db.executemany('INSERT INTO threads VALUES(?,?,?)',[('linked',123456,'test-model'),('unlinked',999999,'other')])
+        with closing(sqlite3.connect(self.root/'goals_1.sqlite')) as db, db:
+            db.execute('CREATE TABLE thread_goals (thread_id TEXT, tokens_used INTEGER, token_budget INTEGER)')
+            db.execute('INSERT INTO thread_goals VALUES(?,?,?)',('linked',100,200))
+        result=session_usage(self.root,['linked','missing'])
+        self.assertNotIn('unlinked',result)
+        self.assertEqual(result['linked'],{'tokensUsed':123456,'model':'test-model','goalTokens':100,'goalBudget':200})
+        self.assertEqual(result['missing'],{})
+        with closing(sqlite3.connect(self.root/'state_5.sqlite')) as db, db:
+            db.execute('ALTER TABLE threads DROP COLUMN tokens_used')
+        self.assertIsNone(session_usage(self.root,['linked'])['linked']['tokensUsed'])

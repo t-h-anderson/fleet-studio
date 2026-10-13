@@ -47,6 +47,54 @@ Durations begin with observations. Initial stage-entry times and transitions
 during observation gaps remain unknown. Closure counts cover observed tracker
 transitions, not an imported historical total or a claim of technical acceptance.
 
+### Monitoring
+
+Open **Progress → Monitoring** for open tickets by workflow state, hourly backlog
+samples for the last 30 days, unassigned tickets, session availability, the oldest
+pending handoff receipt, token counters and test evidence. Select a ticket in
+**Tasks** for its accumulated observed time in each state, including revisits.
+Only consecutive matching observations up to 180 seconds apart contribute to
+state time. Initial history, transition intervals and collection gaps are
+excluded; these durations are not logged work effort. Timing starts afresh when
+the project or deployed workflow changes. No historical state transitions are
+inferred from a ticket's `updated_at` timestamp.
+
+Native session token counters are read from Codex metadata without reading
+transcripts. Session totals include earlier work; the separately displayed
+observed usage counts positive increments since the first sample. Counter resets
+are flagged and shared sessions counted once. Increments across downtime are
+included when the counter remains monotonic. Unavailable/stale sessions are
+excluded from totals with coverage shown. Goal usage/budgets come from the native
+goal record. These are token counts, not billing costs or ticket attribution.
+
+GitLab CI refreshes in the background about every 90 seconds, showing the latest
+10 project pipelines across branches, their commit, ref and status, plus duration,
+queue time and published test totals for the latest pipeline when available.
+Missing reports and failed reads are labelled explicitly. A successful pipeline
+does not imply tests were published or establish task acceptance.
+
+Agents can report existing local test evidence without running tests or changing
+a task's reported work/blocker state:
+
+```powershell
+python fleet_progress.py --fleet <fleet-id> --agent <agent-id> --release <release-id> --id <stable-test-run-id> --kind test-result --task <ticket-URL> --evidence <evidence-URL> --suite "Focused unit tests" --test-status passed --revision <full-Git-commit-SHA> --passed 12 --failed 0 --skipped 1 --duration-seconds 2.5
+```
+
+Test statuses are `passed`, `failed`, `blocked`, `running` and `skipped`. Counts
+and duration are optional, never assumed to be zero. Use a new event ID for each
+new run/status report; identical retries reuse the original ID. Evidence must
+state the test scope and any uncommitted changes relative to the commit. The
+latest result per suite, reporter, ticket and commit is shown (up to 100 from the
+latest 1,000 retained reports). Earlier commits remain identified. Installing the
+application does not deploy new reporting policies or notify agents. Add the
+`progress-reporting` policy through a reviewed workflow deployment when ready to
+adopt reporting instructions; existing runtime custody and test stops still apply.
+
+Metrics are returned in the `metrics` member of `GET /api/progress`, with per-task
+`stateSeconds` and `timingStartedAt`. They share `.runtime/progress.sqlite` and its
+configured history retention. See [MONITORING.md](MONITORING.md) for definitions
+and the next useful measurements.
+
 Connect a project through **Backlog → Project & links**. GitLab refreshes about
 every 90 seconds in the server, including while the browser is closed. Session
 observations and delivery checks run approximately every five seconds. The

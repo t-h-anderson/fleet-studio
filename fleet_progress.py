@@ -30,6 +30,9 @@ def report_progress(args, root=None):
                'releaseId': args.release, 'eventId': args.id, 'kind': args.kind, 'taskUrl': args.task,
                'evidenceUrl': args.evidence, 'summary': args.summary, 'reason': args.reason,
                'nextAction': args.next_action, 'handoffId': args.handoff, 'dependsOn': args.depends_on}
+    if args.kind == 'test-result':
+        payload.update(testStatus=args.test_status, suite=args.suite, revision=args.revision,
+                       durationSeconds=args.duration_seconds, passed=args.passed, failed=args.failed, skipped=args.skipped)
     request = Request(url + '/api/progress/report', data=json.dumps(payload).encode('utf-8'),
                       headers={'Content-Type': 'application/json', 'X-Fleet-Token': bootstrap['token']})
     with urlopen(request, timeout=30) as response:
@@ -44,6 +47,12 @@ def main():
     for name in ('summary', 'reason', 'next-action', 'handoff'):
         parser.add_argument('--' + name, default='')
     parser.add_argument('--depends-on', action='append', default=[])
+    parser.add_argument('--test-status', choices=('passed', 'failed', 'blocked', 'running', 'skipped'))
+    parser.add_argument('--suite')
+    parser.add_argument('--revision', help='Full Git commit SHA tested; describe any working-tree changes in the evidence.')
+    parser.add_argument('--duration-seconds', type=float)
+    for name in ('passed', 'failed', 'skipped'):
+        parser.add_argument('--' + name, type=int)
     parser.add_argument('--data-root', type=Path, help='Studio data directory; defaults to the application folder.')
     args = parser.parse_args()
     try:

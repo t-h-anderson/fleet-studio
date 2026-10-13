@@ -445,7 +445,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, app.backlog.snapshot(fleet_id))
             if path == "/api/sessions":
                 return self.json(200, {"sessions": app.catalogue()})
-            if path in ("/", "/app.js", "/roles.js", "/layout.js", "/backlog.js", "/activity.js", "/workflow.js", "/progress.js", "/app.css", "/icon.svg"):
+            if path in ("/", "/app.js", "/roles.js", "/layout.js", "/backlog.js", "/activity.js", "/workflow.js", "/progress.js", "/metrics.js", "/app.css", "/icon.svg"):
                 name = "index.html" if path == "/" else path[1:]
                 mime = {".html": "text/html", ".js": "application/javascript",
                         ".css": "text/css", ".svg": "image/svg+xml"}[Path(name).suffix]

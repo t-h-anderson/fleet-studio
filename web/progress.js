@@ -57,8 +57,9 @@ function renderProgress(){
  if(progressTab==='handoffs')body='<div class="table-wrap"><table><thead><tr><th>HANDOFF</th><th>RECIPIENT</th><th>DELIVERY</th><th>AGENT RECEIPT</th></tr></thead><tbody>'+d.handoffs.filter(match).map(handoffProgress).join('')+'</tbody></table></div>';
  if(progressTab==='tasks')body='<div class="table-wrap"><table><thead><tr><th>TASK</th><th>TRACKER STAGE</th><th>OBSERVED TIME</th><th>TRACKER ASSIGNEES</th></tr></thead><tbody>'+d.tasks.filter(match).map(taskProgress).join('')+'</tbody></table></div>';
  if(progressTab==='workflow')body=(d.deployment.active?deployedGraph(d):'<p>Deploy a reviewed workflow to inspect its live queues.</p>');
+ if(progressTab==='monitoring')body=metricsMarkup(d);
  const focus=document.activeElement?.id;
- $('content').innerHTML=progressRelease(d)+(notice?'<div class="backlog-notice">'+esc(notice)+'</div>':'')+'<div class="progress-metrics">'+[['Open tracker tasks',s.openTasks],['Blocked in tracker',s.blockedTasks],['Awaiting handoff receipt',s.pendingHandoffs],['Observed closures · 24h / 7d',s.completed24h+' / '+s.completed7d]].map(([label,value])=>'<div><span>'+label+'</span><strong>'+value+'</strong></div>').join('')+'</div><div class="progress-tabs" role="group" aria-label="Progress views">'+[['attention','Needs attention ('+d.attention.length+')'],['agents','Agents'],['handoffs','Handoffs'],['tasks','Tasks'],['workflow','Deployed workflow']].map(([id,label])=>'<button class="button small '+(progressTab===id?'primary':'')+'" data-progress-tab="'+id+'">'+label+'</button>').join('')+'</div>'+body+'<p class="progress-footnote">'+esc(d.historyNotice)+'</p>'+stamp('Tracker',d.tracker.observedAt);
+ $('content').innerHTML=progressRelease(d)+(notice?'<div class="backlog-notice">'+esc(notice)+'</div>':'')+'<div class="progress-metrics">'+[['Open tracker tasks',d.tracker.observedAt?s.openTasks:'Unknown'],['Blocked in tracker',d.tracker.observedAt?s.blockedTasks:'Unknown'],['Awaiting handoff receipt',s.pendingHandoffs],['Observed closures · 24h / 7d',s.completed24h+' / '+s.completed7d]].map(([label,value])=>'<div><span>'+label+'</span><strong>'+value+'</strong></div>').join('')+'</div><div class="progress-tabs" role="group" aria-label="Progress views">'+[['attention','Needs attention ('+d.attention.length+')'],['agents','Agents'],['handoffs','Handoffs'],['tasks','Tasks'],['monitoring','Monitoring'],['workflow','Deployed workflow']].map(([id,label])=>'<button class="button small '+(progressTab===id?'primary':'')+'" data-progress-tab="'+id+'">'+label+'</button>').join('')+'</div>'+body+'<p class="progress-footnote">'+esc(d.historyNotice)+'</p>'+stamp('Tracker',d.tracker.observedAt);
  $('visible-count').textContent=d.attention.length;
  if(focus)$(focus)?.focus({preventScroll:true});
 }
@@ -96,7 +97,8 @@ async function openProgressDetail(detail,append=false){
  if(detail.taskUrl){
   const t=d.tasks.find(t=>t.url===detail.taskUrl);title=t?'#'+t.iid+' '+t.title:'Reported task';
   body=(t?'<p>Tracker state: <strong>'+esc(t.state)+' / '+esc(d.stages.find(s=>s.id===t.stage)?.name||t.stage)+'</strong></p><p>Tracker assignees: '+esc(t.assignees.join(', ')||'Unassigned')+'</p><p>Observed in stage: '+elapsed(t.stageObservedAt)+(t.initialStageUnknown?' (entry time unknown)':'')+(t.observationGap?' · Observation gap':'')+'</p>'+stamp('Tracker',t.observedAt):'<p>No matching tracker observation.</p>')+evidenceLink(detail.taskUrl,'Open tracker task')+d.agents.flatMap(a=>a.reports).filter(r=>r.taskUrl===detail.taskUrl).map(reportMarkup).join('');
-  if(t)body+='<div class="progress-actions">'+t.roleIds.map(id=>'<button class="button small" data-progress-role="'+id+'">Inspect responsible role</button>').join('')+'</div>';
+  if(t)body+=stateTimingMarkup(t,d)+'<div class="progress-actions">'+t.roleIds.map(id=>'<button class="button small" data-progress-role="'+id+'">Inspect responsible role</button>').join('')+'</div>';
+  if(d.metrics)body+='<h3>Local test evidence</h3>'+testResultsMarkup(d.metrics.tests.filter(r=>r.taskUrl===detail.taskUrl));
  }
  if(detail.roleId){
   const r=d.roles.find(r=>r.id===detail.roleId);if(!r)return;

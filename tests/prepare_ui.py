@@ -34,6 +34,8 @@ payload={'fleetId':f['id'],'agentId':writer['id'],'sessionId':writer['sessionId'
          'taskUrl':url,'evidenceUrl':url+'#note_1','summary':'Review input contract <script>window.injected=true</script>',
          'reason':'Waiting for reviewed input','nextAction':'Coordinator supplies the input contract'}
 app.progress.report(payload)
+app.progress.report({**payload,'eventId':'test-101','kind':'test-result','suite':'Contract checks',
+                     'testStatus':'passed','revision':'a'*40,'passed':12,'failed':0,'skipped':1,'durationSeconds':2.5})
 rule=next(t for t in f['triggers'] if t['sourceRoleId']==writer['roleIds'][0] and t['targetRoleId']==integrator['roleIds'][0])
 app.progress.observe_handoffs([{'id':'synthetic-handoff','fleetId':f['id'],'eventId':'packet-101','name':'Submit reviewed packet','createdAt':now-4000,
     'status':'queued','ticket':url,'targetAgentId':integrator['id'],'targetName':integrator['name'],'targetSessionId':integrator['sessionId'],

@@ -99,6 +99,7 @@ def observe(root, session_ids):
         recent = []
         errors.append("Session catalogue: " + str(exc))
     known = {row["id"]: row for row in recent}
+    usage = session_usage(root, session_ids)
     history = goals = queued = None
     try:
         try:
@@ -118,6 +119,7 @@ def observe(root, session_ids):
                 "sessionId": session_id, "status": "unknown", "pids": [],
                 "observedAt": time.time(), "session": known.get(session_id),
                 "turnStatus": None, "goalStatus": None, "queueCount": None, "goalKnown": False,
+                "usage": usage.get(session_id, {}),
             }
             try:
                 item["pids"] = writer_owners(root / "thread-writer-locks" / (session_id + ".lock"))
@@ -157,3 +159,29 @@ def observe(root, session_ids):
         if queued:
             queued.close()
     return {"observedAt": time.time(), "sessions": output, "catalogue": recent, "errors": errors}
+
+
+def session_usage(root, session_ids):
+    """Read numeric native metadata for the exact linked sessions, including archived ones."""
+    result = {sid: {} for sid in set(session_ids)}
+    try:
+        with closing(connect(root, 'state_5.sqlite')) as db:
+            columns = {r[1] for r in db.execute('PRAGMA table_info(threads)')}
+            fields = [key for key in ('tokens_used', 'model') if key in columns]
+            if fields:
+                for sid in result:
+                    row = db.execute('SELECT ' + ','.join(fields) + ' FROM threads WHERE id=?', (sid,)).fetchone()
+                    if row:
+                        data = dict(row)
+                        result[sid].update(tokensUsed=data.get('tokens_used'), model=data.get('model'))
+    except (OSError, sqlite3.Error):
+        pass
+    try:
+        with closing(connect(root, 'goals_1.sqlite')) as db:
+            for sid in result:
+                row = db.execute('SELECT tokens_used,token_budget FROM thread_goals WHERE thread_id=?', (sid,)).fetchone()
+                if row:
+                    result[sid].update(goalTokens=row['tokens_used'], goalBudget=row['token_budget'])
+    except (OSError, sqlite3.Error):
+        pass
+    return result

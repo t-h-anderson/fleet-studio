@@ -9,7 +9,7 @@ import threading
 import time
 from urllib.parse import urlsplit, urlunsplit
 
-KINDS = ('task-started', 'progress-updated', 'blocked', 'unblocked', 'handoff-received', 'work-finished')
+KINDS = ('task-started', 'progress-updated', 'blocked', 'unblocked', 'handoff-received', 'work-finished', 'test-result')
 DEFAULTS = {'handoffMinutes': 30, 'quietMinutes': 60, 'retentionDays': 90}
 
 
@@ -80,6 +80,8 @@ class Progress:
                     fleet TEXT NOT NULL, agent TEXT NOT NULL, url TEXT NOT NULL, data TEXT NOT NULL,
                     PRIMARY KEY(fleet,agent,url));
             ''')
+        from studio_metrics import Metrics
+        self.metrics = Metrics(self)
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)
@@ -123,6 +125,8 @@ class Progress:
                 row = {**issue, 'sourceKey': source, 'releaseId': rid, 'observedAt': now,
                        'stageObservedAt': entered, 'initialStageUnknown': prior.get('initialStageUnknown', True) if prior and same_projection and not changed else not bool(changed),
                        'observationGap': gap or bool(prior and prior.get('observationGap') and not changed)}
+                from studio_metrics import state_timings
+                state_timings(prior, row, gap or bool(prior and now - prior['observedAt'] > 180))
                 if changed:
                     event = {'taskUrl': url, 'from': prior['stage'], 'to': issue['stage'], 'title': issue['title'],
                              'source': 'tracker', 'sourceKey': source, 'observationGap': gap,
@@ -136,6 +140,7 @@ class Progress:
                     db.execute('DELETE FROM tasks WHERE fleet=? AND url=?', (fid, url))
             payload = {k: snapshot.get(k) for k in ('items', 'observedAt', 'partial')}
             db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?,?,?)', (fid, source, now, json.dumps(payload)))
+            self.metrics.backlog_sample(db, runtime, snapshot, source, rid)
 
     def observe_handoffs(self, actions):
         with self.lock, closing(self.connect()) as db, db:
@@ -206,6 +211,9 @@ class Progress:
                     'source': 'agent-report'}
             if data['dependsOn'] is None:
                 raise ValueError('Supply at most 20 dependency links.')
+            if kind == 'test-result':
+                from studio_metrics import clean_test
+                data.update(clean_test(payload))
             digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
             with self.lock, closing(self.connect()) as db, db:
                 prior = db.execute('SELECT digest FROM identities WHERE fleet=? AND agent=? AND event=?', (fid, aid, event)).fetchone()
@@ -222,6 +230,8 @@ class Progress:
                         raise ValueError('Receipt must match this agent, task and original handoff binding.')
                     handoff['receivedAt'] = now
                     db.execute('UPDATE handoffs SET data=? WHERE fleet=? AND id=?', (json.dumps(handoff), fid, data['handoffId']))
+                elif kind == 'test-result':
+                    db.execute('INSERT INTO test_runs VALUES(?,?,?,?,?)', (fid, aid, event, now, json.dumps(data)))
                 else:
                     prior_row = db.execute('SELECT data FROM agent_tasks WHERE fleet=? AND agent=? AND url=?', (fid, aid, data['taskUrl'])).fetchone()
                     previous = json.loads(prior_row['data']) if prior_row else {}
@@ -254,15 +264,18 @@ class Progress:
     def tick(self, state, monitor):
         self.observe_handoffs(monitor.get('automation', {}).get('actions', []))
         self.observe_sessions(state['fleets'], monitor)
+        self.metrics.observe_tokens(state['fleets'], monitor)
         for fleet in state['fleets']:
             # Backlog refresh is asynchronous and coalesces concurrent browser requests.
             self.app.backlog.snapshot(fleet['id'])
+            self.metrics.ci_snapshot(fleet)
         now = self.clock()
         if now - self.last_prune >= 3600:
             with self.lock, closing(self.connect()) as db, db:
                 for f in state['fleets']:
                     cutoff = now - clean_settings(f.get('progress'))['retentionDays'] * 86400
                     db.execute('DELETE FROM observations WHERE fleet=? AND at<?', (f['id'], cutoff))
+                    self.metrics.prune(db, f['id'], cutoff)
                     for row in db.execute('SELECT * FROM handoffs WHERE fleet=?', (f['id'],)).fetchall():
                         h = json.loads(row['data'])
                         if (h.get('receivedAt') or h.get('status') == 'dismissed') and h['createdAt'] < cutoff:
@@ -301,6 +314,7 @@ class Progress:
             if t.get('releaseId') != rid:
                 t['stageObservedAt'] = None
                 t['initialStageUnknown'] = True
+                t['stateSeconds'] = {}
             t['source'] = 'tracker'
         task_by_url = {task_key(t['url']): t for t in tasks}
         agents, attention = [], []
@@ -342,7 +356,8 @@ class Progress:
             role_tasks = [t for t in tasks if role['id'] in t.get('roleIds',[]) and t['state'] != 'closed']
             ids = {a['id'] for a in agents if role['id'] in a['roleIds']}
             roles.append({**role,'queueCount':len(role_tasks),'waitingCount':sum(h['awaitingReceipt'] and h['targetAgentId'] in ids for h in handoffs)})
-        return {'fleetId':fleet_id,'observedAt':now,'observationError':self.observation_error,'settings':settings,'agents':agents,'tasks':tasks,'roles':roles,
+        metrics = self.metrics.snapshot(fleet, tasks, agents, handoffs, source, rid)
+        return {'fleetId':fleet_id,'observedAt':now,'observationError':self.observation_error,'settings':settings,'agents':agents,'tasks':tasks,'roles':roles,'metrics':metrics,
                 'roleLinks':runtime.get('roleLinks',[]),'handoffs':sorted(handoffs,key=lambda h:h['createdAt'],reverse=True),
                 'attention':sorted(attention,key=lambda a:a.get('at') or now),'deployment':{k:deployment[k] for k in ('active','draftChanged','paused','enabledTriggers','adoption','migrationComplete')},
                 'tracker':{'url':config['projectUrl'],'observedAt':backlog.get('observedAt'),'stale':backlog.get('stale',False),

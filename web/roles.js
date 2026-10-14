@@ -174,8 +174,8 @@ async function showControl(action,agentIds,message='',prepared=null){
  try{
   controlPreview=prepared||await api('/api/control/preview',{fleetId:activeId,agentIds,action,message});
   $('control-title').textContent=action==='rename'?'Rename Codex conversation':action==='assignment'?'Send role assignments':'Send instruction';
-  $('control-preview').innerHTML=controlPreview.targets.map(t=>'<div><h3>'+esc(t.name)+'</h3><p class="field-hint">'+esc(t.sessionId)+'</p><pre>'+esc(t.text)+'</pre></div>').join('');
-  $('send-control').textContent=action==='rename'?'Rename conversation':'Queue instruction'+(agentIds.length>1?'s':'');
+  $('control-preview').innerHTML=controlPreview.targets.map(t=>'<div><h3>'+esc(t.name)+'</h3><p class="field-hint">'+esc(t.sessionId)+'</p><p>'+esc(t.effect||'')+'</p><pre>'+esc(t.text)+'</pre></div>').join('');
+  $('send-control').textContent=action==='rename'?'Rename conversation':'Apply reviewed action';
   $('send-control').disabled=false;$('control-dialog').showModal();
  }catch(e){toast(e.message,true);}
 }

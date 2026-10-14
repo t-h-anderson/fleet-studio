@@ -55,7 +55,7 @@ class ClaudeBackendTests(unittest.TestCase):
         state = reader.refresh()
         self.assertEqual(state["title"], "Generated title")
         self.assertEqual([m["text"] for m in state["messages"]], ["Implement the packet", "Working on it"])
-        self.assertEqual(state["tokensUsed"], 15)
+        self.assertEqual(state["tokensUsed"], 1015)
         self.assertEqual(state["stopReason"], "tool_use")
         with path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"type": "custom-title", "customTitle": "Writer"}) + "\n")
@@ -64,7 +64,7 @@ class ClaudeBackendTests(unittest.TestCase):
         state = reader.refresh()
         self.assertEqual(state["title"], "Writer")
         self.assertEqual(state["messages"][-1]["kind"], "summary")
-        self.assertEqual(state["tokensUsed"], 30)
+        self.assertEqual(state["tokensUsed"], 2030)
         self.assertNotIn("private", json.dumps(state))
         self.assertNotIn("tool output", json.dumps(state))
 
@@ -81,21 +81,23 @@ class ClaudeBackendTests(unittest.TestCase):
         with patch("studio_agents.claude_processes", return_value=[]):
             item = backend.observe([sid])["sessions"][sid]
         self.assertEqual(item["status"], "closed")
-        self.assertEqual(item["usage"]["tokensUsed"], 30)
+        self.assertEqual(item["usage"]["tokensUsed"], 2030)
         missing = str(uuid.uuid4())
         self.assertEqual(backend.observe([missing])["sessions"][missing]["status"], "unknown")
 
     def test_send_refuses_open_interactive_session_and_resumes_headless_otherwise(self):
         sid = str(uuid.uuid4())
         backend = ClaudeCodeBackend(executable="claude", root=self.root, runtime=self.root / ".runtime")
+        path = write_transcript(self.root, sid, [assistant("Done")], cwd=str(self.root))
+        os.utime(path, (time.time()-120, time.time()-120))
         with patch("studio_agents.claude_processes", return_value=[7]), patch("studio_agents.subprocess.Popen") as popen:
             with self.assertRaises(RuntimeError):
                 backend.send(sid, "Review the packet", str(self.root))
             popen.assert_not_called()
         with patch("studio_agents.claude_processes", return_value=[]), patch("studio_agents.subprocess.Popen") as popen:
             status, _ = backend.send(sid, "Review the packet", str(self.root))
-        self.assertEqual(status, "queued")
-        self.assertEqual(popen.call_args.args[0], ["claude", "-p", "--resume", sid, "--output-format", "json", "Review the packet"])
+        self.assertEqual(status, "started")
+        self.assertEqual(popen.call_args.args[0], ["claude", "-p", "--resume", sid, "--output-format", "json", "--", "Review the packet"])
         self.assertEqual(popen.call_args.kwargs["cwd"], str(self.root))
         with self.assertRaises(studio_agents.BackendUnsupported):
             backend.rename(sid, "Writer")
@@ -146,13 +148,13 @@ class BindingTests(unittest.TestCase):
         f = app.store.fleet(f["id"])
         preview = app.controls.preview({"fleetId": f["id"], "action": "message", "agentIds": [a["id"] for a in f["agents"]], "message": "Check the handoff"})
         with patch("studio_agents.subprocess.run", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")) as run, \
-                patch("studio_agents.subprocess.Popen") as popen, patch("studio_agents.claude_processes", return_value=[]):
+                patch.object(app.runtimes.local["claude-code"], "send", return_value=("started", "Process started")) as send:
             app.controls.send(preview["id"])
             self.wait_controls(app)
         self.assertEqual(run.call_args.args[0][1:3], ["queue", "--thread"])
-        self.assertIn("--resume", popen.call_args.args[0])
+        self.assertEqual(send.call_args.args[0], f["agents"][1]["sessionId"])
         receipt = app.controls.snapshot()[-1]
-        self.assertEqual([t["status"] for t in receipt["targets"]], ["queued", "queued"])
+        self.assertEqual([t["status"] for t in receipt["targets"]], ["queued", "started"])
         with self.assertRaises(ValueError):
             app.controls.preview({"fleetId": f["id"], "action": "rename", "agentIds": [f["agents"][1]["id"]]})
 
@@ -165,9 +167,9 @@ class BindingTests(unittest.TestCase):
         with patch("studio_agents.claude_processes", return_value=[]):
             merged = runtimes.observe([{"sessionId": local, "backend": "claude-code"},
                                        {"sessionId": remote, "backend": "codex", "hostId": "gpu-box"}])
-        self.assertEqual(merged["sessions"][local]["status"], "closed")
-        self.assertEqual(merged["sessions"][remote]["status"], "unknown")
-        self.assertEqual(merged["sessions"][remote]["hostId"], "gpu-box")
+        self.assertEqual(merged["sessions"]["local:claude-code:" + local]["status"], "closed")
+        self.assertEqual(merged["sessions"]["gpu-box:codex:" + remote]["status"], "unknown")
+        self.assertEqual(merged["sessions"]["gpu-box:codex:" + remote]["hostId"], "gpu-box")
         self.assertTrue(any("gpu-box" in e for e in merged["errors"]))
         self.assertEqual([r["id"] for r in merged["catalogue"]], [local])
 
@@ -240,7 +242,7 @@ class NodeTests(unittest.TestCase):
             sid = str(uuid.uuid4())
             with patch.dict(os.environ, {"FLEET_TEST_NODE_TOKEN": token}):
                 merged = runtimes.observe([{"sessionId": sid, "hostId": "box"}])
-                self.assertEqual(merged["sessions"][sid]["status"], "idle")
+                self.assertEqual(merged["sessions"]["box:codex:" + sid]["status"], "idle")
                 backend = runtimes.backend("codex", "box")
                 self.assertEqual(backend.send(sid, "Plain instruction")[0], "queued")
                 with self.assertRaises(RuntimeError):
@@ -288,7 +290,7 @@ class TrackerTests(unittest.TestCase):
         with patch("studio_trackers.github_get", side_effect=[events, runs]):
             history = GitHubTracker().history({"projectUrl": "https://github.com/o/r"}, 1)
             pipelines, summary, notice = GitHubTracker().pipelines("https://github.com/o/r")
-        self.assertEqual([(e["action"], e["label"]["name"]) for e in history], [("add", "AI Claimed"), ("remove", "AI Ready")])
+        self.assertEqual([(e["action"], e["label"]["name"]) for e in history], [("remove", "AI Ready"), ("add", "AI Claimed")])
         self.assertEqual((pipelines[0]["status"], pipelines[0]["duration"], pipelines[0]["queued_duration"]), ("failed", 300, 30))
         self.assertEqual((pipelines[1]["status"], pipelines[1]["duration"]), ("running", None))
         self.assertIsNone(summary)

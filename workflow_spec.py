@@ -330,6 +330,8 @@ def runtime_problems(fleet):
         if not agent.get("enabled", True):
             continue
         backend, remote = agent.get("backend", "codex"), agent.get("hostId", "local") != "local"
+        if remote and agent.get("sessionId"):
+            problems.append(agent["name"] + " is remote: managed workflow deployment requires remote assignment and receipt transport, which is not supported yet. Local monitoring and explicit remote controls remain available.")
         for rid in agent.get("roleIds", []):
             runtime = roles.get(rid, {}).get("runtime")
             if not runtime:

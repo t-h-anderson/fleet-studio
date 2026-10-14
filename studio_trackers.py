@@ -182,7 +182,7 @@ class GitLabTracker:
 
 # GitHub run states mapped onto the GitLab pipeline vocabulary the monitoring view uses.
 RUN_STATUS = {'success': 'success', 'failure': 'failed', 'timed_out': 'failed', 'startup_failure': 'failed',
-              'cancelled': 'canceled', 'skipped': 'skipped', 'neutral': 'success', 'action_required': 'manual',
+              'cancelled': 'canceled', 'skipped': 'skipped', 'neutral': 'neutral', 'action_required': 'manual',
               'in_progress': 'running', 'queued': 'pending', 'waiting': 'pending', 'pending': 'pending', 'requested': 'pending'}
 
 
@@ -193,12 +193,22 @@ class GitHubTracker:
         return fetch_github_issues(config, github_get)
 
     def history(self, config, iid):
-        rows = github_get(config['projectUrl'], 'issues/' + str(iid) + '/events?per_page=100')
-        if not isinstance(rows, list):
-            raise ValueError('GitHub returned an unexpected event response.')
-        return [{'created_at': r['created_at'], 'action': 'add' if r['event'] == 'labeled' else 'remove',
-                 'label': {'name': r['label']['name']}} for r in rows
-                if r.get('event') in ('labeled', 'unlabeled') and isinstance(r.get('label'), dict)]
+        rows = []
+        # GitHub returns issue events oldest-first. Read all pages up to a bounded
+        # limit; never label the oldest page as the current recent history.
+        for page in range(1, 51):
+            batch = github_get(config['projectUrl'], 'issues/' + str(iid) + '/events?per_page=100&page=' + str(page))
+            if not isinstance(batch, list):
+                raise ValueError('GitHub returned an unexpected event response.')
+            rows.extend(batch)
+            if len(batch) < 100:
+                break
+        else:
+            raise ValueError('GitHub event history exceeds 5000 events; recent history is unavailable.')
+        return sorted([{'created_at': r['created_at'], 'action': 'add' if r['event'] == 'labeled' else 'remove',
+                        'label': {'name': r['label']['name']}} for r in rows
+                       if r.get('event') in ('labeled', 'unlabeled') and isinstance(r.get('label'), dict)],
+                      key=lambda r: r['created_at'], reverse=True)[:100]
 
     def pipelines(self, project):
         data = github_get(project, 'actions/runs?per_page=10')

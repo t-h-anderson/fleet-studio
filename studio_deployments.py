@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import time
 import uuid
-from studio_agents import runtime_binding
+from studio_bindings import runtime_binding, same_binding
 from workflow_spec import assignment_document, apply_spec, digest, diff, export_spec, metadata, render, runtime_problems, validate
 
 INTEGRATION_POLICY = {
@@ -67,7 +67,7 @@ class Deployments:
         for aid in agent_ids:
             agent = next((a for a in current['agents'] if a['id'] == aid), None)
             binding = bindings.get(aid)
-            if not agent or not binding or not agent['enabled'] or any(agent.get(k) != binding.get(k) for k in ('sessionId', 'directory', 'roleIds', 'notes')) or aid not in acknowledged:
+            if not agent or not binding or not agent['enabled'] or not same_binding(agent, binding, ('sessionId', 'directory', 'roleIds', 'notes')) or aid not in acknowledged:
                 return (agent['name'] if agent else 'Source agent') + ' has not adopted the active workflow binding.'
         return ''
 
@@ -81,9 +81,9 @@ class Deployments:
         adoption = []
         deployed = {a["id"]: a for a in active["fleet"]["agents"]} if active else {}
         for agent in fleet["agents"]:
-            entry = next((e for e in entry_points if agent["id"] in e["agentIds"] and agent["directory"] and Path(e["path"]).parent == Path(agent["directory"]).resolve()), None)
+            entry = next((e for e in entry_points if agent["id"] in e["agentIds"] and not runtime_binding(agent) and agent["directory"] and Path(e["path"]).parent == Path(agent["directory"]).resolve()), None)
             binding = deployed.get(agent["id"])
-            matched = bool(binding and all(binding[k] == agent[k] for k in ("directory", "sessionId", "roleIds", "notes")))
+            matched = same_binding(binding, agent, ("directory", "sessionId", "roleIds", "notes"))
             acknowledgement = matched and any(a["agentId"] == agent["id"] for a in acks)
             receipt = next((t["status"] for c in reversed(notifications) for t in c["targets"] if t["agentId"] == agent["id"]), "not-notified")
             adoption.append({"agentId": agent["id"], "name": agent["name"], "required": bool(agent["enabled"] and agent["sessionId"] and agent["directory"]),
@@ -245,14 +245,16 @@ class Deployments:
         if not rid:
             raise ValueError("Deploy the workflow before notifying agents.")
         release = self.release(rid)
+        if any(a.get("hostId", "local") != "local" and a.get("enabled") for a in release["fleet"]["agents"]):
+            raise ValueError("Remote workflow adoption is unavailable until remote assignment and receipt transport is configured.")
         bindings = {a["id"]: a for a in release["fleet"]["agents"]}
         ids = payload.get("agentIds", [a["id"] for a in fleet["agents"] if a["sessionId"]])
         for agent in fleet["agents"]:
-            if agent["id"] in ids and (agent["id"] not in bindings or (agent["sessionId"], agent["directory"]) != (bindings[agent["id"]]["sessionId"], bindings[agent["id"]]["directory"])):
+            if agent["id"] in ids and (agent["id"] not in bindings or not same_binding(agent, bindings[agent["id"]])):
                 raise ValueError("Agent bindings changed. Deploy again before notifying them.")
         acknowledged = {a["agentId"] for a in self.data["acks"] if a["releaseId"] == rid}
         reserved = {t["agentId"] for c in self.app.controls.snapshot(full=True) if c.get("deploymentId") == rid and c.get("purpose") == "workflow-adoption"
-                    for t in c["targets"] if t["status"] in ("waiting", "queued", "unknown")}
+                    for t in c["targets"] if t["status"] in ("waiting", "queued", "started", "unknown")}
         ids = [aid for aid in ids if aid not in acknowledged | reserved]
         if not ids:
             raise ValueError("All selected agents have acknowledged or already have queued/unconfirmed notifications. Check their receipts before retrying.")
@@ -295,7 +297,7 @@ class Deployments:
                 raise ValueError("That release is no longer active.")
             agent = next((a for a in self.release(rid)["fleet"]["agents"] if a["id"] == payload.get("agentId")), None)
             local = next((a for a in fleet["agents"] if a["id"] == payload.get("agentId")), None)
-            if not agent or not local or (local["sessionId"], local["directory"]) != (agent["sessionId"], agent["directory"]):
+            if not agent or not local or not same_binding(local, agent):
                 raise ValueError("Agent is no longer bound to this release.")
             receipt = {"agentId": agent["id"], "name": agent["name"], "releaseId": rid, "time": time.time(), "status": "agent-reported"}
             self.data["acks"] = [a for a in self.data["acks"] if (a["agentId"], a["releaseId"]) != (agent["id"], rid)] + [receipt]

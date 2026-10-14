@@ -17,6 +17,7 @@ import secrets
 import ssl
 import subprocess
 import sys
+import threading
 import uuid
 
 from studio_agents import BACKENDS, ClaudeCodeBackend, CodexBackend, tmux_launch
@@ -33,6 +34,7 @@ class Node:
         runtime = Path(data_root) / ".runtime"
         runtime.mkdir(parents=True, exist_ok=True)
         self.backends = {"codex": CodexBackend(codex_path), "claude-code": ClaudeCodeBackend(runtime=runtime)}
+        self.launch_lock = threading.Lock()
 
     def backend(self, payload):
         name = payload.get("backend")
@@ -85,7 +87,8 @@ class Node:
             name, window = payload.get("name"), payload.get("window")
             if not isinstance(name, str) or not name or any(c in name for c in ';"\n\t') or not isinstance(window, str) or not window.replace("-", "").replace("_", "").isalnum():
                 raise NodeError("Invalid agent or window name.")
-            opened = tmux_launch(window, {"name": name, "directory": folder}, backend.resume_command(sid, folder))
+            with self.launch_lock:
+                opened = backend.ready_to_launch(sid) and tmux_launch(window, {"name": name, "directory": folder}, backend.resume_command(sid, folder))
             return {"opened": opened}
         raise NodeError("Unknown node action.")
 
@@ -157,6 +160,8 @@ def main():
     if len(token) < 24:
         parser.exit(2, "Set FLEET_NODE_TOKEN to a random value of at least 24 characters.\n")
     loopback = args.bind in ("127.0.0.1", "localhost", "::1")
+    if bool(args.cert) != bool(args.key):
+        parser.exit(2, 'Provide both --cert and --key for TLS.\n')
     if not loopback and not (args.cert and args.key):
         parser.exit(2, "Non-loopback binds require --cert and --key. Use an SSH tunnel otherwise.\n")
     args.data_root.mkdir(parents=True, exist_ok=True)

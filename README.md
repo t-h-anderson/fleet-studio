@@ -3,8 +3,9 @@
 A local application for designing, deploying and monitoring supervised
 multi-agent workflows. The external tracker (GitLab or GitHub) owns tasks and
 acceptance; Studio owns workflow definitions, agent bindings and communication
-receipts. Agents can be Codex CLI or Claude Code sessions, on this computer or
-on remote machines running a fleet node.
+receipts. Monitor Codex CLI or Claude Code sessions on this computer or remote
+machines running a fleet node. Managed workflow deployment currently supports
+local agents; remote assignment delivery is still pending.
 
 ## Start
 
@@ -20,8 +21,8 @@ python fleet_studio.py --open
 Alternatively run `Start-FleetStudio.ps1`. The loopback server normally uses
 http://127.0.0.1:8765. A new installation starts with an empty fleet. Add agents
 and link their existing sessions and folders through the roster/session library.
-The browser displays activity and queues instructions; interactive sessions run
-in Windows Terminal.
+The browser displays activity and previews instructions; interactive sessions run
+in Windows Terminal or tmux.
 
 Use `--data-root <folder>` to keep configuration and observations outside the
 checkout. Stop the existing Studio server through App settings before starting
@@ -34,20 +35,32 @@ Each agent has a **backend** and a **host**, chosen in the agent editor:
 
 | Backend | Observation | Delivery | Rename | Native goals |
 | --- | --- | --- | --- | --- |
-| Codex CLI | Native metadata DBs and writer locks | `codex queue` (queued for the next turn) | Yes | Yes |
-| Claude Code | Transcript in `~/.claude/projects` (or `CLAUDE_CONFIG_DIR`) | Headless `claude -p --resume` turn | No | No |
+| Codex CLI | Native metadata DBs and writer locks | `codex queue` (queued for the next turn) | Yes | Local only |
+| Claude Code | Transcript in `~/.claude/projects` (or `CLAUDE_CONFIG_DIR`) | Explicit headless `claude -p --resume` turn on supported hosts | No | No |
 
-Claude Code has no message queue. Studio refuses delivery while the transcript
-was written in the last 90 seconds or a `claude` process may hold the session
-(one resuming it, or one in its folder that is not resuming another session),
-so an open interactive client is never interrupted. Each headless turn logs to
-`.runtime/claude-turns/`. Only public text blocks are shown in Activity;
-thinking, tool inputs and tool results are not read into Studio. Claude token
-counts sum input, output and cache-creation tokens; cache reads are excluded.
+Claude Code has no message queue, so automatic workflow delivery is held.
+Explicit delivery previews explain that applying starts a headless turn. Studio
+requires a saved transcript matching the assigned folder and refuses delivery
+while it was written in the last 90 seconds, a Claude process may hold the
+session, or process ownership is unknown. It prevents a second Studio-started
+turn while the first process runs. Keep the native client closed during launch;
+Studio cannot prevent a separate client being opened concurrently. A `started`
+receipt confirms process creation, not turn completion or assignment adoption.
+Headless output logs are kept in `.runtime/claude-turns/`. Activity displays only
+public text blocks, excluding thinking, tool inputs and tool results. Token
+counts include input, output, cache creation and cache reads; repeated streaming
+usage records are deduplicated. These totals are not billing estimates.
 
-Process liveness uses the Windows Restart Manager, `/proc` on Linux or `lsof` on
-macOS. Where none is available, Claude sessions are reported idle rather than
-closed.
+Codex process liveness uses Windows Restart Manager, `/proc` on Linux or `lsof`
+on macOS. Claude ownership detection currently requires Linux `/proc`; Windows
+and macOS can monitor transcripts, but Studio refuses headless sends and terminal
+launches when ownership cannot be established. Unknown ownership is never treated
+as idle, and old unfinished turns are not inferred to have completed.
+
+Claude assignments must be loaded explicitly with `workflow_client.py instructions`
+at safe task boundaries and acknowledged by the agent. Automatic entry-point
+installation currently creates Codex's `AGENTS.override.md` and rejects Claude
+bindings; Claude does not automatically consume that file.
 
 ### Remote hosts
 
@@ -70,11 +83,22 @@ Nodes accept only Studio's own operations: observe, catalogue, public activity,
 plain-text delivery (slash and shell commands are rejected), rename and open in
 tmux. Unreachable hosts mark their sessions `unknown`, which holds automatic
 delivery like any other unavailable observation. Native goal controls remain
-local-Codex only.
+local-Codex only. Redirects are refused so bearer credentials cannot follow them.
+Server errors after a mutation are reported as uncertain and are not retried
+automatically. Nodes recheck native session ownership before opening a terminal.
+
+Remote nodes do not yet receive Studio's deployed assignment files or support
+the local reporting/adoption endpoint. Deployment and entry-point installation
+therefore reject enabled remote bindings. Remote observation and explicit
+controls remain available; remote managed workflows require a future node
+deployment/reporting protocol.
 
 A deployed release records each agent's backend and host. Changing either
 counts as a rebinding: the agent is excluded from automatic delivery until a
 new release is reviewed and acknowledged.
+Session identity includes host, backend and native ID, keeping observations and
+token counters separate even when different hosts reuse the same native ID.
+Controls retain the reviewed binding and host endpoint through dispatch.
 
 ## Progress
 
@@ -120,17 +144,19 @@ excluded; these durations are not logged work effort. Timing starts afresh when
 the project or deployed workflow changes. No historical state transitions are
 inferred from a ticket's `updated_at` timestamp.
 
-Native session token counters are read from Codex metadata without reading
-transcripts. Session totals include earlier work; the separately displayed
+Codex session token counters are read from native metadata; Claude counters come
+from transcript usage records. Session totals include earlier work; the separately displayed
 observed usage counts positive increments since the first sample. Counter resets
 are flagged and shared sessions counted once. Increments across downtime are
 included when the counter remains monotonic. Unavailable/stale sessions are
 excluded from totals with coverage shown. Goal usage/budgets come from the native
 goal record. These are token counts, not billing costs or ticket attribution.
 
-GitLab CI refreshes in the background about every 90 seconds, showing the latest
-10 project pipelines across branches, their commit, ref and status, plus duration,
-queue time and published test totals for the latest pipeline when available.
+GitLab CI or GitHub Actions refreshes in the background about every 90 seconds,
+showing the latest 10 project pipelines/runs across branches, their commit, ref
+and status, plus duration and queue time when available. GitLab supplies published
+test totals for the latest pipeline when available; GitHub Actions does not expose
+test totals through this adapter. Changing providers invalidates cached evidence.
 Missing reports and failed reads are labelled explicitly. A successful pipeline
 does not imply tests were published or establish task acceptance.
 

@@ -1,4 +1,5 @@
 """Explicitly enabled workflow triggers with persisted deduplication and delivery receipts."""
+from studio_bindings import runtime_binding, session_key
 from copy import deepcopy
 import hashlib
 import json
@@ -120,8 +121,8 @@ class Triggers:
             return "Live session observations are unavailable or stale."
         controls = self.app.controls.snapshot(full=True)
         for agent in agents:
-            item = monitor.get("sessions", {}).get(agent["sessionId"], {})
-            reserved = any(t.get("sessionId") == agent["sessionId"] and
+            item = monitor.get("sessions", {}).get(session_key(agent), {})
+            reserved = any(session_key(t) == session_key(agent) and
                            (t["status"] in ("waiting", "unknown") or
                             (t["status"] == "queued" and t.get("acknowledgedAt", c["createdAt"]) >= item.get("observedAt", monitor["observedAt"])))
                            for c in controls if c["id"] != ignore_control_id for t in c["targets"])
@@ -133,6 +134,8 @@ class Triggers:
                 return agent["name"] + " is excluded from automatic delivery."
             if item.get("status") not in ("idle", "working") or not item.get("pids"):
                 return agent["name"] + " is closed or needs attention; open/review the session first."
+            if agent.get("backend", "codex") != "codex":
+                return agent["name"] + " has no safe message queue; use an explicit reviewed turn after closing the session."
             if not item.get("goalKnown"):
                 return agent["name"] + " has unavailable goal-state observations."
             if item.get("goalStatus") in ("paused", "blocked", "budget_limited", "usage_limited"):
@@ -183,7 +186,7 @@ class Triggers:
                       "name": rule["name"], "cause": cause, "createdAt": time.time(), "status": "pending",
                       "message": message, "mode": rule["mode"], "ruleSignature": signature,
                       "targetAgentId": agent["id"], "targetName": agent["name"],
-                      "targetSessionId": agent["sessionId"], "targetDirectory": agent["directory"],
+                      "targetSessionId": agent["sessionId"], "targetDirectory": agent["directory"], "targetRuntime": runtime_binding(agent),
                       "sourceAgentId": event.get("agentId") if event else None, "deploymentId": rule.get("deploymentId"),
                       **({"eventId": event["eventId"], "ticket": event.get("ticket", ""), "eventKey": event["key"]} if event else {})}
             action["message"] += "\n\nFleet handoff action ID: " + action["id"] + ". Report handoff-received with this ID after reading the task evidence.\n" if event else ""
@@ -215,7 +218,7 @@ class Triggers:
             action.update(status="held", detail="This trigger is disabled.")
             return
         agents = [a for a in fleet["agents"] if a["id"] == action.get("targetAgentId") and rule["targetRoleId"] in a.get("roleIds", [])]
-        if agents and (agents[0]["sessionId"] != action.get("targetSessionId") or agents[0]["directory"] != action.get("targetDirectory")):
+        if agents and (agents[0]["sessionId"] != action.get("targetSessionId") or agents[0]["directory"] != action.get("targetDirectory") or runtime_binding(agents[0]) != action.get("targetRuntime", {})):
             action.update(status="needs-attention", detail="Recipient session or folder changed; review the original handoff before sending.")
             return
         source_ids = [action["sourceAgentId"]] if action.get("sourceAgentId") else []
@@ -306,7 +309,7 @@ class Triggers:
                         sources = [a for a in fleet["agents"] if rule["sourceRoleId"] in a.get("roleIds", [])]
                         observations = {}
                         for agent in sources:
-                            item = monitor["sessions"].get(agent["sessionId"], {})
+                            item = monitor["sessions"].get(session_key(agent), {})
                             if not item.get("observedAt") or time.time() - item["observedAt"] > 20 or item.get("error") or item.get("status") == "unknown" or (rule["condition"] == "turn-completed" and (not item.get("turnId") or not item.get("turnStatus"))):
                                 continue
                             value = (item.get("turnId"), item.get("turnStatus")) if rule["condition"] == "turn-completed" else item.get("status")
@@ -399,7 +402,7 @@ class Triggers:
             if rule['kind'] == 'event' and rule.get('deploymentId') and not action.get('sourceAgentId'):
                 raise ValueError('Reconcile the missing source identity before reviewing delivery.')
             agents = self.targets(fleet, rule, action.get("targetAgentId"))
-            if len(agents) != 1 or not agents[0]["enabled"] or agents[0]["sessionId"] != action.get("targetSessionId") or agents[0]["directory"] != action.get("targetDirectory"):
+            if len(agents) != 1 or not agents[0]["enabled"] or agents[0]["sessionId"] != action.get("targetSessionId") or agents[0]["directory"] != action.get("targetDirectory") or runtime_binding(agents[0]) != action.get("targetRuntime", {}):
                 raise ValueError("The original recipient was excluded or rebound. Review current scope and report a new handoff; this action cannot be redirected.")
             preview = self.app.controls.preview({"fleetId": fleet["id"], "action": "message",
                 "agentIds": [a["id"] for a in agents], "message": action["message"],

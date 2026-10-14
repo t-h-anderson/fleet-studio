@@ -1,4 +1,5 @@
 """Bounded work evidence and reviewed native goal controls. Never writes native DBs."""
+from studio_bindings import runtime_binding, session_key, same_binding
 from contextlib import closing
 from copy import deepcopy
 import hashlib
@@ -114,8 +115,10 @@ class Goals:
             raise ValueError('Deploy a workflow before managing goals.')
         agent = next((a for a in fleet['agents'] if a['id'] == aid), None)
         deployed = next((a for a in self.app.deployments.release(rid)['fleet']['agents'] if a['id'] == aid), None)
-        if not agent or not deployed or not agent['enabled'] or not deployed['enabled'] or not agent['sessionId'] or any(agent.get(k) != deployed.get(k) for k in ('sessionId', 'directory', 'roleIds', 'notes')):
+        if not agent or not deployed or not agent['enabled'] or not deployed['enabled'] or not agent['sessionId'] or not same_binding(agent, deployed, ('sessionId', 'directory', 'roleIds', 'notes')):
             raise ValueError('Agent binding differs from the active deployment.')
+        if runtime_binding(agent):
+            raise ValueError('Goal records and controls require a local Codex agent.')
         return fleet, agent, rid
 
     @staticmethod
@@ -130,7 +133,9 @@ class Goals:
         with p.lock, closing(p.connect()) as db, db:
             for fleet in fleets:
                 for agent in fleet['agents']:
-                    observed = monitor.get('sessions', {}).get(agent['sessionId'], {})
+                    if runtime_binding(agent):
+                        continue  # Native goal management is local Codex only.
+                    observed = monitor.get('sessions', {}).get(session_key(agent), {})
                     try:
                         goal = self.validate_observation(observed, p.clock())
                     except ValueError:
@@ -151,7 +156,7 @@ class Goals:
     def link_report(self, db, fleet, agent, data):
         """Attach evidence to the explicitly named native goal inside the report transaction."""
         with self.app.lock:
-            observed = deepcopy(self.app.monitor.get('sessions', {}).get(agent['sessionId'], {}))
+            observed = deepcopy(self.app.monitor.get('sessions', {}).get(session_key(agent), {}))
         goal = self.validate_observation(observed, self.app.progress.clock())
         if goal['id'] != data['goalId']:
             raise ValueError('Goal changed. Read its current identity before linking evidence.')
@@ -191,7 +196,7 @@ class Goals:
                     'summary': plain(payload.get('summary', ''), 'summary'), 'kind': 'goal-linked',
                     'source': 'operator-link', 'agentId': agent['id'], 'releaseId': rid, 'at': self.app.progress.clock()}
             config, _ = configuration(fleet)
-            if config['projectUrl'] and not data['taskUrl'].startswith(task_key(issue_prefix(config))):
+            if config['projectUrl'] and not data['taskUrl'].startswith(task_key(issue_prefix(config)) + '/'):
                 raise ValueError('Task must belong to the configured tracker project.')
             with self.app.progress.lock, closing(self.app.progress.connect()) as db, db:
                 self.link_report(db, fleet, agent, data)
@@ -206,7 +211,7 @@ class Goals:
         for r in records:
             a = agents.get(r['agentId'])
             s = monitor.get('sessions', {}).get(r['sessionId'], {})
-            r['bindingCurrent'] = bool(a and a['sessionId'] == r['sessionId'] and a['directory'] == r['directory'] and a.get('roleIds', []) == r.get('roleIds', []))
+            r['bindingCurrent'] = bool(a and not runtime_binding(a) and a['sessionId'] == r['sessionId'] and a['directory'] == r['directory'] and a.get('roleIds', []) == r.get('roleIds', []))
             r['observationFresh'] = bool(s.get('goalKnown') and not s.get('error') and 0 <= p.clock() - (s.get('observedAt') or 0) <= 20)
             r['current'] = bool(r['bindingCurrent'] and r['observationFresh'] and identity(s.get('goal') or {}) == identity(r['native']))
             age = p.clock() - (r.get('lastReportAt') or r['firstObservedAt'])

@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import sys
 from urllib.request import Request, urlopen
+from studio_bindings import same_binding
 
 
 def acknowledge(fleet, agent, release, root=None):
@@ -43,7 +44,7 @@ def instructions(fleet_id, agent_id, root=None, directory=None):
     state = json.loads((root / "fleet-studio.json").read_text(encoding="utf-8-sig"))
     current = next((a for f in state["fleets"] if f["id"] == fleet_id for a in f["agents"] if a["id"] == agent_id), None)
     expected = Path(directory or Path.cwd()).resolve()
-    if not current or (current["directory"], current["sessionId"]) != (agent["directory"], agent["sessionId"]) or Path(agent["directory"]).resolve() != expected:
+    if agent.get('hostId', 'local') != 'local' or not same_binding(current, agent) or Path(agent["directory"]).resolve() != expected:
         raise ValueError("This agent folder or session no longer matches the deployed binding. Review and redeploy the assignment.")
     return assignment_document(release["fleet"], release["spec"], agent, rid, Path(__file__).parent)
 

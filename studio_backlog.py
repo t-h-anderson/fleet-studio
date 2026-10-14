@@ -1,29 +1,16 @@
-"""Read-only GitLab backlog projection. GitLab remains the ticket authority."""
+"""Read-only backlog projection. The configured tracker remains the ticket authority."""
 from workflow_spec import project_ticket, stable
+# Tracker names are re-exported for callers that predate the adapter module.
+from studio_trackers import PROVIDERS, fetch_issues, fetch_github_issues, gitlab_get, stage_of, tracker_for, provider_of, GitLabTracker, GitHubTracker  # noqa: F401
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
 import json
-import os
 from pathlib import Path
-import re
-import shutil
-import subprocess
 import threading
 import time
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import urlsplit
 
 STAGES = [('backlog', 'Scope / backlog'), ('ready', 'Ready'), ('active', 'In progress'),
           ('integration', 'Awaiting merge'), ('blocked', 'Blocked'), ('closed', 'Closed')]
-class GitLabTracker:
-    """Tracker adapter: snapshots and label history are read-only."""
-    def snapshot(self, config):
-        return fetch_issues(config)
-
-    def history(self, config, iid):
-        return gitlab_get(config['projectUrl'], 'issues/' + str(iid) + '/resource_label_events?per_page=100&sort=desc')
-
-
-
 def clean_config(value, agents, source=None):
     value = value or {}
     default_url = (source or {}).get('url', '').split('/-/')[0]
@@ -34,7 +21,10 @@ def clean_config(value, agents, source=None):
     if url:
         parts = urlsplit(url)
         if parts.scheme != 'https' or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment or len(parts.path.strip('/').split('/')) < 2:
-            raise ValueError('Use an HTTPS GitLab project URL without credentials or query parameters.')
+            raise ValueError('Use an HTTPS GitLab or GitHub project URL without credentials or query parameters.')
+    provider = value.get('provider', 'auto')
+    if provider not in PROVIDERS:
+        raise ValueError('Choose GitLab, GitHub or automatic tracker detection.')
     scope = value.get('scope', 'all')
     if scope not in ('ai', 'all'):
         raise ValueError('Choose the AI workflow or all project tickets.')
@@ -47,69 +37,11 @@ def clean_config(value, agents, source=None):
     legacy = value.get('legacyReferences', {})
     if not isinstance(legacy, dict) or any(a not in agents or not isinstance(path, str) or len(path) > 1000 for a, path in legacy.items()):
         raise ValueError('Legacy references map known agents to local status files.')
-    return {'legacyReferences': legacy, 'projectUrl': url, 'scope': scope, 'agentTickets': {a: sorted(set(v)) for a, v in links.items()}}
-
-
-def stage_of(issue):
-    labels = set(issue.get('labels', []))
-    if issue['state'] == 'closed':
-        return 'closed'
-    if 'AI Blocked' in labels or 'AI Banned' in labels or any(x.startswith('Restriction::') for x in labels):
-        return 'blocked'
-    if 'AI Awaiting Merge' in labels:
-        return 'integration'
-    if 'AI Claimed' in labels:
-        return 'active'
-    if 'AI Ready' in labels:
-        return 'ready'
-    return 'backlog'
-
-
-def project_api(url, suffix):
-    parsed = urlsplit(url)
-    return parsed.netloc, 'projects/' + quote(parsed.path.strip('/'), safe='') + '/' + suffix
-
-
-def gitlab_get(project_url, suffix):
-    host, endpoint = project_api(project_url, suffix)
-    glab = shutil.which('glab') or str(Path.home() / 'AppData/Local/Programs/glab/glab.exe')
-    env = dict(os.environ)
-    # This host's inherited token can be stale; use the configured OS-keyring login.
-    env.pop('GITLAB_TOKEN', None)
-    run = subprocess.run([glab, 'api', endpoint, '--hostname', host, '--method', 'GET'],
-                         capture_output=True, text=True, encoding='utf-8', errors='replace',
-                         timeout=35, env=env, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-    if run.returncode:
-        # Do not echo CLI output that could contain credentials or request headers.
-        raise ValueError('GitLab could not be read. Check the glab login for ' + host + ' and refresh.')
-    return json.loads(run.stdout)
-
-
-def fetch_issues(config, get=gitlab_get):
-    rows, partial = {}, False
-    since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-    for state, limit in [('all', 50)]:
-        for page in range(1, limit + 1):
-            query = {'state': state, 'per_page': 100, 'page': page, 'order_by': 'updated_at', 'sort': 'desc'}
-            if state == 'closed':
-                query['updated_after'] = since
-            batch = get(config['projectUrl'], 'issues?' + urlencode(query))
-            if not isinstance(batch, list):
-                raise ValueError('GitLab returned an unexpected issue response.')
-            for row in batch:
-                # Only a projection is retained, never full issue bodies or an editable queue.
-                labels = row.get('labels', [])
-                if config['scope'] == 'ai' and row['iid'] not in config.get('includeIids', []) and not any(l.startswith('AI ') or l in ('Scope review', 'Stage tracking') for l in labels):
-                    continue
-                rows[row['iid']] = {'iid': row['iid'], 'title': row['title'], 'state': row['state'],
-                    'url': config['projectUrl'] + '/-/issues/' + str(row['iid']), 'labels': labels,
-                    'stage': stage_of(row), 'updatedAt': row['updated_at'],
-                    'assignees': [a.get('name') or a['username'] for a in row.get('assignees', [])]}
-            if len(batch) < 100:
-                break
-            if page == limit:
-                partial = True
-    return list(rows.values()), partial
+    config = {'legacyReferences': legacy, 'projectUrl': url, 'scope': scope, 'agentTickets': {a: sorted(set(v)) for a, v in links.items()}}
+    # Only record a provider when chosen, so existing GitLab configurations are unchanged.
+    if provider != 'auto':
+        config['provider'] = provider
+    return config
 
 
 def local_references(fleet, config):
@@ -134,7 +66,7 @@ class Backlog:
         fleet = self.app.runtime_fleet(draft) if active else draft
         config = clean_config(draft.get('backlog'), {a['id'] for a in fleet['agents']}, fleet.get('roleSource'))
         refs = local_references(fleet, config)
-        key = json.dumps([config['projectUrl'], config['scope']] + ([sorted(refs)] if config['scope'] == 'ai' else []))
+        key = json.dumps([config['projectUrl'], config['scope']] + ([config['provider']] if 'provider' in config else []) + ([sorted(refs)] if config['scope'] == 'ai' else []))
         with self.lock:
             item = self.cache.get(fleet_id)
             if not item or item['key'] != key:
@@ -169,11 +101,11 @@ class Backlog:
             config = {**config, 'includeIids': list(local_references(self.app.store.fleet(fleet_id), config))}
             if self.fixture:
                 rows = json.loads(Path(self.fixture).read_text(encoding='utf-8'))
-                issues, partial = fetch_issues(config, lambda url, suffix: rows if 'page=1&' in suffix else [])
+                issues, partial = (fetch_github_issues if provider_of(config) == 'github' else fetch_issues)(config, lambda url, suffix: rows if 'page=1&' in suffix else [])
             elif not self.app.launch_enabled:
-                raise ValueError('Live GitLab reads are disabled in this test instance.')
+                raise ValueError('Live tracker reads are disabled in this test instance.')
             else:
-                issues, partial = GitLabTracker().snapshot(config)
+                issues, partial = tracker_for(config).snapshot(config)
             with self.lock:
                 if self.cache.get(fleet_id) is not item:
                     return
@@ -186,11 +118,11 @@ class Backlog:
             if hasattr(self.app, 'progress'):
                 current_fleet = self.app.store.fleet(fleet_id)
                 current_config = clean_config(current_fleet.get('backlog'), {a['id'] for a in current_fleet['agents']}, current_fleet.get('roleSource'))
-                if (current_config['projectUrl'], current_config['scope']) == (config['projectUrl'], config['scope']):
+                if (current_config['projectUrl'], current_config['scope'], provider_of(current_config)) == (config['projectUrl'], config['scope'], provider_of(config)):
                     self.app.progress.observe_backlog(current_fleet, captured)
         except Exception as exc:
             with self.lock:
-                item['error'] = str(exc) if isinstance(exc, ValueError) else 'GitLab refresh failed. The last successful snapshot is retained.'
+                item['error'] = str(exc) if isinstance(exc, ValueError) else 'Tracker refresh failed. The last successful snapshot is retained.'
         finally:
             with self.lock:
                 item['loading'] = False
@@ -201,9 +133,10 @@ class Backlog:
         fleet = self.app.runtime_fleet(draft) if active else draft
         config = clean_config(draft.get('backlog'), {a['id'] for a in fleet['agents']}, fleet.get('roleSource'))
         if type(iid) is not int or iid <= 0 or not config['projectUrl']:
-            raise ValueError('Choose a ticket in the configured GitLab project.')
+            raise ValueError('Choose a ticket in the configured tracker project.')
         if self.fixture or not self.app.launch_enabled:
             return {'events': [], 'notice': 'Ticket history is disabled in this test instance.'}
-        rows = GitLabTracker().history(config, iid)
+        tracker = tracker_for(config)
+        rows = tracker.history(config, iid)
         events = [{'time': r['created_at'], 'action': r['action'], 'label': r['label']['name']} for r in rows if r.get('label') and r['label']['name'].startswith('AI ')]
-        return {'events': sorted(events, key=lambda e: e['time'], reverse=True), 'notice': 'GitLab label history; up to 100 label events.'}
+        return {'events': sorted(events, key=lambda e: e['time'], reverse=True), 'notice': tracker.label + ' label history; label events, newest first.'}

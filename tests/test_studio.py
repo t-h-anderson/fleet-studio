@@ -149,16 +149,35 @@ class StudioTests(unittest.TestCase):
         config = app.store.launch_config(fleet, [fleet["agents"][0]["id"]])
         job_id = uuid.uuid4().hex
         app.jobs[job_id] = {"id": job_id, "status": "running"}
+        app.windows = True
         with patch("fleet_studio.subprocess.run", return_value=types.SimpleNamespace(
             returncode=0, stdout="Opened 1 tab(s) in window 'test-fleet'.", stderr=""
-        )) as execute:
+        )) as execute, patch.dict("os.environ", {"WINDIR": "C:/Windows"}):
             app._run_launch(job_id, fleet, config)
         command = execute.call_args.args[0]
-        self.assertIn(str(self.root / "Start-CodexFleet.ps1"), command)
+        self.assertIn(str(Path(__file__).resolve().parents[1] / "Start-CodexFleet.ps1"), command)
         snapshot_path = Path(command[command.index("-ConfigPath") + 1])
         self.assertEqual(json.loads(snapshot_path.read_text())["agents"], self.legacy["agents"][:1])
         self.assertEqual(app.jobs[job_id]["status"], "completed")
         self.assertNotIn("shell", execute.call_args.kwargs)
+
+    def test_posix_launch_opens_each_backend_in_tmux(self):
+        app = Application(self.root)
+        app.windows = False
+        state = app.store.snapshot()
+        fleet = state["fleets"][0]
+        fleet["agents"][1]["backend"] = "claude-code"
+        app.store.save(state)
+        fleet = app.store.snapshot()["fleets"][0]
+        config = app.store.launch_config(fleet, [a["id"] for a in fleet["agents"][:2]])
+        job_id = uuid.uuid4().hex
+        app.jobs[job_id] = {"id": job_id, "status": "running"}
+        with patch("studio_agents.AgentBackend.ready_to_launch", return_value=True), patch("fleet_studio.tmux_launch", return_value=True) as launch:
+            app._run_launch(job_id, fleet, config)
+        commands = [call.args[2] for call in launch.call_args_list]
+        self.assertEqual(commands[0][1:3], ["resume", fleet["agents"][0]["sessionId"]])
+        self.assertEqual(commands[1][1:], ["--resume", fleet["agents"][1]["sessionId"]])
+        self.assertEqual(app.jobs[job_id]["status"], "completed")
 
     def test_runtime_does_not_treat_stale_turn_as_live_process(self):
         sid = self.legacy["agents"][0]["sessionId"]

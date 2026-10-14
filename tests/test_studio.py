@@ -172,7 +172,7 @@ class StudioTests(unittest.TestCase):
         config = app.store.launch_config(fleet, [a["id"] for a in fleet["agents"][:2]])
         job_id = uuid.uuid4().hex
         app.jobs[job_id] = {"id": job_id, "status": "running"}
-        with patch("fleet_studio.tmux_launch", return_value=True) as launch:
+        with patch("studio_agents.AgentBackend.ready_to_launch", return_value=True), patch("fleet_studio.tmux_launch", return_value=True) as launch:
             app._run_launch(job_id, fleet, config)
         commands = [call.args[2] for call in launch.call_args_list]
         self.assertEqual(commands[0][1:3], ["resume", fleet["agents"][0]["sessionId"]])

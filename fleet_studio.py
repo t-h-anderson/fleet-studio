@@ -34,6 +34,8 @@ from studio_reconciliation import Reconciliation
 from studio_goals import Goals
 from studio_agents import Runtimes, clean_binding, clean_hosts, tmux_launch, LOCAL_HOST
 
+from studio_bindings import session_key, same_binding, host_config
+
 APP_ID = "codex-fleet-studio"
 ROOT = Path(__file__).resolve().parent
 PUBLIC = ROOT / "web"
@@ -95,14 +97,15 @@ def validate_fleets(value, host_ids=()):
             names.add(name.casefold())
             agent_ids.add(aid)
             session_id = identifier(agent["sessionId"]) if agent.get("sessionId") else ""
-            if session_id and session_id in session_ids:
-                raise ValidationError("A session can only appear once in a fleet.")
-            if session_id:
-                session_ids.add(session_id)
             try:
                 backend, host = clean_binding(agent, host_ids)
             except ValueError as exc:
                 raise ValidationError(str(exc)) from None
+            key = session_key({'sessionId': session_id, 'backend': backend, 'hostId': host})
+            if session_id and key in session_ids:
+                raise ValidationError("A session can only appear once in a fleet on the same backend and host.")
+            if session_id:
+                session_ids.add(key)
             directory = text(agent.get("directory", ""), "Folder", 1000, required=False)
             # A remote folder is checked by its own node, not on this computer.
             if host == LOCAL_HOST and directory and not Path(directory).is_dir():
@@ -280,8 +283,8 @@ class Store:
         return {
             "version": 1, "windowName": fleet["windowName"], "codexPath": self.legacy["codexPath"],
             "agents": [{key: agent[key] for key in ("name", "directory", "sessionId", "enabled")} for agent in selected],
-            "bindings": [{key: agent.get(key, default) for key, default in (("name", ""), ("directory", ""), ("sessionId", ""),
-                          ("backend", "codex"), ("hostId", LOCAL_HOST))} for agent in selected],
+            "bindings": [{**{key: agent.get(key, default) for key, default in (("id", ""), ("name", ""), ("directory", ""), ("sessionId", ""),
+                          ("backend", "codex"), ("hostId", LOCAL_HOST))}, "hostConfig": host_config(agent, self.state.get('hosts', []))} for agent in selected],
         }
 
 
@@ -297,6 +300,7 @@ class Application:
         self.runtimes = Runtimes(root, self.store.legacy["codexPath"], self.codex_root)
         self.runtimes.configure(self.store.state.get("hosts", []))
         self.remote_catalogue_at = 0
+        self.remote_catalogue_thread = None
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.events = deque(maxlen=120)
@@ -327,10 +331,11 @@ class Application:
             state = self.store.snapshot()
             try:
                 self.runtimes.configure(state.get("hosts", []))
-                if self.runtimes.hosts and time.time() - self.remote_catalogue_at > 60:
+                if self.runtimes.hosts and time.time() - self.remote_catalogue_at > 60 and not (self.remote_catalogue_thread and self.remote_catalogue_thread.is_alive()):
                     # Remote catalogues only help link sessions, so refresh them less often.
                     self.remote_catalogue_at = time.time()
-                    self.runtimes.refresh_remote_catalogue()
+                    self.remote_catalogue_thread = threading.Thread(target=self.runtimes.refresh_remote_catalogue, daemon=True)
+                    self.remote_catalogue_thread.start()
                 latest = self.runtimes.observe([agent for fleet in state["fleets"] for agent in fleet["agents"]])
                 with self.lock:
                     previous = self.monitor["sessions"]
@@ -339,7 +344,7 @@ class Application:
                 self.progress.tick(state, self.status())
                 for fleet in state["fleets"]:
                     for agent in fleet["agents"]:
-                        sid = agent["sessionId"]
+                        sid = session_key(agent)
                         before, after = previous.get(sid), latest["sessions"].get(sid)
                         if before and after and before["status"] != after["status"]:
                             self.event(agent["name"] + " · " + after["status"], fleet["name"], fleet["id"])
@@ -437,15 +442,23 @@ class Application:
 
     def _launch_agent(self, fleet, binding):
         """Open one agent interactively. Returns False when it is already open."""
-        session = self.status()["sessions"].get(binding["sessionId"], {})
-        if session.get("pids"):
-            return False
-        backend = self.runtimes.backend(binding["backend"], binding["hostId"])
+        with self.store.lock:
+            current = self.store.fleet(fleet['id'])
+            agent = next((a for a in current['agents'] if a['id'] == binding['id']), None)
+            if not agent or not agent['enabled'] or not same_binding(agent, binding) or host_config(agent, self.store.state.get('hosts', [])) != binding.get('hostConfig'):
+                raise ValueError('Agent or host binding changed before launch. Review and open it again.')
+            return self._open_bound_agent(fleet, binding)
+
+    def _open_bound_agent(self, fleet, binding):
+        from studio_agents import RemoteBackend, RemoteHost
+        backend = RemoteBackend(RemoteHost(binding['hostConfig']), binding['backend']) if binding.get('hostConfig') else self.runtimes.for_agent(binding)
         if binding["hostId"] != LOCAL_HOST:
             result = backend.host.call("/node/launch", {"backend": binding["backend"], "sessionId": binding["sessionId"],
                                                         "directory": binding["directory"], "name": binding["name"],
                                                         "window": fleet["windowName"]})
             return bool(result.get("opened"))
+        if not backend.ready_to_launch(binding['sessionId']):
+            return False
         command = backend.resume_command(binding["sessionId"], binding["directory"])
         if self.windows:
             subprocess.run(["wt.exe", "-w", fleet["windowName"], "new-tab", "--title", binding["name"],
@@ -582,6 +595,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, app.deployments.acknowledge(payload))
             if path == "/api/state":
                 state = app.store.save(payload)
+                app.runtimes.configure(state.get("hosts", []))
                 app.event("Fleet configuration saved", str(len(state["fleets"])) + " fleet(s)", None)
                 return self.json(200, {"state": state})
             if path in ("/api/workflow/populate", "/api/workflow/roles"):

@@ -17,7 +17,8 @@ let activeId=localStorage.getItem('fleet-active')||'',view=localStorage.getItem(
 if(!['roster','board','sessions','roles','triggers','backlog','activity','workflow','progress'].includes(view))view='progress';
 let query='',filter='all',selected=new Set(),editing=null,zoom=1,drag=null,pendingJob=null,stopped=false,saveQueue=Promise.resolve();
 function current(){return state.fleets.find((f)=>f.id===activeId)||state.fleets[0];}
-function sessionFor(a){return monitor.sessions[a.sessionId]||{};}
+function sessionKey(a){const sid=a.sessionId??a.id??'',host=a.hostId||'local',backend=a.backend||'codex';return host==='local'&&backend==='codex'?sid:[host,backend,sid].join(':');}
+function sessionFor(a){return monitor.sessions[sessionKey(a)]||{};}
 function statusOf(a){return a.sessionId?(sessionFor(a).status||'unknown'):'draft';}
 function displayedRole(a){const roles=(current().roles||[]).filter(r=>(a.roleIds||[]).includes(r.id));return roles.length?roles.map(r=>r.name).join(', '):a.role;}
 function launchable(a){return a.enabled&&a.sessionId&&a.directory;}
@@ -66,15 +67,15 @@ function renderTable(){
  if(!agents.length){$('content').innerHTML=empty(current().agents.length?'No agents match':'A fresh space for your fleet',current().agents.length?'Try another name, role or status.':'Add an agent, choose a saved session, and make this fleet your own.',!current().agents.length);return;}
  const all=agents.filter(launchable),checked=all.length&&all.every((a)=>selected.has(a.id));
  $('content').innerHTML='<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="select-all" aria-label="Select all launchable agents" '+(checked?'checked':'')+'></th><th>AGENT / WORKSPACE</th><th>ROLE</th><th>STATUS</th><th class="model-column">MODEL</th><th>ACTIVITY</th><th>TICKETS</th><th></th></tr></thead><tbody>'+agents.map((a)=>{
- const s=sessionFor(a).session||catalogue.find((s)=>s.id===a.sessionId)||{};
+ const s=sessionFor(a).session||catalogue.find((s)=>sessionKey(s)===sessionKey(a))||{};
  return '<tr data-agent="'+a.id+'"><td><input type="checkbox" data-select="'+a.id+'" aria-label="Select '+esc(a.name)+'" '+(selected.has(a.id)?'checked ':'')+(!launchable(a)?'disabled':'')+'></td><td><div class="agent-cell">'+avatar(a.name)+'<div><button class="agent-name" data-edit="'+a.id+'">'+esc(a.name)+'</button><div class="agent-folder" title="'+esc(a.directory)+'">'+(!a.enabled?'Excluded · ':'')+((a.backend||'codex')!=='codex'||(a.hostId||'local')!=='local'?esc(runtimeLabel(a))+' · ':'')+esc(folderName(a.directory))+'</div></div></div></td><td><span class="role-pill">'+esc(displayedRole(a))+'</span></td><td>'+statusLabel(a)+'</td><td class="model-column"><span class="model-name">'+esc(s.model||'—')+'</span></td><td class="muted">'+ago(s.updatedAt)+'</td><td>'+agentTicketBadge(a.id)+'</td><td><div class="row-actions"><button class="icon-button" data-agent-activity="'+a.id+'" aria-label="Activity for '+esc(a.name)+'" title="Read agent activity">'+icon('activity')+'</button><button class="icon-button" data-open="'+a.id+'" aria-label="Open '+esc(a.name)+'" title="Open in PowerShell" '+(!launchable(a)?'disabled':'')+'>'+icon('play')+'</button><button class="icon-button" data-edit="'+a.id+'" aria-label="Edit '+esc(a.name)+'" title="Edit agent">'+icon('more')+'</button></div></td></tr>';
  }).join('')+'</tbody></table></div>';
 }
 function renderSessions(){
  const q=query.toLowerCase(),rows=catalogue.filter((s)=>(s.name+' '+s.directory).toLowerCase().includes(q));$('visible-count').textContent=rows.length;
  if(!rows.length){$('content').innerHTML=empty('No matching sessions','Refresh the library or try a different search.',false);return;}
- const linked=new Set(current().agents.map((a)=>a.sessionId));
- $('content').innerHTML='<div class="table-wrap"><table><thead><tr><th>CONVERSATION</th><th>MODEL</th><th>ACTIVITY</th><th>TICKETS</th><th></th></tr></thead><tbody>'+rows.map((s)=>'<tr><td><div class="session-name" title="'+esc(s.name)+'">'+esc(s.name)+'</div><div class="session-directory" title="'+esc(s.directory)+'">'+esc(s.directory)+'</div></td><td class="model-name">'+esc(s.model||'—')+'</td><td class="muted">'+ago(s.updatedAt)+'</td><td><button class="button small session-add" data-add-session="'+esc(s.id)+'" '+(linked.has(s.id)?'disabled':'')+'>'+icon('plus')+(linked.has(s.id)?'In this fleet':'Add to fleet')+'</button></td></tr>').join('')+'</tbody></table></div>';
+ const linked=new Set(current().agents.map(sessionKey));
+ $('content').innerHTML='<div class="table-wrap"><table><thead><tr><th>CONVERSATION</th><th>MODEL</th><th>ACTIVITY</th><th>TICKETS</th><th></th></tr></thead><tbody>'+rows.map((s)=>'<tr><td><div class="session-name" title="'+esc(s.name)+'">'+esc(s.name)+'</div><div class="session-directory" title="'+esc(s.directory)+'">'+esc(s.directory)+'</div></td><td class="model-name">'+esc(s.model||'—')+'</td><td class="muted">'+ago(s.updatedAt)+'</td><td><button class="button small session-add" data-add-session="'+esc(sessionKey(s))+'" '+(linked.has(sessionKey(s))?'disabled':'')+'>'+icon('plus')+(linked.has(sessionKey(s))?'In this fleet':'Add to fleet')+'</button></td></tr>').join('')+'</tbody></table></div>';
 }
 function nodePosition(a){return drag&&drag.id===a.id?drag.position:a.position;}
 function linksMarkup(f){
@@ -156,11 +157,11 @@ function parseHosts(text){
 }
 function renderPicker(){
  if(!editing||editing.type!=='agent')return;
- const id=editing.item.sessionId,s=catalogue.find((s)=>s.id===id),q=($('session-search')?.value||'').toLowerCase();
+ const id=editing.item.sessionId,s=catalogue.find((s)=>sessionKey(s)===sessionKey(editing.item)),q=($('session-search')?.value||'').toLowerCase();
  $('selected-session').innerHTML=id?'<div class="selected-session">'+esc(s?s.name:'Linked session')+'<button type="button" class="text-button" id="unlink-session">Unlink</button><code>'+esc(id)+'</code></div>':'';
- const linked=new Set(current().agents.filter((a)=>a.id!==editing.item.id).map((a)=>a.sessionId));
- const matches=catalogue.filter((s)=>!linked.has(s.id)&&(s.name+' '+s.directory).toLowerCase().includes(q)).slice(0,15);
- $('session-picker').innerHTML=matches.map((s)=>'<button type="button" class="session-option '+(id===s.id?'selected':'')+'" data-pick-session="'+esc(s.id)+'">'+esc(s.name)+'<small>'+esc(runtimeLabel(s)+' · '+s.directory)+'</small></button>').join('')||'<div class="field-hint" style="padding:12px">No matching saved sessions.</div>';
+ const linked=new Set(current().agents.filter((a)=>a.id!==editing.item.id).map(sessionKey));
+ const matches=catalogue.filter((s)=>!linked.has(sessionKey(s))&&(s.name+' '+s.directory).toLowerCase().includes(q)).slice(0,15);
+ $('session-picker').innerHTML=matches.map((s)=>'<button type="button" class="session-option '+(sessionKey(editing.item)===sessionKey(s)?'selected':'')+'" data-pick-session="'+esc(sessionKey(s))+'">'+esc(s.name)+'<small>'+esc(runtimeLabel(s)+' · '+s.directory)+'</small></button>').join('')||'<div class="field-hint" style="padding:12px">No matching saved sessions.</div>';
 }
 async function saveEditor(event){
  event.preventDefault();if(!editing)return;const action=clone(editing),item=action.item;
@@ -207,7 +208,7 @@ function wireEvents(){
   const t=e.target.closest('button,[data-edit-link]');if(!t)return;
   if(t.dataset.edit)openEditor('agent',t.dataset.edit);if(t.dataset.open)launch([t.dataset.open]);
   if(t.dataset.editLink)openEditor('link',t.dataset.editLink);if(t.dataset.action==='add')openEditor('agent');
-  if(t.dataset.addSession)openEditor('agent',null,catalogue.find((s)=>s.id===t.dataset.addSession));
+  if(t.dataset.addSession)openEditor('agent',null,catalogue.find((s)=>sessionKey(s)===t.dataset.addSession));
  };
  $('content').onchange=(e)=>{
   const t=e.target;if(t.dataset.select){if(t.checked)selected.add(t.dataset.select);else selected.delete(t.dataset.select);}
@@ -217,10 +218,11 @@ function wireEvents(){
  const close=()=>{$('editor').close();editing=null;};$('close-editor').onclick=close;$('cancel-editor').onclick=close;
  $('editor-fields').onclick=(e)=>{
   const pick=e.target.closest('[data-pick-session]');
-  if(pick&&editing?.type==='agent'){const s=catalogue.find((s)=>s.id===pick.dataset.pickSession);editing.item.sessionId=s.id;editing.item.backend=s.backend||'codex';editing.item.hostId=s.hostId||'local';$('f-backend').value=editing.item.backend;$('f-host').value=editing.item.hostId;if(!$('f-directory').value)$('f-directory').value=s.directory;if(!$('f-name').value)$('f-name').value=s.name.slice(0,80);renderPicker();}
+  if(pick&&editing?.type==='agent'){const s=catalogue.find((s)=>sessionKey(s)===pick.dataset.pickSession),previous=catalogue.find((s)=>sessionKey(s)===sessionKey(editing.item));editing.item.sessionId=s.id;editing.item.backend=s.backend||'codex';editing.item.hostId=s.hostId||'local';$('f-backend').value=editing.item.backend;$('f-host').value=editing.item.hostId;if(!$('f-directory').value||$('f-directory').value===previous?.directory)$('f-directory').value=s.directory;if(!$('f-name').value)$('f-name').value=s.name.slice(0,80);renderPicker();}
   if(e.target.closest('#unlink-session')&&editing?.type==='agent'){editing.item.sessionId='';renderPicker();}
  };
  $('add-link').onclick=()=>{if(current().agents.length<2)return toast('Add at least two agents to create a handoff.');openEditor('link');};
+ $('editor-fields').onchange=(e)=>{if(editing?.type==='agent'&&['f-backend','f-host'].includes(e.target.id)){editing.item.backend=$('f-backend').value;editing.item.hostId=$('f-host').value;editing.item.sessionId='';renderPicker();}};
  $('arrange').onclick=()=>mutate((next)=>updateFleet(next,(f)=>f.agents.forEach((a,i)=>a.position={x:80+(i%3)*320,y:60+Math.floor(i/3)*210})),'Board arranged.').catch((e)=>toast(e.message,true));
  $('zoom-in').onclick=()=>{zoom=Math.min(1.5,Math.round((zoom+.1)*10)/10);renderBoard();};
  $('zoom-out').onclick=()=>{zoom=Math.max(.2,Math.round((zoom-.1)*10)/10);renderBoard();};

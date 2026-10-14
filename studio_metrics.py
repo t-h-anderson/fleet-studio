@@ -1,4 +1,5 @@
 """Observed flow, native counters and evidence-linked tests; never dispatch work."""
+from studio_bindings import session_key
 from collections import Counter
 from contextlib import closing
 from copy import deepcopy
@@ -94,7 +95,7 @@ class Metrics:
     def observe_tokens(self, fleets, monitor):
         with self.progress.lock, closing(self.progress.connect()) as db, db:
             for fleet in fleets:
-                for sid in {a['sessionId'] for a in fleet['agents'] if a['sessionId']}:
+                for sid in {session_key(a) for a in fleet['agents'] if a['sessionId']}:
                     session = monitor.get('sessions', {}).get(sid, {})
                     usage = session.get('usage') or {}
                     total, at = usage.get('tokensUsed'), session.get('observedAt')
@@ -114,16 +115,20 @@ class Metrics:
     def ci_snapshot(self, fleet):
         from studio_progress import configuration
         config, _ = configuration(fleet)
+        from studio_trackers import provider_of, tracker_label
+        provider = provider_of(config)
         project, now = config['projectUrl'], self.progress.clock()
         with self.ci_lock:
             item = self.ci.get(fleet['id'])
-            if not item or item['project'] != project:
-                item = {'project': project, 'pipelines': [], 'observedAt': None, 'attemptedAt': None,
+            if not item or item['project'] != project or item.get('provider', 'gitlab') != provider:
+                item = {'project': project, 'provider': provider, 'label': tracker_label(fleet) + ' CI', 'pipelines': [], 'observedAt': None, 'attemptedAt': None,
                         'loading': False, 'error': '', 'testSummary': None, 'testNotice': ''}
                 with self.progress.lock, closing(self.progress.connect()) as db:
                     row = db.execute('SELECT data FROM ci_snapshots WHERE fleet=? AND project=?', (fleet['id'], project)).fetchone()
                 if row:
-                    item.update(json.loads(row['data']))
+                    saved = json.loads(row['data'])
+                    if saved.get('provider', 'gitlab') == provider:
+                        item.update(saved)
                 self.ci[fleet['id']] = item
             if project and self.app.launch_enabled and not item['loading'] and (item['attemptedAt'] is None or now - item['attemptedAt'] > 90):
                 item.update(loading=True, attemptedAt=now)
@@ -134,16 +139,11 @@ class Metrics:
 
     def _refresh_ci(self, fid, item):
         from studio_trackers import tracker_for
-        try:
-            # A removed fleet falls back to inferring the tracker from the project URL.
-            backlog = self.app.store.fleet(fid).get('backlog') or {}
-        except ValueError:
-            backlog = {}
-        tracker = tracker_for({**backlog, 'projectUrl': item['project']})
+        tracker = tracker_for({'provider': item.get('provider', 'gitlab'), 'projectUrl': item['project']})
         try:
             project = item['project']
             pipelines, summary, notice = tracker.pipelines(project)
-            data = {'pipelines': pipelines, 'testSummary': summary, 'testNotice': notice,
+            data = {'provider': tracker.name, 'pipelines': pipelines, 'testSummary': summary, 'testNotice': notice,
                     'observedAt': self.progress.clock(), 'error': ''}
             with self.ci_lock:
                 if self.ci.get(fid) is not item:
@@ -179,7 +179,7 @@ class Metrics:
             latest.setdefault((test['agentId'], test['taskUrl'], test['suite'], test['revision']), test)
         token_rows, seen = [], set()
         for a in agents:
-            sid = a['session'].get('sessionId')
+            sid = session_key(a['session']) if a['session'].get('sessionId') else None
             if not sid or sid in seen:
                 continue
             seen.add(sid)
@@ -199,7 +199,7 @@ class Metrics:
                 'availability': dict(Counter(a.get('availability', {}).get('state', 'unknown') for a in agents)),
                 'tokens': {'agents': token_rows, 'total': sum(r['tokensUsed'] for r in available) if available else None,
                            'observed': sum(r['observedTokens'] for r in available if r['observedTokens'] is not None) if any(r['observedTokens'] is not None for r in available) else None,
-                           'availableSessions': len(available), 'boundSessions': len({a['sessionId'] for a in fleet['agents'] if a['sessionId']})},
+                           'availableSessions': len(available), 'boundSessions': len({session_key(a) for a in fleet['agents'] if a['sessionId']})},
                 'tests': list(latest.values())[:100], 'ci': self.ci_snapshot(fleet),
                 'oldestHandoffSeconds': max((now - h['createdAt'] for h in handoffs if h.get('awaitingReceipt')), default=None)}
 

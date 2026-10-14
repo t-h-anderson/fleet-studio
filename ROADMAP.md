@@ -10,7 +10,7 @@ gives the suggested next steps, highest value first.
 | Goal | Before | Now |
 | --- | --- | --- |
 | Multiple backends | Codex calls were spread across the server, controls, goals and activity | `studio_agents.AgentBackend` with `CodexBackend` and `ClaudeCodeBackend`. Each agent records a `backend`. Capabilities (queue, rename, goals, activity, tokens) let the UI and controls explain gaps instead of failing |
-| Local and remote | Single Windows machine | `fleet_node.py` exposes a machine's backends over HTTPS or an SSH tunnel with a bearer token. Agents record a `hostId`. `Runtimes` merges observations from every (host, backend) pair into the existing monitor shape, so triggers and holds are unchanged |
+| Local and remote | Single Windows machine | `fleet_node.py` exposes observation and explicit controls over HTTPS or an SSH tunnel. Sessions are scoped by host, backend and native ID. Managed remote deployment is blocked pending a node assignment/reporting protocol |
 | Platforms | Windows Terminal + PowerShell, Windows-only liveness | tmux launcher and `/proc`/`lsof` lock-owner detection on Linux and macOS. The existing PowerShell launcher is kept for local Codex on Windows |
 | GitHub and GitLab | `glab` calls in backlog and metrics | `studio_trackers` adapters share one issue/history/pipeline shape. GitHub `open` maps to `opened`, PRs are excluded, Actions runs map onto pipelines. Issue-URL checks use `issue_prefix` |
 | Workflow specification | Roles had no runtime requirements | Optional role `runtime` (`backends`, `location`). Deployment is refused while a bound agent breaks it. The field is omitted when unset, so existing release digests are unchanged |
@@ -31,6 +31,20 @@ Fixed in this change:
    backlog object from scratch on every save.
 3. **The test suite failed on non-Windows** (`WINDIR` lookup). Launch tests now
    pin the platform explicitly.
+4. **Native IDs collided across hosts/backends.** Observation keys, token totals,
+   session pickers and workflow binding checks now include host and backend.
+5. **Controls could follow a changed binding after preview.** Dispatch keeps the
+   reviewed target and host endpoint, rejecting later changes.
+6. **Claude could start competing turns or report unknown ownership as idle.**
+   Unknown ownership holds sends/launches, Studio serializes its own sends, and
+   receipts distinguish process start from completion. Token usage includes cache
+   reads and deduplicates streaming records.
+7. **Remote redirects could forward credentials.** Redirects are refused; server
+   errors after mutations retain an uncertain outcome. Nodes recheck ownership
+   before terminal launch.
+8. **Tracker changes could reuse old evidence.** Backlog and CI caches include
+   provider identity. GitHub label history reads beyond its oldest API page and
+   neutral CI conclusions remain neutral.
 
 Observed, not changed:
 
@@ -65,9 +79,12 @@ Observed, not changed:
   `send` and `resume_command`. Add capability flags rather than special cases.
 - **Model and cost metadata.** Record a per-model price table and show an
   *estimate* next to token counts, keeping the existing "not billing" label.
-  Claude counts already exclude cache reads; show cache hit rate separately.
+  Claude counts include cache reads; expose cache hit rate separately.
 
 ### Remote agents
+- Deploy assignment files to nodes and provide authenticated reporting/adoption
+  routes before enabling remote managed workflows. Local file paths and loopback
+  endpoints cannot serve a remote agent.
 - Show each host's health in the UI (last contact, node version, backends
   present) and warn when a node's version differs from Studio's.
 - Let nodes push observations to Studio (long-poll or Server-Sent Events)

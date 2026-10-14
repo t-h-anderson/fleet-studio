@@ -1,7 +1,7 @@
 """Read-only backlog projection. The configured tracker remains the ticket authority."""
 from workflow_spec import project_ticket, stable
 # Tracker names are re-exported for callers that predate the adapter module.
-from studio_trackers import PROVIDERS, fetch_issues, gitlab_get, stage_of, tracker_for, GitLabTracker, GitHubTracker  # noqa: F401
+from studio_trackers import PROVIDERS, fetch_issues, fetch_github_issues, gitlab_get, stage_of, tracker_for, provider_of, GitLabTracker, GitHubTracker  # noqa: F401
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -101,7 +101,7 @@ class Backlog:
             config = {**config, 'includeIids': list(local_references(self.app.store.fleet(fleet_id), config))}
             if self.fixture:
                 rows = json.loads(Path(self.fixture).read_text(encoding='utf-8'))
-                issues, partial = fetch_issues(config, lambda url, suffix: rows if 'page=1&' in suffix else [])
+                issues, partial = (fetch_github_issues if provider_of(config) == 'github' else fetch_issues)(config, lambda url, suffix: rows if 'page=1&' in suffix else [])
             elif not self.app.launch_enabled:
                 raise ValueError('Live tracker reads are disabled in this test instance.')
             else:
@@ -118,7 +118,7 @@ class Backlog:
             if hasattr(self.app, 'progress'):
                 current_fleet = self.app.store.fleet(fleet_id)
                 current_config = clean_config(current_fleet.get('backlog'), {a['id'] for a in current_fleet['agents']}, current_fleet.get('roleSource'))
-                if (current_config['projectUrl'], current_config['scope']) == (config['projectUrl'], config['scope']):
+                if (current_config['projectUrl'], current_config['scope'], provider_of(current_config)) == (config['projectUrl'], config['scope'], provider_of(config)):
                     self.app.progress.observe_backlog(current_fleet, captured)
         except Exception as exc:
             with self.lock:
@@ -139,4 +139,4 @@ class Backlog:
         tracker = tracker_for(config)
         rows = tracker.history(config, iid)
         events = [{'time': r['created_at'], 'action': r['action'], 'label': r['label']['name']} for r in rows if r.get('label') and r['label']['name'].startswith('AI ')]
-        return {'events': sorted(events, key=lambda e: e['time'], reverse=True), 'notice': tracker.label + ' label history; up to 100 label events.'}
+        return {'events': sorted(events, key=lambda e: e['time'], reverse=True), 'notice': tracker.label + ' label history; label events, newest first.'}

@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import uuid
+from studio_bindings import runtime_binding, same_binding, host_config
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -142,6 +143,7 @@ class Controls:
         atomic_json(self.receipt_path, self.receipts)
     def preview(self, payload):
         state = self.app.store.snapshot()
+        self.app.runtimes.configure(state.get('hosts', []))
         fleet = next((f for f in state["fleets"] if f["id"] == payload.get("fleetId")), None)
         if fleet is None:
             raise ValueError("Fleet not found.")
@@ -171,7 +173,10 @@ class Controls:
             # Windows has a finite command-line length; queue is an argument-based CLI.
             if len(body) > 16000:
                 raise ValueError("This assignment is too long to send. Shorten notes or send roles separately.")
-            targets.append({"agentId": agent["id"], "name": agent["name"], "sessionId": agent["sessionId"], "text": body})
+            targets.append({"agentId": agent["id"], "name": agent["name"], "sessionId": agent["sessionId"], "text": body,
+                            "directory": agent['directory'], **runtime_binding(agent),
+                            "hostConfig": host_config(agent, state.get('hosts', [])),
+                            "effect": 'Starts a headless Claude turn after the session is closed; this is execution, not queued delivery.' if agent.get('backend') == 'claude-code' else 'Queues a message for the existing Codex session.'})
         preview = {"id": uuid.uuid4().hex, "fleetId": fleet["id"], "action": action,
                    "revision": state["revision"], "createdAt": time.time(), "targets": targets,
                    **({"deploymentId": payload["deploymentId"], "automation": payload.get("automation", False), "sourceAgentId": payload.get("sourceAgentId"), "idleOnly": payload.get("idleOnly", False), "purpose": payload.get("purpose", "")} if payload.get("deploymentId") else {})}
@@ -199,7 +204,7 @@ class Controls:
             if preview.get("purpose") == "workflow-adoption":
                 rid = preview["deploymentId"]
                 reserved = {t["agentId"] for c in self.receipts.values() if c.get("deploymentId") == rid and c.get("purpose") == "workflow-adoption"
-                            for t in c["targets"] if t["status"] in ("waiting", "queued", "unknown")}
+                            for t in c["targets"] if t["status"] in ("waiting", "queued", "started", "unknown")}
                 reserved |= {a["agentId"] for a in self.app.deployments.data["acks"] if a["releaseId"] == rid}
                 preview = deepcopy(preview)
                 preview["targets"] = [t for t in preview["targets"] if t["agentId"] not in reserved]
@@ -207,7 +212,7 @@ class Controls:
                     raise ValueError("These agents were already notified or acknowledged this release. Check existing receipts.")
             receipt = {**{k: preview[k] for k in ("deploymentId", "automation", "purpose") if k in preview}, "id": preview_id, "fleetId": preview["fleetId"], "action": preview["action"],
                        "status": "sending", "createdAt": time.time(),
-                       "targets": [{"agentId": t["agentId"], "sessionId": t["sessionId"], "name": t["name"], "status": "waiting"} for t in preview["targets"]]}
+                       "targets": [{"agentId": t["agentId"], "sessionId": t["sessionId"], "name": t["name"], **runtime_binding(t), "status": "waiting"} for t in preview["targets"]]}
             self.receipts[preview_id] = receipt
             self.persist()
             threading.Thread(target=self._dispatch, args=(deepcopy(preview),), daemon=True).start()
@@ -223,7 +228,7 @@ class Controls:
         agents = []
         for selected in targets:
             agent = next((a for a in fleet["agents"] if a["id"] == selected["agentId"]), None)
-            if not agent or not agent["enabled"] or agent["sessionId"] != selected["sessionId"]:
+            if not agent or not agent["enabled"] or not same_binding(agent, selected):
                 return "Workflow recipient was excluded or rebound."
             agents.append(agent)
         # Do not call app.status(): that acquires the trigger lock while a
@@ -249,16 +254,22 @@ class Controls:
                     if not recipient or not recipient["enabled"] or recipient["sessionId"] != target["sessionId"]:
                         raise ValueError("Workflow recipient was excluded or rebound before dispatch.")
                 with self.app.store.lock, self.lock:
+                    if preview.get('deploymentId') and preview['deploymentId'] != self.app.deployments.data['active'].get(preview['fleetId']):
+                        raise ValueError('Workflow deployment changed before dispatch.')
+                    fleet = self.app.store.fleet(preview['fleetId'])
+                    agent = next((a for a in fleet['agents'] if a['id'] == target['agentId']), None)
+                    if not agent or not agent['enabled'] or not same_binding(agent, target) or host_config(agent, self.app.store.snapshot().get('hosts', [])) != target.get('hostConfig'):
+                        raise ValueError('Agent or host binding changed before dispatch. Review again.')
                     reason = self.automatic_hold(preview, target)
                     if reason:
                         raise AutomationHeld(reason)
-                # Route by the agent's current backend and host binding.
-                agent = next((a for a in self.app.store.fleet(preview["fleetId"])["agents"] if a["id"] == target["agentId"]), {})
-                backend = self.app.runtimes.for_agent(agent)
-                if preview["action"] == "rename":
-                    status, detail = backend.rename(target["sessionId"], target["text"])
-                else:
-                    status, detail = backend.send(target["sessionId"], target["text"], agent.get("directory", ""))
+                    # Freeze the reviewed destination through the effect; never reroute a queued control.
+                    from studio_agents import RemoteBackend, RemoteHost
+                    backend = RemoteBackend(RemoteHost(target['hostConfig']), target.get('backend', 'codex')) if target.get('hostConfig') else self.app.runtimes.for_agent(target)
+                    if preview['action'] == 'rename':
+                        status, detail = backend.rename(target['sessionId'], target['text'])
+                    else:
+                        status, detail = backend.send(target['sessionId'], target['text'], target['directory'])
             except AutomationHeld as exc:
                 status, detail = "held", str(exc)
             except (subprocess.TimeoutExpired, TimeoutError, queue.Empty):
@@ -270,7 +281,7 @@ class Controls:
                 self.persist()
         with self.lock:
             receipt = self.receipts[preview["id"]]
-            receipt["status"] = "completed" if all(t["status"] in ("queued", "renamed") for t in receipt["targets"]) else "needs-attention"
+            receipt["status"] = "completed" if all(t["status"] in ("queued", "renamed", "started") for t in receipt["targets"]) else "needs-attention"
             receipt["finishedAt"] = time.time()
             self.persist()
         self.app.event("Agent control " + receipt["status"], preview["action"] + " · " + str(len(preview["targets"])) + " agent(s)", preview["fleetId"])

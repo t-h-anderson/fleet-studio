@@ -8,12 +8,12 @@ const stageName=id=>backlogData()?.stages?.find(s=>s.id===id)?.name||id;
 const agentReferences=t=>[...new Set((t.references||[]).map(r=>r.agentId))];
 function agentTicketBadge(id){
  const count=backlogItems().filter(t=>agentReferences(t).includes(id)).length;
- return '<button class="ticket-badge" data-agent-backlog="'+id+'" title="Tickets referenced by this agent; GitLab records ownership">'+icon('folder')+(backlogData()?.observedAt?count+' linked ticket'+(count===1?'':'s'):'Tickets')+'</button>';
+ return '<button class="ticket-badge" data-agent-backlog="'+id+'" title="Tickets referenced by this agent; Tracker records ownership">'+icon('folder')+(backlogData()?.observedAt?count+' linked ticket'+(count===1?'':'s'):'Tickets')+'</button>';
 }
 function roleTicketBadge(id){
  const count=backlogItems().filter(t=>(t.roleIds||[]).includes(id)).length;
  const agentIds=current().agents.filter(a=>(a.roleIds||[]).includes(id)).map(a=>a.id),linked=backlogItems().filter(t=>agentReferences(t).some(a=>agentIds.includes(a))).length;
- return '<button class="ticket-badge" data-role-backlog="'+id+'" title="Queue placement from GitLab labels">'+icon('folder')+(backlogData()?.observedAt?count+' in queue':'Backlog')+'</button>'+(linked?'<button class="ticket-badge" data-role-references="'+id+'" title="Tickets referenced by agents in this role">'+linked+' linked</button>':'');
+ return '<button class="ticket-badge" data-role-backlog="'+id+'" title="Queue placement from tracker labels">'+icon('folder')+(backlogData()?.observedAt?count+' in queue':'Backlog')+'</button>'+(linked?'<button class="ticket-badge" data-role-references="'+id+'" title="Tickets referenced by agents in this role">'+linked+' linked</button>':'');
 }
 function triggerContractMarkup(t){
  const link=current().roleLinks.find(l=>l.id===t.workflowLinkId),sources=current().agents.filter(a=>(a.roleIds||[]).includes(t.sourceRoleId)),targets=current().agents.filter(a=>(a.roleIds||[]).includes(t.targetRoleId));
@@ -34,7 +34,7 @@ async function loadBacklog(force=false){
 }
 function ticketCard(t){
  const refs=agentReferences(t).map(id=>current().agents.find(a=>a.id===id)?.name).filter(Boolean);
- return '<button class="work-ticket" data-ticket="'+t.iid+'"><span class="ticket-number">#'+t.iid+'</span><strong>'+esc(t.title)+'</strong><span class="ticket-meta">'+(refs.length?'Referenced by '+esc(refs.join(', ')):t.assignees.length?'GitLab: '+esc(t.assignees.join(', ')):'Unassigned in GitLab')+'</span></button>';
+ return '<button class="work-ticket" data-ticket="'+t.iid+'"><span class="ticket-number">#'+t.iid+'</span><strong>'+esc(t.title)+'</strong><span class="ticket-meta">'+(refs.length?'Referenced by '+esc(refs.join(', ')):t.assignees.length?'Tracker: '+esc(t.assignees.join(', ')):'Unassigned in tracker')+'</span></button>';
 }
 function selectedTickets(){
  return backlogItems().filter(t=>(backlogStage==='all'||backlogStage==='open'&&t.state!=='closed'||t.stage===backlogStage)&&(!backlogLabel||t.labels.includes(backlogLabel))&&(!backlogAgent||agentReferences(t).includes(backlogAgent))&&(!backlogRole||(t.roleIds||[]).includes(backlogRole))&&(!backlogReferenceRole||agentReferences(t).some(id=>current().agents.some(a=>a.id===id&&(a.roleIds||[]).includes(backlogReferenceRole))))&&(t.title+' #'+t.iid+' '+t.labels.join(' ')).toLowerCase().includes(query.toLowerCase()));
@@ -43,7 +43,7 @@ function backlogSummary(){
  const data=backlogData();
  if(!data?.config.projectUrl)return '<div class="backlog-strip"><span>Connect a GitLab or GitHub project to see tickets across the fleet.</span><button class="text-button" data-backlog-settings>Connect backlog</button></div>';
  const counts=Object.fromEntries((data.stages||[]).map(s=>[s.id,backlogItems().filter(t=>t.stage===s.id).length]));
- return '<div class="backlog-strip"><strong>Ticket flow</strong>'+(data.stages||[]).map(s=>'<button class="flow-chip '+s.id+'" data-backlog-stage="'+s.id+'">'+esc(s.name)+' <b>'+counts[s.id]+'</b></button>').join('')+'<span class="sync-note">'+(data.loading?'Refreshing GitLab…':data.error?'GitLab unavailable':data.observedAt?(data.stale?'Last snapshot · ':'GitLab · ')+ago(data.observedAt):'Loading GitLab…')+'</span></div>';
+ return '<div class="backlog-strip"><strong>Ticket flow</strong>'+(data.stages||[]).map(s=>'<button class="flow-chip '+s.id+'" data-backlog-stage="'+s.id+'">'+esc(s.name)+' <b>'+counts[s.id]+'</b></button>').join('')+'<span class="sync-note">'+(data.loading?'Refreshing tracker…':data.error?'Tracker unavailable':data.observedAt?(data.stale?'Last snapshot · ':'Tracker · ')+ago(data.observedAt):'Loading tracker…')+'</span></div>';
 }
 function renderBacklog(){
  const data=backlogData(),items=selectedTickets();
@@ -51,7 +51,7 @@ function renderBacklog(){
  const labels=[...new Set(backlogItems().flatMap(t=>t.labels))].sort();
  const settings=current().backlog||data?.config||{};
  const role=current().roles.find(r=>r.id===(backlogRole||backlogReferenceRole));
- const toolbar='<div class="definition-toolbar"><div><strong>Tickets moving through the project</strong><p>Live GitLab labels define queue stage. Agent links are display references.</p></div><div><button class="button small" data-backlog-settings>Project & links</button><button class="button small" id="refresh-backlog">'+icon('refresh')+'Refresh tickets</button></div></div>';
+ const toolbar='<div class="definition-toolbar"><div><strong>Tickets moving through the project</strong><p>Live tracker labels define queue stage. Agent links are display references.</p></div><div><button class="button small" data-backlog-settings>Project & links</button><button class="button small" id="refresh-backlog">'+icon('refresh')+'Refresh tickets</button></div></div>';
  const filters='<div class="backlog-filters"><label>Stage<select id="backlog-stage"><option value="open">All open</option><option value="all">All tickets</option>'+(data?.stages||[]).map(s=>'<option value="'+s.id+'">'+esc(s.name)+'</option>').join('')+'</select></label><label>Label<select id="backlog-label"><option value="">All labels</option>'+labels.map(l=>'<option value="'+esc(l)+'">'+esc(l)+'</option>').join('')+'</select></label><label>Agent reference<select id="backlog-agent"><option value="">All agents</option>'+current().agents.map(a=>'<option value="'+a.id+'">'+esc(a.name)+'</option>').join('')+'</select></label><div class="backlog-view-switch"><button class="button small '+(backlogView==='board'?'primary':'')+'" data-backlog-view="board">Flow board</button><button class="button small '+(backlogView==='table'?'primary':'')+'" data-backlog-view="table">Table</button></div>'+(role?'<button class="flow-chip" id="clear-backlog-role">'+esc(role.name)+(backlogReferenceRole?' references':' queue')+' &times;</button>':'')+'</div>';
  const notice=data?.error?'<div class="backlog-notice">'+esc(data.error)+(data.observedAt?' Showing the last successful snapshot.':'')+'</div>':data?.partial?'<div class="backlog-notice">The project exceeds the 5,000-ticket read limit. Counts cover loaded tickets only.</div>':'';
  let body='';
@@ -59,7 +59,7 @@ function renderBacklog(){
  else if(backlogView==='board')body='<div class="kanban">'+data.stages.filter(s=>backlogStage==='open'?s.id!=='closed':backlogStage==='all'||s.id===backlogStage).map(s=>{const tickets=items.filter(t=>t.stage===s.id);return '<section class="kanban-lane '+s.id+'"><div class="kanban-heading"><strong>'+esc(s.name)+'</strong><span>'+tickets.length+'</span></div>'+tickets.slice(0,backlogLimit).map(ticketCard).join('')+(tickets.length>backlogLimit?'<button class="text-button" data-more-tickets>Show more</button>':'')+(!tickets.length?'<p class="field-hint">No matching tickets</p>':'')+'</section>';}).join('')+'</div>';
  else{
   backlogPage=Math.min(backlogPage,Math.max(0,Math.ceil(items.length/40)-1));
-  body='<div class="table-wrap"><table class="backlog-table"><thead><tr><th>TICKET</th><th>STAGE</th><th>LABELS</th><th>REFERENCES / ASSIGNEES</th><th>UPDATED</th></tr></thead><tbody>'+items.slice(backlogPage*40,backlogPage*40+40).map(t=>'<tr><td><button class="ticket-title" data-ticket="'+t.iid+'">#'+t.iid+' '+esc(t.title)+'</button></td><td><span class="stage-tag '+t.stage+'">'+esc(stageName(t.stage))+'</span></td><td>'+t.labels.map(l=>'<span class="small-label">'+esc(l)+'</span>').join('')+'</td><td>'+agentReferences(t).map(id=>esc(current().agents.find(a=>a.id===id)?.name||'')).join(', ')+(t.assignees.length?'<span class="field-hint">GitLab: '+esc(t.assignees.join(', '))+'</span>':'')+'</td><td>'+esc(new Date(t.updatedAt).toLocaleDateString())+'</td></tr>').join('')+'</tbody></table></div><div class="backlog-pagination"><button class="button small" id="backlog-prev" '+(!backlogPage?'disabled':'')+'>Previous</button><span>'+items.length+' tickets &middot; page '+(backlogPage+1)+' of '+Math.max(1,Math.ceil(items.length/40))+'</span><button class="button small" id="backlog-next" '+((backlogPage+1)*40>=items.length?'disabled':'')+'>Next</button></div>';
+  body='<div class="table-wrap"><table class="backlog-table"><thead><tr><th>TICKET</th><th>STAGE</th><th>LABELS</th><th>REFERENCES / ASSIGNEES</th><th>UPDATED</th></tr></thead><tbody>'+items.slice(backlogPage*40,backlogPage*40+40).map(t=>'<tr><td><button class="ticket-title" data-ticket="'+t.iid+'">#'+t.iid+' '+esc(t.title)+'</button></td><td><span class="stage-tag '+t.stage+'">'+esc(stageName(t.stage))+'</span></td><td>'+t.labels.map(l=>'<span class="small-label">'+esc(l)+'</span>').join('')+'</td><td>'+agentReferences(t).map(id=>esc(current().agents.find(a=>a.id===id)?.name||'')).join(', ')+(t.assignees.length?'<span class="field-hint">Tracker: '+esc(t.assignees.join(', '))+'</span>':'')+'</td><td>'+esc(new Date(t.updatedAt).toLocaleDateString())+'</td></tr>').join('')+'</tbody></table></div><div class="backlog-pagination"><button class="button small" id="backlog-prev" '+(!backlogPage?'disabled':'')+'>Previous</button><span>'+items.length+' tickets &middot; page '+(backlogPage+1)+' of '+Math.max(1,Math.ceil(items.length/40))+'</span><button class="button small" id="backlog-next" '+((backlogPage+1)*40>=items.length?'disabled':'')+'>Next</button></div>';
  }
  const changes=data?.changes||[];
  $('content').innerHTML=toolbar+backlogSummary()+filters+notice+body+(changes.length?'<div class="backlog-changes"><h3>Movement observed while Studio is running</h3>'+changes.slice(0,8).map(c=>'<button class="text-button" data-ticket="'+c.iid+'">#'+c.iid+' '+esc(stageName(c.from))+' &rarr; '+esc(stageName(c.to))+'</button>').join('')+'</div>':'');
@@ -89,7 +89,7 @@ async function showTicket(iid){
  const t=backlogItems().find(t=>t.iid===iid);if(!t)return;
  const fleetId=activeId;
  $('backlog-dialog-title').textContent='#'+t.iid+' '+t.title;
- $('backlog-dialog-body').innerHTML='<div class="ticket-details"><span class="stage-tag '+t.stage+'">'+esc(stageName(t.stage))+'</span><a class="button small" href="'+esc(t.url)+'" target="_blank" rel="noreferrer">Open in GitLab</a><p>'+t.labels.map(l=>'<span class="small-label">'+esc(l)+'</span>').join('')+'</p><p>GitLab assignees: '+esc(t.assignees.join(', ')||'None')+'</p>'+(t.references||[]).map(r=>'<p>'+esc(current().agents.find(a=>a.id===r.agentId)?.name||'')+' &middot; '+esc(r.basis)+(r.observedAt?' &middot; '+esc(new Date(r.observedAt*1000).toLocaleString()):'')+'</p>').join('')+'<h3>Workflow label history</h3><div id="ticket-history">Loading GitLab history…</div></div>';
+ $('backlog-dialog-body').innerHTML='<div class="ticket-details"><span class="stage-tag '+t.stage+'">'+esc(stageName(t.stage))+'</span><a class="button small" href="'+esc(t.url)+'" target="_blank" rel="noreferrer">Open in tracker</a><p>'+t.labels.map(l=>'<span class="small-label">'+esc(l)+'</span>').join('')+'</p><p>Tracker assignees: '+esc(t.assignees.join(', ')||'None')+'</p>'+(t.references||[]).map(r=>'<p>'+esc(current().agents.find(a=>a.id===r.agentId)?.name||'')+' &middot; '+esc(r.basis)+(r.observedAt?' &middot; '+esc(new Date(r.observedAt*1000).toLocaleString()):'')+'</p>').join('')+'<h3>Workflow label history</h3><div id="ticket-history">Loading tracker history…</div></div>';
  $('backlog-dialog').dataset.ticket=String(iid);$('backlog-dialog').showModal();
  try{const history=await api('/api/backlog/history',{fleetId,iid});if($('backlog-dialog').dataset.ticket!==String(iid)||!$('ticket-history'))return;
  $('ticket-history').innerHTML='<p class="field-hint">'+esc(history.notice)+'</p>'+history.events.map(h=>'<p>'+esc(new Date(h.time).toLocaleString())+' &middot; '+esc(h.action)+' <strong>'+esc(h.label)+'</strong></p>').join('')+(!history.events.length?'<p class="field-hint">No workflow-label events returned.</p>':'');
@@ -101,7 +101,7 @@ renderAll=function(){
  if(view==='backlog'){
   $('fleet-title').textContent='Project backlog';$('fleet-description').textContent='Work, references and handoffs across the fleet.';
   $('search').placeholder='Find a ticket…';$('status-filter').classList.add('hidden');$('workspace-layout').classList.add('board-layout');
-  $('panel-footer-text').textContent='GitLab is the source of ticket state. Backlog refreshes every 90 seconds.';
+  $('panel-footer-text').textContent='Tracker is the source of ticket state. Backlog refreshes every 90 seconds.';
  }
  if(!backlogCache.has(activeId)&&!backlogRequests.has(activeId))loadBacklog();
 };

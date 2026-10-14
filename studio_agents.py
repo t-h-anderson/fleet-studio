@@ -6,6 +6,7 @@ agnostic of the agent vendor and its location. Backends never write native agent
 databases; they read metadata and use each CLI's supported commands.
 """
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -17,8 +18,9 @@ import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, HTTPRedirectHandler
 
+from studio_bindings import runtime_binding, session_key
 import studio_runtime
 from studio_activity import activity as codex_activity
 
@@ -55,6 +57,15 @@ class AgentBackend:
     def resume_command(self, session_id, directory):
         """Argument vector that reopens the session interactively in its folder."""
         raise NotImplementedError
+
+    def ready_to_launch(self, session_id):
+        """Recheck native ownership on the execution host immediately before launch."""
+        observed = self.observe([session_id]).get('sessions', {}).get(session_id, {})
+        if observed.get('pids'):
+            return False
+        if observed.get('error') or observed.get('status') != 'closed':
+            raise RuntimeError('Session is not confirmed closed; check its native client before opening it.')
+        return True
 
 
 class CodexBackend(AgentBackend):
@@ -110,15 +121,22 @@ class ClaudeTranscript:
 
     def __init__(self, path):
         self.path = path
+        self.lock = threading.RLock()
+        self.usage_by_message = {}
         self.offset = 0
         self.state = {"title": "", "cwd": "", "model": "", "tokensUsed": 0, "lastType": "",
                       "stopReason": None, "lastAt": "", "messages": []}
 
     def refresh(self):
+        with self.lock:
+            return deepcopy(self._refresh())
+
+    def _refresh(self):
         size = self.path.stat().st_size
         if size < self.offset:
             # A rewritten transcript invalidates accumulated counters.
-            self.__init__(self.path)
+            fresh = ClaudeTranscript(self.path)
+            self.state, self.offset, self.usage_by_message = fresh.state, 0, {}
         if size == self.offset:
             return self.state
         with self.path.open("rb") as stream:
@@ -154,9 +172,15 @@ class ClaudeTranscript:
             state["model"] = message.get("model") or state["model"]
             state["stopReason"] = message.get("stop_reason")
             usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
-            state["tokensUsed"] += sum(value for key, value in usage.items()
-                                       if key in ("input_tokens", "output_tokens", "cache_creation_input_tokens")
-                                       and type(value) is int and value > 0)
+            mid = message.get('id') or row.get('requestId') or row.get('uuid')
+            counters = {key: value for key, value in usage.items()
+                        if key in ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
+                        and type(value) is int and value >= 0}
+            old = self.usage_by_message.get(mid, {}) if mid else {}
+            updated = {k: max(v, old.get(k, 0)) for k, v in counters.items()}
+            state['tokensUsed'] += sum(updated.values()) - sum(old.get(k, 0) for k in updated)
+            if mid:
+                self.usage_by_message[mid] = {**old, **updated}
         text = claude_text(message.get("content"))
         if not text.strip():
             return
@@ -183,7 +207,14 @@ def claude_processes(session_id, directory=""):
             continue
         try:
             argv = (entry / "cmdline").read_bytes().split(b"\0")
-        except OSError:
+        except PermissionError:
+            try:
+                if entry.stat().st_uid == os.getuid():
+                    return None
+            except FileNotFoundError:
+                pass
+            continue
+        except FileNotFoundError:
             continue
         words = [part.decode("utf-8", "replace") for part in argv if part]
         if not words or not any(Path(w).name in ("claude", "claude.exe") or w.endswith("/claude/cli.js") for w in words[:2]):
@@ -194,9 +225,11 @@ def claude_processes(session_id, directory=""):
         resumed = [words[i + 1] for i, w in enumerate(words[:-1]) if w in ("--resume", "-r", "--session-id")]
         try:
             folder = os.readlink(entry / "cwd")
-        except OSError:
+        except FileNotFoundError:
             continue
-        if directory and not resumed and folder == directory:
+        except OSError:
+            return None
+        if directory and not resumed and Path(folder).resolve() == Path(directory).resolve():
             owners.append(int(entry.name))
     return owners
 
@@ -213,6 +246,8 @@ class ClaudeCodeBackend(AgentBackend):
         self.runtime = Path(runtime) if runtime else None
         self.lock = threading.Lock()
         self.readers = {}
+        self.send_lock = threading.Lock()
+        self.processes = {}
 
     def transcripts(self):
         projects = self.root / "projects"
@@ -257,7 +292,7 @@ class ClaudeCodeBackend(AgentBackend):
                 modified = path.stat().st_mtime
                 # Tool use and unanswered prompts leave a turn open; end_turn closes it.
                 open_turn = state["lastType"] == "user" or state["stopReason"] in ("tool_use", None)
-                item["turnStatus"] = "inProgress" if open_turn and now - modified < self.active_seconds else "completed"
+                item["turnStatus"] = "inProgress" if open_turn else "completed"
                 item["usage"] = {"tokensUsed": state["tokensUsed"], "model": state["model"]}
                 item["session"] = {"id": session_id, "name": state["title"] or "Untitled session",
                                    "directory": state["cwd"], "updatedAt": modified, "model": state["model"]}
@@ -266,7 +301,9 @@ class ClaudeCodeBackend(AgentBackend):
                 item["livenessKnown"] = owners is not None
                 if item["turnStatus"] == "inProgress":
                     item["status"] = "working"
-                elif owners is None or owners:
+                elif owners is None:
+                    item['status'] = 'unknown'
+                elif owners:
                     item["status"] = "idle"
                 else:
                     item["status"] = "closed"
@@ -276,12 +313,26 @@ class ClaudeCodeBackend(AgentBackend):
         return {"observedAt": now, "sessions": output, "catalogue": [], "errors": errors}
 
     def send(self, session_id, text, directory=""):
+        with self.send_lock:
+            previous = self.processes.get(session_id)
+            if previous is not None and previous.poll() is None:
+                raise RuntimeError('A Studio-started Claude turn is already running for this session.')
+            return self._send(session_id, text, directory)
+
+    def _send(self, session_id, text, directory):
         # Claude Code has no message queue. A headless resume runs one turn in the
         # same session, so refuse while an interactive client holds it.
         path = self.transcripts().get(session_id)
-        if path and time.time() - path.stat().st_mtime < self.active_seconds:
+        if not path:
+            raise RuntimeError('No saved Claude transcript found; refusing to resume an unidentified session.')
+        state = self.reader(path).refresh()
+        if not directory or not state['cwd'] or Path(directory).resolve() != Path(state['cwd']).resolve():
+            raise RuntimeError('The assigned folder differs from the saved Claude session.')
+        if time.time() - path.stat().st_mtime < self.active_seconds:
             raise RuntimeError("This Claude Code session wrote to its transcript recently. Deliver after its turn settles.")
         owners = claude_processes(session_id, directory)
+        if owners is None:
+            raise RuntimeError('Claude process ownership is unavailable on this host; no headless turn was started.')
         if owners:
             raise RuntimeError("A Claude Code client may have this session open (PID "
                                + ",".join(map(str, owners)) + "). Deliver at a safe boundary or close it first.")
@@ -291,14 +342,15 @@ class ClaudeCodeBackend(AgentBackend):
             folder.mkdir(parents=True, exist_ok=True)
             log = (folder / (session_id + "-" + str(int(time.time())) + ".log")).open("ab")
         try:
-            subprocess.Popen([self.executable, "-p", "--resume", session_id, "--output-format", "json", text],
+            process = subprocess.Popen([self.executable, "-p", "--resume", session_id, "--output-format", "json", '--', text],
                              cwd=directory or None, stdin=subprocess.DEVNULL, stdout=log or subprocess.DEVNULL,
                              stderr=subprocess.STDOUT if log else subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW,
                              start_new_session=os.name != "nt")
+            self.processes[session_id] = process
         finally:
             if log:
                 log.close()
-        return "queued", "Headless Claude Code turn started; agent adoption is not yet confirmed."
+        return 'started', 'Headless Claude Code process started; turn completion and agent adoption are not yet confirmed.'
 
     def activity(self, session_id, fixture=None):
         path = self.transcripts().get(session_id)
@@ -312,6 +364,11 @@ class ClaudeCodeBackend(AgentBackend):
 
     def resume_command(self, session_id, directory):
         return [self.executable, "--resume", session_id]
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise HTTPError(req.full_url, code, 'Remote node redirects are refused.', headers, fp)
 
 
 class RemoteHost:
@@ -330,14 +387,18 @@ class RemoteHost:
         request = Request(self.url + path, data=json.dumps(payload).encode("utf-8"), method="POST",
                           headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            with build_opener(NoRedirect).open(request, timeout=self.timeout) as response:
                 return json.load(response)
         except HTTPError as exc:
             try:
                 detail = json.load(exc).get("error", "")
             except ValueError:
                 detail = ""
+            if path in ('/node/send', '/node/rename', '/node/launch') and exc.code >= 500:
+                raise TimeoutError('Remote host ' + self.id + ' could not confirm the operation; inspect native state before retrying.') from None
             raise RuntimeError("Remote host " + self.id + " refused the request: " + (detail or str(exc.code))) from None
+        except (ValueError, UnicodeError):
+            raise TimeoutError('Remote host ' + self.id + ' returned an unreadable acknowledgement.') from None
         except (URLError, OSError, TimeoutError) as exc:
             raise TimeoutError("Remote host " + self.id + " is unreachable: " + str(exc)) from None
 
@@ -392,8 +453,12 @@ def clean_hosts(value):
         parts = urlsplit(url)
         loopback = parts.hostname in ("127.0.0.1", "localhost", "::1")
         # Plain HTTP is accepted only for loopback, i.e. an SSH or similar tunnel.
-        if parts.scheme not in ("https", "http") or (parts.scheme == "http" and not loopback) or parts.username or parts.password or parts.query or parts.fragment:
+        if not parts.hostname or parts.scheme not in ("https", "http") or (parts.scheme == "http" and not loopback) or parts.username or parts.password or parts.query or parts.fragment:
             raise ValueError("Remote host " + host_id + " needs an HTTPS URL, or a loopback HTTP tunnel, without credentials.")
+        try:
+            parts.port
+        except ValueError:
+            raise ValueError('Remote host has an invalid port.') from None
         if not isinstance(token_env, str) or not token_env.replace("_", "").isalnum() or len(token_env) > 100:
             raise ValueError("Remote host " + host_id + " needs the name of the environment variable holding its token.")
         name = raw.get("name", host_id)
@@ -402,16 +467,6 @@ def clean_hosts(value):
         ids.add(host_id)
         output.append({"id": host_id, "name": name.strip(), "url": url.rstrip("/"), "tokenEnv": token_env})
     return output
-
-
-def runtime_binding(agent):
-    """Backend and host of an agent, defaulting records made before bindings existed."""
-    binding = {}
-    if agent.get("backend", "codex") != "codex":
-        binding["backend"] = agent["backend"]
-    if agent.get("hostId", LOCAL_HOST) != LOCAL_HOST:
-        binding["hostId"] = agent["hostId"]
-    return binding
 
 
 def clean_binding(agent, host_ids):
@@ -458,17 +513,27 @@ class Runtimes:
         if self.local["codex"].root.is_dir():
             groups.setdefault((LOCAL_HOST, "codex"), set())
         merged = {"observedAt": time.time(), "sessions": {}, "catalogue": [], "errors": []}
-        for (host, backend), ids in sorted(groups.items()):
+        def read(group):
+            (host, backend), ids = group
             try:
-                result = self.backend(backend, host).observe(sorted(ids))
+                return self.backend(backend, host).observe(sorted(ids))
             except Exception as exc:
+                return exc
+        grouped = sorted(groups.items())
+        with ThreadPoolExecutor(max_workers=min(16, max(1, len(grouped)))) as pool:
+            results = list(pool.map(read, grouped))
+        for ((host, backend), ids), result in zip(grouped, results):
+            if isinstance(result, Exception):
+                exc = result
                 merged["errors"].append(("" if host == LOCAL_HOST else host + " · ") + backend + ": " + str(exc))
                 for sid in ids:
-                    merged["sessions"][sid] = {"sessionId": sid, "status": "unknown", "pids": [], "observedAt": time.time(),
+                    merged["sessions"][session_key({"sessionId": sid, "backend": backend, "hostId": host})] = {"sessionId": sid, "status": "unknown", "pids": [], "observedAt": time.time(),
                                                "error": str(exc), "backend": backend, "hostId": host, "usage": {}}
                 continue
             for sid, item in result.get("sessions", {}).items():
-                merged["sessions"][sid] = {**item, "backend": backend, "hostId": host}
+                if sid not in ids:
+                    continue
+                merged["sessions"][session_key({"sessionId": sid, "backend": backend, "hostId": host})] = {**item, "backend": backend, "hostId": host}
             merged["catalogue"] += [{**row, "backend": backend, "hostId": host} for row in result.get("catalogue", [])]
             merged["errors"] += result.get("errors", [])
         if self.local["claude-code"].root.joinpath("projects").is_dir():
@@ -476,7 +541,8 @@ class Runtimes:
                 merged["catalogue"] += [{**row, "hostId": LOCAL_HOST} for row in self.local["claude-code"].catalogue()]
             except OSError as exc:
                 merged["errors"].append("Claude Code catalogue: " + str(exc))
-        merged["catalogue"] += [row for rows in self.remote_catalogue.values() for row in rows]
+        merged["catalogue"] += [row for rows in list(self.remote_catalogue.values()) for row in rows]
+        merged['observedAt'] = time.time()
         return merged
 
     def refresh_remote_catalogue(self):

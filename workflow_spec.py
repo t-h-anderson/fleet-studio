@@ -52,6 +52,11 @@ SCHEMA = obj({
 SCHEMA.update({"$schema": "https://json-schema.org/draft/2020-12/schema", "title": "Fleet Studio workflow v1"})
 # Optional for backward-compatible reading of immutable v1.0/v1.1 releases.
 SCHEMA["properties"]["triggers"]["items"]["properties"]["recipientMode"] = choice("single", "all")
+# Optional role runtime constraint: which agent backends and locations may hold the role.
+# An empty backend list allows any backend. Absent means unconstrained, so earlier releases keep their digests.
+RUNTIME = obj({"backends": {"type": "array", "items": choice("codex", "claude-code"), "maxItems": 2, "uniqueItems": True},
+               "location": choice("any", "local", "remote")})
+SCHEMA["properties"]["roles"]["items"]["properties"]["runtime"] = RUNTIME
 
 
 def validate_node(value, schema, at="$", depth=0):
@@ -162,7 +167,8 @@ def export_spec(fleet):
     if any(t.get("workflowLinkId") and t["workflowLinkId"] not in hid for t in fleet.get("triggers", [])):
         raise ValueError("A trigger links to a removed handoff. Remove or rebuild that trigger before exporting or deploying.")
     meta["roles"] = [{"id": rid[r["id"]], "name": r["name"], "kind": r.get("kind", "subagent" if r.get("key") == "subagent-reviewers" else "human" if r.get("key") == "project-owner" else "agent"),
-                      "responsibilities": r["responsibilities"], "authority": r["authority"], "sources": r.get("sources", [])} for r in fleet["roles"]]
+                      "responsibilities": r["responsibilities"], "authority": r["authority"], "sources": r.get("sources", []),
+                      **({"runtime": deepcopy(r["runtime"])} if r.get("runtime") else {})} for r in fleet["roles"]]
     meta["handoffs"] = [{"id": hid[h["id"]], "source": rid[h["source"]], "target": rid[h["target"]],
                          "action": h["label"], "when": h["trigger"], "artifact": h["artifact"], "guard": h["condition"],
                          "sources": h.get("sources", [])} for h in fleet["roleLinks"]]
@@ -190,6 +196,7 @@ def apply_spec(fleet, spec):
         old = match(fleet["roles"], role, "role", "name")
         roles.append({"id": old["id"] if old else str(uuid.uuid4()), "specId": role["id"], "key": key_for(role["name"]),
                       **{k: role[k] for k in ("name", "kind", "responsibilities", "authority", "sources")},
+                      **({"runtime": deepcopy(role["runtime"])} if "runtime" in role else {}),
                       "baseline": deepcopy(old.get("baseline")) if old else None,
                       "position": deepcopy(old["position"]) if old else {"x": 80 + i % 3 * 360, "y": 80 + i // 3 * 260}})
     rmap = {r["specId"]: r["id"] for r in roles}
@@ -243,6 +250,8 @@ def render(spec, role_ids=None):
     for role in spec["roles"]:
         if role_ids is None or role["id"] in role_ids:
             lines += ["## Role: " + role["name"] + " [" + role["id"] + "]", "", "Kind: " + role["kind"], "", role["responsibilities"], "", "Authority: " + role["authority"], ""]
+            if "runtime" in role:
+                lines += ["Runtime: " + (", ".join(role["runtime"]["backends"]) or "any backend") + "; location " + role["runtime"]["location"], ""]
     lines += ["## Handoffs", ""]
     for h in spec["handoffs"]:
         if role_ids is None or h["source"] in role_ids or h["target"] in role_ids:
@@ -283,6 +292,7 @@ def render(spec, role_ids=None):
 
 
 def assignment_document(fleet, spec, agent, release_id, app_root):
+    from studio_trackers import tracker_label
     def quote(value):
         return "'" + str(value).replace("'", "''") + "'"
     by_id = {r["id"]: stable(r, "role") for r in fleet["roles"]}
@@ -290,7 +300,7 @@ def assignment_document(fleet, spec, agent, release_id, app_root):
     lines = ["# Assignment: " + agent["name"], "", "Agent ID: " + agent["id"], "Release: " + release_id, "",
              "Individual scope: " + agent.get("notes", ""), "", "## Workflow event reporting", "",
              "Only report a handoff after its artifact and guard are satisfied and the trigger is enabled in this release. Use the same stable event ID and identical details for retries of the same logical handoff (ticket + exact head + handoff); do not create a new ID to retry delivery. Name the actual recipient with --to; multiple Writers must never receive the same assignment by accident. Include the current ticket/comment, exact candidate/evidence artifact, and bounded next action. A report notifies the target; it does not grant acceptance or revoke a stop. Held deliveries retry automatically while this release remains active; uncertain dispatch outcomes require inspection.", "",
-             "Recurring idle checks are scheduled by the Studio server. Check current authorized work and handoffs, then finish the check if none is eligible; do not run your own polling/sleep loop or post repeated no-change ticket comments. Explicit pauses, blocked/limited goals and custody remain in force. GitLab remains the task record and fallback when Studio is unavailable.", ""]
+             "Recurring idle checks are scheduled by the Studio server. Check current authorized work and handoffs, then finish the check if none is eligible; do not run your own polling/sleep loop or post repeated no-change ticket comments. Explicit pauses, blocked/limited goals and custody remain in force. " + tracker_label(fleet) + " remains the task record and fallback when Studio is unavailable.", ""]
     for trigger in fleet.get("triggers", []):
         if trigger["kind"] == "event" and trigger["sourceRoleId"] in agent.get("roleIds", []):
             command = ("python " + quote(Path(app_root) / "fleet_event.py") + " --fleet " + fleet["id"] + " --agent " + agent["id"] +
@@ -310,6 +320,27 @@ def assignment_document(fleet, spec, agent, release_id, app_root):
               "python " + quote(Path(app_root) / "workflow_client.py") + " acknowledge --fleet " + fleet["id"] + " --agent " + agent["id"] + " --release " + release_id,
               "```", "", render(spec, roles)]
     return "\n".join(lines)
+
+
+def runtime_problems(fleet):
+    """Enabled agents whose backend or host breaks a role's runtime constraint."""
+    roles = {r["id"]: r for r in fleet.get("roles", [])}
+    problems = []
+    for agent in fleet.get("agents", []):
+        if not agent.get("enabled", True):
+            continue
+        backend, remote = agent.get("backend", "codex"), agent.get("hostId", "local") != "local"
+        if remote and agent.get("sessionId"):
+            problems.append(agent["name"] + " is remote: managed workflow deployment requires remote assignment and receipt transport, which is not supported yet. Local monitoring and explicit remote controls remain available.")
+        for rid in agent.get("roleIds", []):
+            runtime = roles.get(rid, {}).get("runtime")
+            if not runtime:
+                continue
+            if runtime["backends"] and backend not in runtime["backends"]:
+                problems.append(agent["name"] + " uses " + backend + " but " + roles[rid]["name"] + " requires " + " or ".join(runtime["backends"]))
+            if runtime["location"] != "any" and remote != (runtime["location"] == "remote"):
+                problems.append(agent["name"] + " must run " + runtime["location"] + "ly for " + roles[rid]["name"])
+    return problems
 
 
 def project_ticket(ticket, spec):

@@ -1,4 +1,5 @@
 """Evidence-labelled progress projections. This database never owns tracker tasks."""
+from studio_bindings import runtime_binding, session_key, same_binding
 from contextlib import closing
 from copy import deepcopy
 import hashlib
@@ -8,6 +9,8 @@ import sqlite3
 import threading
 import time
 from urllib.parse import urlsplit, urlunsplit
+
+from studio_trackers import issue_prefix
 
 KINDS = ('task-started', 'progress-updated', 'blocked', 'unblocked', 'handoff-received', 'work-finished', 'test-result')
 DEFAULTS = {'handoffMinutes': 30, 'quietMinutes': 60, 'retentionDays': 90}
@@ -48,7 +51,7 @@ def task_key(value):
 def configuration(fleet):
     from studio_backlog import clean_config
     c = clean_config(fleet.get('backlog'), {a['id'] for a in fleet['agents']}, fleet.get('roleSource'))
-    return c, json.dumps([c['projectUrl'], c['scope']], separators=(',', ':'))
+    return c, json.dumps([c['projectUrl'], c['scope']] + ([c['provider']] if 'provider' in c else []), separators=(',', ':'))
 
 
 class Progress:
@@ -155,7 +158,7 @@ class Progress:
                 prior = db.execute('SELECT data FROM handoffs WHERE fleet=? AND id=?', (fid, aid)).fetchone()
                 old = json.loads(prior['data']) if prior else {}
                 value = {k: action.get(k) for k in ('id', 'name', 'createdAt', 'status', 'detail', 'ticket', 'eventId',
-                         'targetAgentId', 'targetName', 'targetSessionId', 'targetDirectory', 'triggerId', 'sourceAgentId', 'deploymentId', 'reconciliation', 'releaseRevalidations')}
+                         'targetAgentId', 'targetName', 'targetSessionId', 'targetDirectory', 'triggerId', 'sourceAgentId', 'deploymentId', 'reconciliation', 'releaseRevalidations', 'targetRuntime')}
                 value['receivedAt'] = old.get('receivedAt')
                 for key in ('receiptSource', 'receiptEvidence'):
                     value[key] = old.get(key)
@@ -172,7 +175,7 @@ class Progress:
         with self.lock, closing(self.connect()) as db, db:
             for fleet in fleets:
                 for agent in fleet['agents']:
-                    observed = monitor.get('sessions', {}).get(agent['sessionId'])
+                    observed = monitor.get('sessions', {}).get(session_key(agent))
                     if not observed:
                         continue
                     row = db.execute('SELECT data FROM sessions WHERE fleet=? AND agent=?', (fleet['id'], agent['id'])).fetchone()
@@ -202,15 +205,15 @@ class Progress:
             deployed = self.app.deployments.release(rid)['fleet']
             agent = next((a for a in fleet['agents'] if a['id'] == aid), None)
             binding = next((a for a in deployed['agents'] if a['id'] == aid), None)
-            if not agent or not binding or not agent['enabled'] or not binding['enabled'] or any(agent.get(k) != binding.get(k) for k in ('sessionId', 'directory', 'roleIds')) or payload.get('sessionId') != binding['sessionId']:
+            if not agent or not binding or not agent['enabled'] or not binding['enabled'] or not same_binding(agent, binding, ('sessionId', 'directory', 'roleIds')) or payload.get('sessionId') != binding['sessionId']:
                 raise ValueError('Reporting agent no longer matches the deployed binding.')
             event = plain(payload.get('eventId'), 'eventId', 200, True)
             task = link(payload.get('taskUrl'), 'taskUrl')
             config, _ = configuration(fleet)
-            if config['projectUrl'] and not task_key(task).startswith(task_key(config['projectUrl']) + '/-/issues/'):
+            if config['projectUrl'] and not task_key(task).startswith(task_key(issue_prefix(config)) + '/'):
                 raise ValueError('Task must belong to the configured tracker project.')
             data = {'kind': kind, 'agentId': aid, 'agentName': agent['name'], 'sessionId': agent['sessionId'],
-                    'directory': agent['directory'], 'releaseId': rid, 'eventId': event,
+                    'directory': agent['directory'], **runtime_binding(agent), 'releaseId': rid, 'eventId': event,
                     'taskUrl': task_key(task), 'evidenceUrl': link(payload.get('evidenceUrl'), 'evidenceUrl'),
                     'summary': plain(payload.get('summary', ''), 'summary'),
                     'reason': plain(payload.get('reason', ''), 'reason', required=kind == 'blocked'),
@@ -246,7 +249,7 @@ class Progress:
                 if kind == 'handoff-received':
                     row = db.execute('SELECT data FROM handoffs WHERE fleet=? AND id=?', (fid, data['handoffId'])).fetchone()
                     handoff = json.loads(row['data']) if row else None
-                    if not handoff or handoff['targetAgentId'] != aid or handoff.get('targetSessionId') != agent['sessionId'] or handoff.get('targetDirectory') != agent['directory'] or task_key(handoff.get('ticket') or '') != data['taskUrl']:
+                    if not handoff or handoff['targetAgentId'] != aid or handoff.get('targetSessionId') != agent['sessionId'] or handoff.get('targetDirectory') != agent['directory'] or runtime_binding(agent) != (handoff.get('targetRuntime') or {}) or task_key(handoff.get('ticket') or '') != data['taskUrl']:
                         raise ValueError('Receipt must match this agent, task and original handoff binding.')
                     handoff['receivedAt'] = now
                     handoff['receiptSource'] = 'agent-report'
@@ -345,7 +348,7 @@ class Progress:
         for agent in runtime['agents']:
             rs = sorted([r for r in reports if r['agentId'] == agent['id']], key=lambda r:r['at'], reverse=True)
             for r in rs:
-                r['bindingCurrent'] = r['releaseId'] == rid and r['sessionId'] == agent['sessionId'] and r['directory'] == agent['directory']
+                r['bindingCurrent'] = r['releaseId'] == rid and same_binding(r, agent)
                 t = task_by_url.get(r['taskUrl'])
                 r['trackerState'] = t['state'] if t else None
                 r['conflict'] = bool(t and t['state'] == 'closed' and r['kind'] != 'work-finished')
@@ -357,7 +360,7 @@ class Progress:
                     attention.append({'kind':'blocked','agentId':agent['id'],'taskUrl':r['taskUrl'],'at':r['blockedSince'],'message':r['reason'], 'nextAction':r['nextAction']})
                 elif r['kind'] != 'work-finished' and now - r['at'] >= settings['quietMinutes'] * 60:
                     attention.append({'kind':'quiet','agentId':agent['id'],'taskUrl':r['taskUrl'],'at':r['at'],'message':'No recent meaningful report; inspect activity before intervening.'})
-            observed = deepcopy(monitor.get('sessions', {}).get(agent['sessionId'], {}))
+            observed = deepcopy(monitor.get('sessions', {}).get(session_key(agent), {}))
             observed['stale'] = not observed.get('observedAt') or now - observed['observedAt'] > 20
             stopped = not observed['stale'] and observed.get('goalStatus') in ('blocked', 'paused', 'budget_limited', 'usage_limited')
             blocked_report = next((r for r in rs if r.get('bindingCurrent') and r.get('blockedSince') and r.get('trackerState') != 'closed'), None)

@@ -1,13 +1,18 @@
 # Fleet Studio
 
-A local Windows application for designing, deploying and monitoring supervised
-multi-agent workflows. The external tracker owns tasks and acceptance; Studio
-owns workflow definitions, local agent bindings and communication receipts.
+A local application for designing, deploying and monitoring supervised
+multi-agent workflows. The external tracker (GitLab or GitHub) owns tasks and
+acceptance; Studio owns workflow definitions, agent bindings and communication
+receipts. Monitor Codex CLI or Claude Code sessions on this computer or remote
+machines running a fleet node. Managed workflow deployment currently supports
+local agents; remote assignment delivery is still pending.
 
 ## Start
 
-Requires Python 3.11+, Windows, and Codex CLI for agent controls. GitLab reads use
-an existing `glab` login. Node is needed only for browser/layout tests.
+Requires Python 3.11+ and the CLI for each agent backend you use (Codex CLI,
+Claude Code). GitLab reads use an existing `glab` login and GitHub reads an
+existing `gh` login. Windows opens agents in Windows Terminal; Linux and macOS
+use tmux. Node is needed only for browser/layout tests.
 
 ```powershell
 python fleet_studio.py --open
@@ -16,13 +21,84 @@ python fleet_studio.py --open
 Alternatively run `Start-FleetStudio.ps1`. The loopback server normally uses
 http://127.0.0.1:8765. A new installation starts with an empty fleet. Add agents
 and link their existing sessions and folders through the roster/session library.
-The browser displays activity and queues instructions; interactive sessions run
-in Windows Terminal.
+The browser displays activity and previews instructions; interactive sessions run
+in Windows Terminal or tmux.
 
 Use `--data-root <folder>` to keep configuration and observations outside the
 checkout. Stop the existing Studio server through App settings before starting
 another version against the same data directory. Stopping Studio leaves agent
 sessions running.
+
+## Agent backends and hosts
+
+Each agent has a **backend** and a **host**, chosen in the agent editor:
+
+| Backend | Observation | Delivery | Rename | Native goals |
+| --- | --- | --- | --- | --- |
+| Codex CLI | Native metadata DBs and writer locks | `codex queue` (queued for the next turn) | Yes | Local only |
+| Claude Code | Transcript in `~/.claude/projects` (or `CLAUDE_CONFIG_DIR`) | Explicit headless `claude -p --resume` turn on supported hosts | No | No |
+
+Claude Code has no message queue, so automatic workflow delivery is held.
+Explicit delivery previews explain that applying starts a headless turn. Studio
+requires a saved transcript matching the assigned folder and refuses delivery
+while it was written in the last 90 seconds, a Claude process may hold the
+session, or process ownership is unknown. It prevents a second Studio-started
+turn while the first process runs. Keep the native client closed during launch;
+Studio cannot prevent a separate client being opened concurrently. A `started`
+receipt confirms process creation, not turn completion or assignment adoption.
+Headless output logs are kept in `.runtime/claude-turns/`. Activity displays only
+public text blocks, excluding thinking, tool inputs and tool results. Token
+counts include input, output, cache creation and cache reads; repeated streaming
+usage records are deduplicated. These totals are not billing estimates.
+
+Codex process liveness uses Windows Restart Manager, `/proc` on Linux or `lsof`
+on macOS. Claude ownership detection currently requires Linux `/proc`; Windows
+and macOS can monitor transcripts, but Studio refuses headless sends and terminal
+launches when ownership cannot be established. Unknown ownership is never treated
+as idle, and old unfinished turns are not inferred to have completed.
+
+Claude assignments must be loaded explicitly with `workflow_client.py instructions`
+at safe task boundaries and acknowledged by the agent. Automatic entry-point
+installation currently creates Codex's `AGENTS.override.md` and rejects Claude
+bindings; Claude does not automatically consume that file.
+
+### Remote hosts
+
+Run a fleet node on each remote machine:
+
+```bash
+export FLEET_NODE_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+python fleet_node.py                         # loopback; reach it through an SSH tunnel
+python fleet_node.py --bind 0.0.0.0 --cert node.pem --key node.key   # direct HTTPS
+```
+
+In Studio, open the fleet editor and list each node under **Remote fleet nodes**
+as `<id> <url> <TOKEN_ENV_NAME>`, then start Studio with that environment
+variable set to the node's token. Tokens are never written to Studio's files.
+URLs must be HTTPS, or `http://127.0.0.1` for a tunnel such as
+`ssh -L 8790:127.0.0.1:8790 build-box`. Select the host in each agent's editor;
+its folder is validated by the node, not locally.
+
+Nodes accept only Studio's own operations: observe, catalogue, public activity,
+plain-text delivery (slash and shell commands are rejected), rename and open in
+tmux. Unreachable hosts mark their sessions `unknown`, which holds automatic
+delivery like any other unavailable observation. Native goal controls remain
+local-Codex only. Redirects are refused so bearer credentials cannot follow them.
+Server errors after a mutation are reported as uncertain and are not retried
+automatically. Nodes recheck native session ownership before opening a terminal.
+
+Remote nodes do not yet receive Studio's deployed assignment files or support
+the local reporting/adoption endpoint. Deployment and entry-point installation
+therefore reject enabled remote bindings. Remote observation and explicit
+controls remain available; remote managed workflows require a future node
+deployment/reporting protocol.
+
+A deployed release records each agent's backend and host. Changing either
+counts as a rebinding: the agent is excluded from automatic delivery until a
+new release is reviewed and acknowledged.
+Session identity includes host, backend and native ID, keeping observations and
+token counters separate even when different hosts reuse the same native ID.
+Controls retain the reviewed binding and host endpoint through dispatch.
 
 ## Progress
 
@@ -68,17 +144,19 @@ excluded; these durations are not logged work effort. Timing starts afresh when
 the project or deployed workflow changes. No historical state transitions are
 inferred from a ticket's `updated_at` timestamp.
 
-Native session token counters are read from Codex metadata without reading
-transcripts. Session totals include earlier work; the separately displayed
+Codex session token counters are read from native metadata; Claude counters come
+from transcript usage records. Session totals include earlier work; the separately displayed
 observed usage counts positive increments since the first sample. Counter resets
 are flagged and shared sessions counted once. Increments across downtime are
 included when the counter remains monotonic. Unavailable/stale sessions are
 excluded from totals with coverage shown. Goal usage/budgets come from the native
 goal record. These are token counts, not billing costs or ticket attribution.
 
-GitLab CI refreshes in the background about every 90 seconds, showing the latest
-10 project pipelines across branches, their commit, ref and status, plus duration,
-queue time and published test totals for the latest pipeline when available.
+GitLab CI or GitHub Actions refreshes in the background about every 90 seconds,
+showing the latest 10 project pipelines/runs across branches, their commit, ref
+and status, plus duration and queue time when available. GitLab supplies published
+test totals for the latest pipeline when available; GitHub Actions does not expose
+test totals through this adapter. Changing providers invalidates cached evidence.
 Missing reports and failed reads are labelled explicitly. A successful pipeline
 does not imply tests were published or establish task acceptance.
 
@@ -104,11 +182,18 @@ Metrics are returned in the `metrics` member of `GET /api/progress`, with per-ta
 configured history retention. See [MONITORING.md](MONITORING.md) for definitions
 and the next useful measurements.
 
-Connect a project through **Backlog → Project & links**. GitLab refreshes about
-every 90 seconds in the server, including while the browser is closed. Session
-observations and delivery checks run approximately every five seconds. The
-tracker adapter exposes `snapshot(config)` and `history(config, iid)`; GitLab is
-the initial implementation. Optional `backlog.legacyReferences` maps agent IDs
+Connect a project through **Backlog → Project & links**. The tracker is
+detected from the URL (`github.com` is GitHub, anything else GitLab); choose
+GitHub explicitly for GitHub Enterprise. The tracker refreshes about every 90
+seconds in the server, including while the browser is closed. Session
+observations and delivery checks run approximately every five seconds.
+
+Adapters in `studio_trackers.py` expose `snapshot(config)`, `history(config, iid)`
+and `pipelines(project)` with one normalised shape. GitHub issues use the same
+label conventions, and `open` maps to `opened`, so workflow ticket states apply
+unchanged. Pull requests are excluded from tickets. GitHub Actions runs map
+onto the pipeline view; GitHub has no native test-report summary, so test
+totals come from agent-reported evidence. Optional `backlog.legacyReferences` maps agent IDs
 to local status files; those files supply display references only.
 
 ## Design and deploy
@@ -117,7 +202,9 @@ Import `workflows/sample.workflow.json` or build roles, handoffs, ticket-state
 mapping, policies and triggers in the editors. The sample is a generic reviewed
 delivery process with structured progress reporting.
 
-1. Edit the draft, role assignments and communication contracts.
+1. Edit the draft, role assignments and communication contracts. A role may
+   constrain its runtime (allowed backends, local or remote host); deployment
+   is refused while an assigned agent breaks that constraint.
 2. Review deployment: inspect definition changes, recipient bindings, enabled
    triggers and pending handoffs.
 3. Deploy an immutable local release.
@@ -204,7 +291,9 @@ projection, separately from native Codex databases. Unresolved handoffs and
 compact deduplication identities survive observation retention. This is not an
 editable task store. All runtime/configuration files are ignored by Git.
 
-Existing workflow format version 1 remains supported. Importing the sample does
+Existing workflow format version 1 remains supported. The optional role
+`runtime` field (`{"backends": [...], "location": "any|local|remote"}`) is
+omitted when unset, so earlier releases keep their digests. Importing the sample does
 not replace an active release until explicitly deployed. Existing local
 configurations, releases, acknowledgement records and delivery identities remain
 in their data directory; none are distributed with this repository.
@@ -274,7 +363,8 @@ npm run test:ui
 python -B workflow_spec.py workflows/sample.workflow.json --output workflows/SAMPLE_WORKFLOW.md --check
 ```
 
-Browser tests use Playwright with installed Microsoft Edge and create synthetic
+Browser tests use Playwright with installed Microsoft Edge (remove the
+`channel` option to use bundled Chromium elsewhere) and create synthetic
 fleets in temporary directories. Real agent launches/controls and live tracker
 reads are disabled. Backend tests mock native sends. Screenshots and generated
 test results are local artifacts and are not committed.

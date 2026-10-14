@@ -1,4 +1,5 @@
 """Reviewed installation of stable workflow entry points in assigned agent folders."""
+from studio_bindings import same_binding
 import base64
 from copy import deepcopy
 import json
@@ -7,6 +8,7 @@ from pathlib import Path
 import time
 import uuid
 from workflow_spec import digest
+from studio_trackers import tracker_label
 
 
 class EntryPoints:
@@ -38,7 +40,7 @@ class EntryPoints:
                 "The deployed workflow replaces workflow instructions in the older roles, agent backlog and handoff documents. "
                 "Continue to read repository AGENTS.md and applicable engineering guides for coding/testing requirements, source/publication restrictions and safety. "
                 "Preserve explicit task stops, current ticket/file custody, claims and host recovery rules. A workflow deployment does not grant new source permissions or resume stopped work. "
-                "Report conflicts or missing assignments at a safe boundary. GitLab remains the live task, claim and evidence record.\n")
+                "Report conflicts or missing assignments at a safe boundary. " + tracker_label(fleet) + " remains the live task, claim and evidence record.\n")
 
     @staticmethod
     def target(directory):
@@ -78,7 +80,11 @@ class EntryPoints:
         deployed = {a["id"]: a for a in self.app.deployments.release(rid)["fleet"]["agents"]}
         changes, groups = [], {}
         for agent in agents:
-            if agent["id"] not in deployed or any(deployed[agent["id"]][k] != agent[k] for k in ("directory", "sessionId")):
+            if agent.get("hostId", "local") != "local":
+                raise ValueError("Remote entry-point installation is not supported; remote paths must never be opened locally.")
+            if agent.get('backend', 'codex') != 'codex':
+                raise ValueError('Automatic entry-point installation supports Codex only. Load Claude assignments explicitly with workflow_client.py instructions.')
+            if agent["id"] not in deployed or not same_binding(deployed[agent["id"]], agent):
                 raise ValueError("Agent bindings changed. Deploy again before installing entry points.")
             if not agent["directory"]:
                 raise ValueError("Assign an agent folder first.")
@@ -87,7 +93,7 @@ class EntryPoints:
             groups.setdefault(key, {"target": target, "agents": []})["agents"].append(agent)
         for group in groups.values():
             target, members = group["target"], group["agents"]
-            peers = [a for a in fleet["agents"] if a["directory"] and Path(a["directory"]).resolve() == target.parent]
+            peers = [a for a in fleet["agents"] if a.get("hostId", "local") == "local" and a["directory"] and Path(a["directory"]).resolve() == target.parent]
             if any(a["id"] not in ids for a in peers):
                 raise ValueError("Include all agents sharing a folder when reviewing its entry point.")
             before = target.read_bytes() if target.exists() else None

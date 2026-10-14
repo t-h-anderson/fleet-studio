@@ -1,4 +1,5 @@
 """Reviewed handoff repair and external receipts, without dispatch or acceptance."""
+from studio_bindings import runtime_binding, same_binding
 from copy import deepcopy
 import hashlib
 import json
@@ -56,10 +57,10 @@ class Reconciliation:
         for aid in (action['sourceAgentId'], action['targetAgentId']):
             bindings = [next((a for a in f['agents'] if a['id'] == aid), None) for f in (old['fleet'], new['fleet'], live)]
             keys = ('id', 'name', 'sessionId', 'directory', 'roleIds', 'notes', 'enabled')
-            if any(not a or not a['enabled'] for a in bindings) or any({k: a.get(k) for k in keys} != {k: bindings[0].get(k) for k in keys} for a in bindings[1:]):
+            if any(not a or not a['enabled'] for a in bindings) or any(not same_binding(a, bindings[0], keys) for a in bindings[1:]):
                 raise ValueError('Source or recipient binding changed; preserve the original handoff.')
         target = next(a for a in live['agents'] if a['id'] == action['targetAgentId'])
-        if target['sessionId'] != action.get('targetSessionId') or target['directory'] != action.get('targetDirectory'):
+        if target['sessionId'] != action.get('targetSessionId') or target['directory'] != action.get('targetDirectory') or runtime_binding(target) != action.get('targetRuntime', {}):
             raise ValueError('Original recipient custody differs from the deployment.')
         previous = next((r for r in old['fleet']['triggers'] if r['id'] == action['triggerId']), None)
         rule = next((r for r in self.app.runtime_fleet(live)['triggers'] if r['id'] == action['triggerId']), None)

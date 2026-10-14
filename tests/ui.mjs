@@ -52,11 +52,12 @@ try{
  await page.route('**/api/progress?**',async route=>{
   const response=await route.fetch(),data=await response.json(),now=Date.now()/1000;
   data.metrics.backlogTrend=[{at:now-3600,open:5,partial:false},{at:now,open:3,partial:false}];
-  data.metrics.ci={...data.metrics.ci,observedAt:now,pipelines:[{id:7,status:'success',ref:'main',sha:'a'.repeat(40),web_url:'https://gitlab.example/pipelines/7',duration:20,queued_duration:3}],testSummary:{total_count:12,success_count:12,failed_count:0,error_count:0,skipped_count:0}};
+  data.metrics.ci={...data.metrics.ci,label:'GitHub CI',provider:'github',observedAt:now,pipelines:[{id:7,status:'success',ref:'main',sha:'a'.repeat(40),web_url:'https://github.com/o/r/actions/runs/7',duration:20,queued_duration:3}],testSummary:{total_count:12,success_count:12,failed_count:0,error_count:0,skipped_count:0}};
   await route.fulfill({response,json:data});
  });
  await page.evaluate(()=>loadProgress(true));
  assert.match(await page.locator('.monitoring-view').innerText(),/Published tests for pipeline #7/);
+ assert.match(await page.locator('.monitoring-view').innerText(),/GitHub CI/);
  assert.equal(await page.locator('.metric-chart circle').count(),2);
  await page.setViewportSize({width:720,height:1000});
  await page.screenshot({path:path.join(root,'tests/monitoring-mobile.png'),fullPage:true});
@@ -149,6 +150,25 @@ try{
  await page.reload();await page.locator('.progress-metrics').waitFor();
  assert.deepEqual(errors,[]);assert.equal((await bootstrap()).status.controls.length,0,'Tests must never send to agents');
  checks.push('Outage labels, reload and narrow layout; no native agent controls invoked');
+ const sameId='12345678-1234-4234-8234-123456789abc';
+ const sessions=[{id:sameId,name:'Local Codex',backend:'codex',hostId:'local',directory:'/local/codex'},
+                 {id:sameId,name:'Local Claude',backend:'claude-code',hostId:'local',directory:'/local/claude'},
+                 {id:sameId,name:'Remote Codex',backend:'codex',hostId:'test-node',directory:'/remote/codex'}];
+ await page.route('**/api/sessions',route=>route.fulfill({json:{sessions}}));
+ await page.evaluate(()=>{state.hosts=[{id:'test-node',name:'Test node'}];openEditor('agent');});
+ await page.locator('[data-pick-session="local:claude-code:'+sameId+'"]').click();
+ assert.equal(await page.locator('#f-backend').inputValue(),'claude-code');
+ assert.equal(await page.locator('#f-directory').inputValue(),'/local/claude');
+ await page.locator('[data-pick-session="test-node:codex:'+sameId+'"]').click();
+ assert.equal(await page.locator('#f-backend').inputValue(),'codex');
+ assert.equal(await page.locator('#f-host').inputValue(),'test-node');
+ assert.equal(await page.locator('#f-directory').inputValue(),'/remote/codex');
+ assert.match(await page.locator('#selected-session').innerText(),/Remote Codex/);
+ await page.locator('#f-host').selectOption('local');
+ assert.equal(await page.locator('#selected-session').innerText(),'');
+ await page.locator('#cancel-editor').click();
+ assert.deepEqual(errors,[]);
+ checks.push('Same session UUID on multiple backends and hosts remains independently selectable; runtime changes unlink the old session');
  console.log(JSON.stringify({passed:true,checks},null,2));
 }finally{
  if(browser)await browser.close();

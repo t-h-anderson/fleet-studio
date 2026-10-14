@@ -1,10 +1,12 @@
-"""Read-only Codex metadata and Windows process observations."""
+"""Read-only Codex metadata and process observations (Windows Restart Manager, /proc or lsof)."""
 import ctypes
 from contextlib import closing
 from ctypes import wintypes as w
 import os
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
 import time
 
 
@@ -25,7 +27,7 @@ def writer_owners(lock_path):
     if not lock_path.is_file():
         return []
     if os.name != "nt":
-        raise OSError("Live process detection requires Windows.")
+        return posix_owners(lock_path)
     rm = ctypes.WinDLL("Rstrtmgr")
     handle = w.DWORD()
     key = ctypes.create_unicode_buffer(33)
@@ -54,6 +56,37 @@ def writer_owners(lock_path):
         raise OSError("Process owners changed during observation.")
     finally:
         rm.RmEndSession(handle)
+
+
+def posix_owners(lock_path):
+    """Processes holding the lock file open, from /proc or lsof. Read-only."""
+    target = str(lock_path.resolve())
+    proc = Path("/proc")
+    if proc.is_dir():
+        owners = set()
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                handles = list((entry / "fd").iterdir())
+            except OSError:
+                continue  # Other users' processes cannot be inspected and cannot hold our lock.
+            for handle in handles:
+                try:
+                    if os.readlink(handle) == target:
+                        owners.add(int(entry.name))
+                        break
+                except OSError:
+                    continue
+        return sorted(owners)
+    lsof = shutil.which("lsof")
+    if not lsof:
+        raise OSError("Live process detection needs /proc or lsof.")
+    run = subprocess.run([lsof, "-t", "--", target], capture_output=True, text=True, timeout=10)
+    # lsof exits 1 when no process has the file open.
+    if run.returncode not in (0, 1):
+        raise OSError("lsof could not inspect " + target)
+    return sorted({int(line) for line in run.stdout.split() if line.isdigit()})
 
 
 def normalize_path(value):

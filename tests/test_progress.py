@@ -274,15 +274,15 @@ class ProgressTests(unittest.TestCase):
         item=metrics.ci_snapshot(f);metrics.ci[f['id']]=item
         responses=[[{'id':4,'status':'success','sha':'a'*40,'ref':'main','web_url':'https://gitlab.example/pipelines/4'}],
                    {'duration':5,'queued_duration':3},{'total':{'total_count':0}}]
-        with patch('studio_backlog.gitlab_get',side_effect=responses):metrics._refresh_ci(f['id'],item)
+        with patch('studio_trackers.gitlab_get',side_effect=responses):metrics._refresh_ci(f['id'],item)
         self.assertEqual(item['pipelines'][0]['status'],'success')
         self.assertIsNone(item['testSummary'])
         self.assertIn('No published test report',item['testNotice'])
         responses[2]={'total':{'total_count':10,'success_count':9,'failed_count':1,'skipped_count':0,'error_count':0,'time':5}}
-        with patch('studio_backlog.gitlab_get',side_effect=responses):metrics._refresh_ci(f['id'],item)
+        with patch('studio_trackers.gitlab_get',side_effect=responses):metrics._refresh_ci(f['id'],item)
         self.assertEqual(item['testSummary']['failed_count'],1)
         self.assertEqual(item['pipelines'][0]['queued_duration'],3)
-        with patch('studio_backlog.gitlab_get',side_effect=ValueError('unavailable')):metrics._refresh_ci(f['id'],item)
+        with patch('studio_trackers.gitlab_get',side_effect=ValueError('unavailable')):metrics._refresh_ci(f['id'],item)
         self.assertEqual(item['pipelines'][0]['id'],4)
         self.assertTrue(metrics.ci_snapshot(f)['stale'])
         app.progress=Progress(app,lambda:self.now)

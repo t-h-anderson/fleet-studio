@@ -314,6 +314,8 @@ class Application:
         self.progress = Progress(self)
         self.goals = Goals(self)
         self.reconciliation = Reconciliation(self)
+        from studio_context import CurrentContext
+        self.context = CurrentContext(self)
         self.backlog = Backlog(self, backlog_fixture)
         self.activity_fixture = activity_fixture
         self.event("Fleet Studio opened", "Your saved fleets are ready.", None)
@@ -568,6 +570,14 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 raise ValidationError("Expected a JSON object.")
             path = urlsplit(self.path).path
+            if path == '/api/context':
+                return self.json(200, app.context.page(payload))
+            if path == '/api/context/handoff':
+                return self.json(200, app.context.handoff(payload))
+            if path == '/api/context/retire/preview':
+                return self.json(200, app.context.preview_retirement(payload))
+            if path == '/api/context/retire/apply':
+                return self.json(200, app.context.retire(payload.get('previewId')))
             if path == "/api/progress/report":
                 app.progress.observe_handoffs(app.triggers.snapshot().get("actions", []))
                 return self.json(200, app.progress.report(payload))

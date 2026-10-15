@@ -82,9 +82,17 @@ class Progress:
                 CREATE TABLE IF NOT EXISTS agent_tasks (
                     fleet TEXT NOT NULL, agent TEXT NOT NULL, url TEXT NOT NULL, data TEXT NOT NULL,
                     PRIMARY KEY(fleet,agent,url));
+                CREATE TABLE IF NOT EXISTS reliability_counters (
+                    fleet TEXT, name TEXT, count INTEGER, first_at REAL, last_at REAL, PRIMARY KEY(fleet,name));
+                CREATE TABLE IF NOT EXISTS reliability_identities (
+                    fleet TEXT, identity TEXT, PRIMARY KEY(fleet,identity));
                 CREATE TABLE IF NOT EXISTS tracking_windows (
                     fleet TEXT, source TEXT, first_at REAL, PRIMARY KEY(fleet,source));
             ''')
+            from studio_reliability import COUNTERS
+            for fleet in app.store.snapshot()['fleets']:
+                for name in COUNTERS:
+                    db.execute('INSERT OR IGNORE INTO reliability_counters VALUES(?,?,?,?,?)', (fleet['id'], name, 0, self.clock(), self.clock()))
         from studio_metrics import Metrics
         self.metrics = Metrics(self)
 
@@ -97,6 +105,11 @@ class Progress:
     def record(db, fleet, category, identity, at, data):
         db.execute('INSERT OR IGNORE INTO observations(fleet,category,identity,at,data) VALUES(?,?,?,?,?)',
                    (fleet, category, identity, at, json.dumps(data)))
+
+    def count(self, fid, name):
+        from studio_reliability import increment
+        with self.lock, closing(self.connect()) as db, db:
+            increment(db, fid, name, self.clock())
 
     def cached_backlog(self, fleet):
         _, source = configuration(fleet)
@@ -164,11 +177,18 @@ class Progress:
                 if action.get('continuationOf'):
                     value['continuationOf'] = action['continuationOf']
                 value['receivedAt'] = old.get('receivedAt')
-                for key in ('receiptSource', 'receiptEvidence', 'submittedAt', 'submissionEvidence'):
+                for key in ('receiptSource', 'receiptEvidence', 'submittedAt', 'submissionEvidence', 'retiredAt', 'retirement'):
                     value[key] = old.get(key)
                 if action.get('reconciliation', {}).get('mode') == 'record-receipt':
                     record = action['reconciliation']
                     value.update(receivedAt=old.get('receivedAt') or record['at'], receiptSource=record['source'], receiptEvidence=record['evidenceUrl'])
+                from studio_reliability import increment
+                interventions = ([value['reconciliation']] if value.get('reconciliation') else []) + (value.get('releaseRevalidations') or [])
+                for intervention in interventions:
+                    identity = aid + ':' + hashlib.sha256(json.dumps(intervention, sort_keys=True).encode()).hexdigest()
+                    inserted = db.execute('INSERT OR IGNORE INTO reliability_identities VALUES(?,?)', (fid, identity))
+                    if inserted.rowcount:
+                        increment(db, fid, 'manualReconciliations', self.clock())
                 value['observedAt'] = self.clock()
                 comparison = {k: v for k, v in value.items() if k != 'observedAt'}
                 if comparison != {k: v for k, v in old.items() if k != 'observedAt'}:
@@ -260,6 +280,8 @@ class Progress:
                 if prior:
                     if prior['digest'] != digest:
                         raise ValueError('This event ID was already used with different report details.')
+                    from studio_reliability import increment
+                    increment(db, fid, 'duplicateReports', self.clock())
                     return {'duplicate': True, 'eventId': event}
                 validate_report(db, self.app, fleet, agent, data)
                 now = self.clock()
@@ -297,6 +319,10 @@ class Progress:
                             if field not in data and field in previous:
                                 data[field] = previous[field]
                     data['phase'] = {'task-started': 'implementing', 'work-finished': 'submitted'}.get(kind) or data.get('phase') or previous.get('phase')
+                    if obligation and obligation.get('retiredAt'):
+                        obligation.pop('retiredAt')
+                        obligation['retirement']['invalidatedAt'] = now
+                        db.execute('UPDATE handoffs SET data=? WHERE fleet=? AND id=?', (json.dumps(obligation), fid, obligation['id']))
                     if obligation and data['phase'] == 'submitted':
                         obligation.update(submittedAt=now, submissionEvidence=data['evidenceUrl'])
                         db.execute('UPDATE handoffs SET data=? WHERE fleet=? AND id=?', (json.dumps(obligation), fid, obligation['id']))
@@ -449,7 +475,10 @@ class Progress:
             ids = {a['id'] for a in agents if role['id'] in a['roleIds']}
             roles.append({**role,'queueCount':len(role_tasks),'waitingCount':sum(h['awaitingReceipt'] and h['targetAgentId'] in ids for h in handoffs)})
         metrics = self.metrics.snapshot(fleet, tasks, agents, handoffs, source, rid)
+        from studio_reliability import summary as reliability_summary
+        metrics['reliability'] = reliability_summary(self, fleet_id, handoffs, reports)
         goals = self.app.goals.snapshot(fleet, monitor, settings['quietMinutes'])
+        retired_ids = self.app.context.retired_ids(fleet_id) if rid and hasattr(self.app, 'context') else set()
         for g in goals['records']:
             if g['current'] and g['native']['status'] != 'complete' and (g['staleGoal'] or not g.get('taskUrl')):
                 attention.append({'kind': 'stale-goal' if g['staleGoal'] else 'goal-link', 'agentId': g['agentId'],
@@ -458,7 +487,7 @@ class Progress:
                                   'nextAction': 'Inspect the goal, blocker owner and resume condition.'})
         return {'fleetId':fleet_id,'observedAt':now,'observationError':self.observation_error,'settings':settings,'agents':agents,'tasks':tasks,'roles':roles,'metrics':metrics,
                 'goals':goals,
-                'roleLinks':runtime.get('roleLinks',[]),'handoffs':sorted(handoffs,key=lambda h:h['createdAt'],reverse=True),
+                'roleLinks':runtime.get('roleLinks',[]),'handoffs':sorted([h for h in handoffs if h['id'] not in retired_ids],key=lambda h:h['createdAt'],reverse=True),'retiredHandoffCount':len(retired_ids),
                 'attention':sorted(attention,key=lambda a:a.get('at') or now),'deployment':{**{k:deployment[k] for k in ('active','draftChanged','paused','enabledTriggers','adoption','migrationComplete')},
                     'reportingEnabled':bool(rid and any(p['id']=='progress-reporting' for p in self.app.deployments.release(rid)['spec']['policies'])),
                     'boundedGoalsEnabled':bool(rid and any(p['id']=='bounded-goals' for p in self.app.deployments.release(rid)['spec']['policies']))},

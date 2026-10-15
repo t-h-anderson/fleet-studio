@@ -18,11 +18,14 @@ class TrackerReadError(ValueError):
 def failure_kind(output):
     """Inspect CLI diagnostics internally; never return their text to a caller."""
     text = output.lower()
-    if re.search(r'\b429\b', text) or 'rate limit' in text:
+    # URLs and ports often contain these numbers. Only explicit HTTP status
+    # syntax establishes an API status; a numeric issue ID is not a response.
+    statuses = set(re.findall(r'\b(?:http(?:/\d(?:\.\d)?)?\s+|status(?:\s+code)?\s*[:=]?\s*)([45]\d\d)\b', text))
+    if '429' in statuses or 'rate limit' in text:
         return 'rate-limit'
-    if re.search(r'\b401\b', text) or any(s in text for s in ('invalid token', 'authentication failed', 'not logged', 'auth login', 'bad credentials')):
+    if '401' in statuses or any(s in text for s in ('invalid token', 'authentication failed', 'not logged', 'auth login', 'bad credentials')):
         return 'authentication'
-    if re.search(r'\b(403|404)\b', text) or 'forbidden' in text:
+    if statuses & {'403', '404'} or 'forbidden' in text:
         return 'access'
     if any(s in text for s in ('certificate', 'x509', 'tls handshake')):
         return 'tls'

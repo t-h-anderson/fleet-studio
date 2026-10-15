@@ -270,6 +270,16 @@ class Progress:
                     previous = json.loads(prior_row['data']) if prior_row else {}
                     if previous.get('releaseId') != rid or not same_binding(previous, agent):
                         previous = {}
+                    matching = [json.loads(row['data']) for row in db.execute('SELECT data FROM handoffs WHERE fleet=?', (fid,))]
+                    matching = [h for h in matching if h.get('targetAgentId') == aid and h.get('deploymentId') == rid
+                                and h.get('targetSessionId') == agent['sessionId'] and h.get('targetDirectory') == agent['directory']
+                                and (h.get('targetRuntime') or {}) == runtime_binding(agent) and h.get('status') != 'dismissed'
+                                and task_key(h.get('ticket') or '') == data['taskUrl']]
+                    obligation = max(matching, key=lambda h: h['createdAt'], default=None)
+                    if obligation and (previous.get('obligationId') not in (None, obligation['id'])
+                                       or obligation['createdAt'] >= previous.get('at', 0) and previous.get('obligationId') != obligation['id']):
+                        previous = {}
+                    data['obligationId'] = obligation['id'] if obligation else None
                     data['phase'] = {'task-started': 'implementing', 'work-finished': 'submitted'}.get(kind) or data.get('phase') or previous.get('phase')
                     data['blockedSince'] = (previous.get('blockedSince') or now) if kind == 'blocked' else previous.get('blockedSince') if kind == 'progress-updated' else None
                     if kind == 'progress-updated' and data['blockedSince']:
@@ -374,7 +384,7 @@ class Progress:
                     attention.append({'kind':'conflict','agentId':agent['id'],'taskUrl':r['taskUrl'],'at':r['at'],'message':'Agent report differs from tracker closure; inspect the evidence.'})
                 elif r.get('blockedSince'):
                     attention.append({'kind':'blocked','agentId':agent['id'],'taskUrl':r['taskUrl'],'at':r['blockedSince'],'message':r['reason'], 'nextAction':r['nextAction']})
-                elif r['kind'] != 'work-finished' and now - r['at'] >= settings['quietMinutes'] * 60:
+                elif not submitted and now - r['at'] >= settings['quietMinutes'] * 60:
                     attention.append({'kind':'quiet','agentId':agent['id'],'taskUrl':r['taskUrl'],'at':r['at'],'message':'No recent meaningful report; inspect activity before intervening.'})
             observed = deepcopy(monitor.get('sessions', {}).get(session_key(agent), {}))
             observed['stale'] = not observed.get('observedAt') or now - observed['observedAt'] > 20

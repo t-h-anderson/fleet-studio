@@ -14,6 +14,20 @@ Claude Code). GitLab reads use an existing `glab` login and GitHub reads an
 existing `gh` login. Windows opens agents in Windows Terminal; Linux and macOS
 use tmux. Node is needed only for browser/layout tests.
 
+Tracker refresh errors distinguish authentication, project access, connectivity,
+TLS, timeout, rate limits, missing CLI and unexpected responses. Raw CLI output
+is never displayed. Failed reads retain the last successful snapshot with its
+timestamp and a stale warning; counts remain unknown until a successful read.
+
+In **Backlog → Project & links**, **Retry tracker reads without an unavailable
+local proxy** is off by default. Enable it for launch environments that inherit
+temporary loopback proxies. After a connectivity failure, Studio probes only
+unauthenticated loopback proxy endpoints and retries a read-only GET once with
+unreachable proxy entries omitted from that child process. Live, remote and
+credentialed proxies, `NO_PROXY`, and the parent environment stay unchanged.
+Recovery is logged without proxy values or credentials. This setting applies
+to tickets, history and CI; it never retries a tracker mutation.
+
 ```powershell
 python fleet_studio.py --open
 ```
@@ -131,6 +145,32 @@ attention thresholds: they do not stop agents, reassign work or infer failure.
 Durations begin with observations. Initial stage-entry times and transitions
 during observation gaps remain unknown. Closure counts cover observed tracker
 transitions, not an imported historical total or a claim of technical acceptance.
+
+### Assignment observations
+
+**Progress → Agents** separates assignment observations from native session
+activity. Cards distinguish queued assignments, receipts, implementation,
+verification, waiting, submission and accepted delivery. They show the task,
+reported wait owner, dependencies, next action and evidence time. Missing,
+earlier-binding and conflicting evidence remain explicit. Unknown delivery
+outcomes require reconciliation; inspecting a card never retries a send.
+
+For module or substantial-part milestones, use `fleet_progress.py` with
+`--kind progress-updated --phase verifying` (or `implementing` / `submitted`).
+A `test-result` remains separate evidence and cannot advance the assignment.
+`--blocker-owner` and `--resume-condition` also work without a native goal.
+Observed waiting time sums only matching blocker reports at most three minutes
+apart; longer gaps and time since the last report are excluded. Reports remain
+milestone-based; no frequent heartbeat or per-function gate is required.
+
+Tracker closure alone may mean cancelled or superseded work. A workflow state
+can optionally set `acceptsDelivery: true` through the state editor or an
+import, followed by a reviewed deployment. It must explicitly match closed
+tickets and cannot be the fallback. Only fresh tracker evidence matching that
+deployed rule and a current submitted assignment produces **Accepted in
+tracker**. Partial/stale reads, earlier assignments and conflicting active
+reports cannot establish acceptance. Omitted flags preserve existing v1
+workflow digests.
 
 ### Monitoring
 

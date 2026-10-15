@@ -77,7 +77,7 @@ class FlowTests(unittest.TestCase):
         app.store.save(state)
         cfg=f['backlog']; refs=local_references(f,cfg)
         self.assertEqual(len(refs[1]),2)
-        app.backlog.cache[f['id']]={'key':json.dumps([cfg['projectUrl'],cfg['scope']]),'items':[{'iid':1,'title':'Active','stage':'active'}],
+        app.backlog.cache[f['id']]={'key':json.dumps([cfg['projectUrl'],cfg['scope'],False]),'items':[{'iid':1,'title':'Active','stage':'active'}],
           'changes':[],'observedAt':time.time(),'attemptedAt':time.time(),'loading':False,'error':'','partial':False}
         ticket=app.backlog.snapshot(f['id'])['items'][0]
         writer=next(r['id'] for r in f['roles'] if r['key']=='writer')

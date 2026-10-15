@@ -7,14 +7,12 @@ CI monitoring do not depend on the hosting service:
 - pipelines: id, status, ref, sha, web_url, updated_at, duration, queued_duration, finished_at
 """
 from datetime import datetime, timedelta, timezone
-import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 from urllib.parse import quote, urlencode, urlsplit
+from studio_tracker_io import read_cli, read_error
 
-CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 PROVIDERS = ("auto", "gitlab", "github")
 
 
@@ -53,37 +51,28 @@ def issue_prefix(config):
     return project + ('/issues/' if provider_of(config) == 'github' else '/-/issues/')
 
 
-def run_cli(arguments, failure, env=None):
-    run = subprocess.run(arguments, capture_output=True, text=True, encoding='utf-8', errors='replace',
-                         timeout=35, env=env, creationflags=CREATE_NO_WINDOW)
-    if run.returncode:
-        # Do not echo CLI output that could contain credentials or request headers.
-        raise ValueError(failure)
-    return json.loads(run.stdout)
-
-
 def project_api(url, suffix):
     parsed = urlsplit(url)
     return parsed.netloc, 'projects/' + quote(parsed.path.strip('/'), safe='') + '/' + suffix
 
 
-def gitlab_get(project_url, suffix):
+def gitlab_get(project_url, suffix, recover_local_proxy=False):
     host, endpoint = project_api(project_url, suffix)
     glab = shutil.which('glab') or str(Path.home() / 'AppData/Local/Programs/glab/glab.exe')
     env = dict(os.environ)
     # This host's inherited token can be stale; use the configured OS-keyring login.
     env.pop('GITLAB_TOKEN', None)
-    return run_cli([glab, 'api', endpoint, '--hostname', host, '--method', 'GET'],
-                   'GitLab could not be read. Check the glab login for ' + host + ' and refresh.', env)
+    return read_cli([glab, 'api', endpoint, '--hostname', host, '--method', 'GET'],
+                    'GitLab', host, env, recover_local_proxy)
 
 
-def github_get(project_url, suffix):
+def github_get(project_url, suffix, recover_local_proxy=False):
     parsed = urlsplit(project_url)
     host = parsed.netloc
     endpoint = 'repos/' + parsed.path.strip('/') + '/' + suffix
     gh = shutil.which('gh') or 'gh'
-    return run_cli([gh, 'api', endpoint, '--hostname', host, '--method', 'GET'],
-                   'GitHub could not be read. Check the gh login for ' + host + ' and refresh.')
+    return read_cli([gh, 'api', endpoint, '--hostname', host, '--method', 'GET'],
+                    'GitHub', host, recover_local_proxy=recover_local_proxy)
 
 
 def fetch_issues(config, get=None):
@@ -97,7 +86,7 @@ def fetch_issues(config, get=None):
                 query['updated_after'] = since
             batch = get(config['projectUrl'], 'issues?' + urlencode(query))
             if not isinstance(batch, list):
-                raise ValueError('GitLab returned an unexpected issue response.')
+                raise read_error('response', 'GitLab', urlsplit(config['projectUrl']).hostname)
             for row in batch:
                 # Only a projection is retained, never full issue bodies or an editable queue.
                 labels = row.get('labels', [])
@@ -121,7 +110,7 @@ def fetch_github_issues(config, get=None):
         query = {'state': 'all', 'per_page': 100, 'page': page, 'sort': 'updated', 'direction': 'desc'}
         batch = get(config['projectUrl'], 'issues?' + urlencode(query))
         if not isinstance(batch, list):
-            raise ValueError('GitHub returned an unexpected issue response.')
+            raise read_error('response', 'GitHub', urlsplit(config['projectUrl']).hostname)
         for row in batch:
             # The GitHub issues endpoint also lists pull requests; they are not tickets.
             if 'pull_request' in row:
@@ -152,24 +141,32 @@ def seconds_between(start, end):
 class GitLabTracker:
     name, label = 'gitlab', 'GitLab'
 
+    def __init__(self, config=None):
+        self.recover_local_proxy = bool((config or {}).get('recoverLocalProxy', False))
+
+    def get(self, project_url, suffix):
+        if self.recover_local_proxy:
+            return gitlab_get(project_url, suffix, recover_local_proxy=True)
+        return gitlab_get(project_url, suffix)
+
     def snapshot(self, config):
-        return fetch_issues(config, gitlab_get)
+        return fetch_issues(config, self.get)
 
     def history(self, config, iid):
-        return gitlab_get(config['projectUrl'], 'issues/' + str(iid) + '/resource_label_events?per_page=100&sort=desc')
+        return self.get(config['projectUrl'], 'issues/' + str(iid) + '/resource_label_events?per_page=100&sort=desc')
 
     def pipelines(self, project):
-        rows = gitlab_get(project, 'pipelines?per_page=10&order_by=id&sort=desc')
+        rows = self.get(project, 'pipelines?per_page=10&order_by=id&sort=desc')
         if not isinstance(rows, list):
-            raise ValueError('GitLab returned an unexpected pipeline response.')
+            raise read_error('response', 'GitLab', urlsplit(project).hostname)
         pipelines = [{k: r.get(k) for k in ('id', 'status', 'ref', 'sha', 'web_url', 'updated_at')} for r in rows]
         summary, notice = None, ''
         if pipelines:
             pid = pipelines[0]['id']
             try:
-                detail = gitlab_get(project, 'pipelines/' + str(pid))
+                detail = self.get(project, 'pipelines/' + str(pid))
                 pipelines[0].update({k: detail.get(k) for k in ('duration', 'queued_duration', 'finished_at')})
-                tests = gitlab_get(project, 'pipelines/' + str(pid) + '/test_report_summary')
+                tests = self.get(project, 'pipelines/' + str(pid) + '/test_report_summary')
                 total = tests.get('total')
                 if isinstance(total, dict) and total.get('total_count', 0) > 0:
                     summary = {k: total.get(k) for k in ('total_count', 'success_count', 'failed_count', 'skipped_count', 'error_count', 'time')}
@@ -189,17 +186,25 @@ RUN_STATUS = {'success': 'success', 'failure': 'failed', 'timed_out': 'failed', 
 class GitHubTracker:
     name, label = 'github', 'GitHub'
 
+    def __init__(self, config=None):
+        self.recover_local_proxy = bool((config or {}).get('recoverLocalProxy', False))
+
+    def get(self, project_url, suffix):
+        if self.recover_local_proxy:
+            return github_get(project_url, suffix, recover_local_proxy=True)
+        return github_get(project_url, suffix)
+
     def snapshot(self, config):
-        return fetch_github_issues(config, github_get)
+        return fetch_github_issues(config, self.get)
 
     def history(self, config, iid):
         rows = []
         # GitHub returns issue events oldest-first. Read all pages up to a bounded
         # limit; never label the oldest page as the current recent history.
         for page in range(1, 51):
-            batch = github_get(config['projectUrl'], 'issues/' + str(iid) + '/events?per_page=100&page=' + str(page))
+            batch = self.get(config['projectUrl'], 'issues/' + str(iid) + '/events?per_page=100&page=' + str(page))
             if not isinstance(batch, list):
-                raise ValueError('GitHub returned an unexpected event response.')
+                raise read_error('response', 'GitHub', urlsplit(config['projectUrl']).hostname)
             rows.extend(batch)
             if len(batch) < 100:
                 break
@@ -211,10 +216,10 @@ class GitHubTracker:
                       key=lambda r: r['created_at'], reverse=True)[:100]
 
     def pipelines(self, project):
-        data = github_get(project, 'actions/runs?per_page=10')
+        data = self.get(project, 'actions/runs?per_page=10')
         runs = data.get('workflow_runs') if isinstance(data, dict) else None
         if not isinstance(runs, list):
-            raise ValueError('GitHub returned an unexpected workflow run response.')
+            raise read_error('response', 'GitHub', urlsplit(project).hostname)
         pipelines = []
         for r in runs:
             status = r.get('conclusion') if r.get('status') == 'completed' else r.get('status')
@@ -234,7 +239,7 @@ TRACKERS = {'gitlab': GitLabTracker, 'github': GitHubTracker}
 
 
 def tracker_for(config):
-    return TRACKERS[provider_of(config)]()
+    return TRACKERS[provider_of(config)](config)
 
 
 def tracker_label(fleet):

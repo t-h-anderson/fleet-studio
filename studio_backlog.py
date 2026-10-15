@@ -70,7 +70,7 @@ class Backlog:
         active = self.app.deployments.data["active"].get(fleet_id)
         fleet = self.app.runtime_fleet(draft) if active else draft
         config = clean_config(draft.get('backlog'), {a['id'] for a in fleet['agents']}, fleet.get('roleSource'))
-        refs = local_references(fleet, config)
+        refs = self.references(fleet, config)
         key = json.dumps([config['projectUrl'], config['scope'], config.get('recoverLocalProxy', False)] + ([config['provider']] if 'provider' in config else []) + ([sorted(refs)] if config['scope'] == 'ai' else []))
         with self.lock:
             item = self.cache.get(fleet_id)
@@ -102,9 +102,16 @@ class Backlog:
                       freshness=quality, stale=quality == 'stale' or bool(result['error']))
         return result
 
+    def references(self, fleet, config):
+        from studio_continuations import references
+        refs = local_references(fleet, config)
+        for iid in references(self.app, fleet['id']):
+            refs.setdefault(iid, [])
+        return refs
+
     def _refresh(self, fleet_id, config, item):
         try:
-            config = {**config, 'includeIids': list(local_references(self.app.store.fleet(fleet_id), config))}
+            config = {**config, 'includeIids': list(self.references(self.app.store.fleet(fleet_id), config))}
             if self.fixture:
                 rows = json.loads(Path(self.fixture).read_text(encoding='utf-8'))
                 issues, partial = (fetch_github_issues if provider_of(config) == 'github' else fetch_issues)(config, lambda url, suffix: rows if 'page=1&' in suffix else [])

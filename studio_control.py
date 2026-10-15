@@ -182,13 +182,27 @@ class Controls:
                    **({"deploymentId": payload["deploymentId"], "automation": payload.get("automation", False), "sourceAgentId": payload.get("sourceAgentId"), "idleOnly": payload.get("idleOnly", False), "purpose": payload.get("purpose", "")} if payload.get("deploymentId") else {})}
         if 'assignmentContract' in payload:
             from studio_contracts import validate, delivery_hold
-            contract = validate(payload['assignmentContract'], self.app, fleet, check_base=True)
+            contract = validate(payload['assignmentContract'], self.app, fleet, check_base=True, revalidated=True)
             if action != 'message' or ids != [contract['agentId']]:
                 raise ValueError('Contract delivery must target its single named recipient.')
             reason = delivery_hold(self.app, fleet['id'], contract)
             if reason:
                 raise ValueError(reason)
             preview['assignmentContract'] = contract
+        if payload.get('handoffId'):
+            from studio_recovery import replay_hold
+            reason = replay_hold(self.app, fleet['id'], payload['handoffId'])
+            if reason:
+                raise ValueError(reason)
+            preview['handoffId'] = payload['handoffId']
+        if payload.get('continuationOf'):
+            from studio_continuations import hold
+            if not preview.get('assignmentContract') or not preview.get('automation'):
+                raise ValueError('A continuation requires its authorized automatic assignment contract.')
+            reason = hold(self.app, fleet['id'], preview['assignmentContract'], payload['continuationOf'])
+            if reason:
+                raise ValueError(reason)
+            preview['continuationOf'] = payload['continuationOf']
         if payload.get('taskUrl'):
             from studio_progress import plain
             preview['taskUrl'] = plain(payload['taskUrl'], 'taskUrl', 1000)
@@ -237,6 +251,16 @@ class Controls:
             return deepcopy(receipt)
 
     def automatic_hold(self, preview, target=None):
+        if preview.get('handoffId'):
+            from studio_recovery import replay_hold
+            reason = replay_hold(self.app, preview['fleetId'], preview['handoffId'])
+            if reason:
+                return reason
+        if preview.get('continuationOf'):
+            from studio_continuations import hold
+            reason = hold(self.app, preview['fleetId'], preview['assignmentContract'], preview['continuationOf'])
+            if reason:
+                return reason
         if preview.get('assignmentContract'):
             from studio_contracts import delivery_hold
             reason = delivery_hold(self.app, preview['fleetId'], preview['assignmentContract'])

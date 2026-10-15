@@ -147,6 +147,30 @@
       "type": "string",
       "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,99}$",
       "maxLength": 100
+    },
+    "continuation": {
+      "type": "object",
+      "properties": {
+        "authorized": {
+          "type": "boolean",
+          "const": true
+        },
+        "when": {
+          "type": "string",
+          "const": "dependencies-accepted"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1800
+        }
+      },
+      "required": [
+        "authorized",
+        "when",
+        "message"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

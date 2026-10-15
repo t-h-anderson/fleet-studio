@@ -158,11 +158,13 @@ class Progress:
                 prior = db.execute('SELECT data FROM handoffs WHERE fleet=? AND id=?', (fid, aid)).fetchone()
                 old = json.loads(prior['data']) if prior else {}
                 value = {k: action.get(k) for k in ('id', 'name', 'createdAt', 'status', 'detail', 'ticket', 'eventId',
-                         'targetAgentId', 'targetName', 'targetSessionId', 'targetDirectory', 'triggerId', 'sourceAgentId', 'deploymentId', 'reconciliation', 'releaseRevalidations', 'targetRuntime')}
+                         'targetAgentId', 'targetName', 'targetSessionId', 'targetDirectory', 'triggerId', 'sourceAgentId', 'deploymentId', 'reconciliation', 'releaseRevalidations', 'targetRuntime', 'controlId', 'mode', 'ruleSignature', 'eventKey')}
                 if action.get('assignmentContract'):
                     value['assignmentContract'] = action['assignmentContract']
+                if action.get('continuationOf'):
+                    value['continuationOf'] = action['continuationOf']
                 value['receivedAt'] = old.get('receivedAt')
-                for key in ('receiptSource', 'receiptEvidence'):
+                for key in ('receiptSource', 'receiptEvidence', 'submittedAt', 'submissionEvidence'):
                     value[key] = old.get(key)
                 if action.get('reconciliation', {}).get('mode') == 'record-receipt':
                     record = action['reconciliation']
@@ -230,6 +232,11 @@ class Progress:
                 if kind != 'progress-updated' or payload['phase'] not in PHASES:
                     raise ValueError('Report implementing, verifying or submitted as the phase of a progress-updated milestone.')
                 data['phase'] = payload['phase']
+            if 'blockerCategory' in payload:
+                from studio_goals import BLOCKERS
+                if payload['blockerCategory'] not in BLOCKERS:
+                    raise ValueError('Choose a supported blockerCategory.')
+                data['blockerCategory'] = payload['blockerCategory']
             for key in ('blockerOwner', 'resumeCondition'):
                 if key in payload:
                     data[key] = plain(payload[key], key, 1800)
@@ -276,7 +283,7 @@ class Progress:
                     if previous.get('releaseId') != rid or not same_binding(previous, agent) or data.get('contractId') != previous.get('contractId'):
                         previous = {}
                     matching = [json.loads(row['data']) for row in db.execute('SELECT data FROM handoffs WHERE fleet=?', (fid,))]
-                    matching = [h for h in matching if h.get('targetAgentId') == aid and h.get('deploymentId') == rid
+                    matching = [h for h in matching if not h.get('continuationOf') and h.get('targetAgentId') == aid and h.get('deploymentId') == rid
                                 and h.get('targetSessionId') == agent['sessionId'] and h.get('targetDirectory') == agent['directory']
                                 and (h.get('targetRuntime') or {}) == runtime_binding(agent) and h.get('status') != 'dismissed'
                                 and task_key(h.get('ticket') or '') == data['taskUrl']]
@@ -290,6 +297,9 @@ class Progress:
                             if field not in data and field in previous:
                                 data[field] = previous[field]
                     data['phase'] = {'task-started': 'implementing', 'work-finished': 'submitted'}.get(kind) or data.get('phase') or previous.get('phase')
+                    if obligation and data['phase'] == 'submitted':
+                        obligation.update(submittedAt=now, submissionEvidence=data['evidenceUrl'])
+                        db.execute('UPDATE handoffs SET data=? WHERE fleet=? AND id=?', (json.dumps(obligation), fid, obligation['id']))
                     data['blockedSince'] = (previous.get('blockedSince') or now) if kind == 'blocked' else previous.get('blockedSince') if kind == 'progress-updated' else None
                     if kind == 'progress-updated' and data['blockedSince']:
                         for k in ('reason', 'nextAction', 'dependsOn', 'blockerCategory', 'blockerOwner', 'resumeCondition'):
@@ -412,7 +422,11 @@ class Progress:
             assignments = project_assignments(agent, rs, handoffs, task_by_url, backlog, rid, now, settings['quietMinutes'] * 60)
             agents.append({'id':agent['id'],'name':agent['name'],'roleIds':agent.get('roleIds',[]),'enabled':agent['enabled'],
                            'session':observed,'reports':rs,'assignments':assignments,'availability':availability,'adoption':next((a for a in deployment['adoption'] if a['agentId']==agent['id']),None)})
+        controls = {r['id']: r for r in self.app.controls.snapshot(full=True)}
+        from studio_recovery import checkpoint
         for h in handoffs:
+            r = next((r for r in reports if r['agentId'] == h.get('targetAgentId') and r['taskUrl'] == task_key(h.get('ticket') or '')), None)
+            h['checkpoint'] = checkpoint(h, r, controls.get(h.get('controlId')))
             h['awaitingReceipt'] = not h.get('receivedAt') and h['status'] != 'dismissed'
             h['overdue'] = h['awaitingReceipt'] and now - h['createdAt'] >= settings['handoffMinutes'] * 60
             if h['overdue'] or h['status'] == 'needs-attention':

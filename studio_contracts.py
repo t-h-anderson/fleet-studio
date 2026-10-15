@@ -29,6 +29,11 @@ SCHEMA = obj({
     'baseRevision': SHA, 'candidateRevision': SHA,
 })
 SCHEMA['properties']['supersedes'] = ID
+SCHEMA['properties']['continuation'] = obj({
+    'authorized': {'type': 'boolean', 'const': True},
+    'when': {'type': 'string', 'const': 'dependencies-accepted'},
+    'message': {'type': 'string', 'minLength': 1, 'maxLength': 1800},
+})
 
 
 def digest(contract):
@@ -50,7 +55,7 @@ def project_link(value, config, ticket=False):
     return urlunsplit(('https', parsed.netloc.lower(), parsed.path, '', '' if ticket else parsed.fragment))
 
 
-def validate(contract, app, fleet, *, check_base=False):
+def validate(contract, app, fleet, *, check_base=False, revalidated=False):
     validate_node(contract, SCHEMA, '$assignment')
     if len(json.dumps(contract)) > 12000:
         raise ValueError('Keep the assignment envelope within 12000 characters; use canonical evidence links for detail.')
@@ -62,6 +67,9 @@ def validate(contract, app, fleet, *, check_base=False):
     value['evidence'] = [project_link(u, config) for u in value['evidence']]
     if value['taskUrl'] in value['dependencies'] or len(set(value['dependencies'])) != len(value['dependencies']):
         raise ValueError('Dependencies must be distinct issues other than the assigned task.')
+    if value.get('continuation') and (not value['dependencies'] or not value['continuation']['message'].strip()
+                                      or value['continuation']['message'].lstrip().startswith(('/', '!'))):
+        raise ValueError('A continuation needs dependencies and bounded plain instructions.')
     if not value['scope'] or not value['requirements']:
         raise ValueError('An assignment contract needs bounded scope and at least one completion requirement.')
     for scope in value['scope']:
@@ -72,7 +80,8 @@ def validate(contract, app, fleet, *, check_base=False):
     if len(set(ids)) != len(ids):
         raise ValueError('Completion requirement IDs must be unique.')
     rid = app.deployments.data['active'].get(fleet['id'])
-    if not rid or value['releaseId'] != rid:
+    from studio_recovery import effective_release
+    if not rid or (value['releaseId'] != rid and (not revalidated or effective_release(app, fleet['id'], value) != rid)):
         raise ValueError('The assignment contract must name the active workflow release.')
     agent = next((a for a in fleet['agents'] if a['id'] == value['agentId']), None)
     deployed = next((a for a in app.deployments.release(rid)['fleet']['agents'] if a['id'] == value['agentId']), None)
@@ -97,7 +106,7 @@ def validate(contract, app, fleet, *, check_base=False):
 
 def current(db, fid, agent_id, task_url):
     rows = [json.loads(r['data']) for r in db.execute('SELECT data FROM handoffs WHERE fleet=?', (fid,))]
-    typed = [h for h in rows if h.get('assignmentContract') and h.get('targetAgentId') == agent_id
+    typed = [h for h in rows if not h.get('continuationOf') and h.get('assignmentContract') and h.get('targetAgentId') == agent_id
              and h['assignmentContract']['taskUrl'] == task_url]
     superseded = {h['assignmentContract'].get('supersedes') for h in typed}
     return max((h for h in typed if h['assignmentContract']['id'] not in superseded), key=lambda h: (h['createdAt'], h['id']), default=None)
@@ -139,7 +148,7 @@ def delivery_hold(app, fleet_id, contract):
     """Recheck identity, source, supersession and optional base before effects."""
     try:
         fleet = app.store.fleet(fleet_id)
-        validate(contract, app, fleet, check_base=True)
+        validate(contract, app, fleet, check_base=True, revalidated=True)
         with app.progress.lock, closing(app.progress.connect()) as db:
             active = current(db, fleet_id, contract['agentId'], contract['taskUrl'])
         latest = app.triggers.data.get('currentContracts', {}).get(current_key(fleet_id, contract))
@@ -190,7 +199,7 @@ def validate_report(db, app, fleet, agent, data):
         if data.get('contractId') or data.get('completionEvidence'):
             raise ValueError('No current assignment contract matches this report.')
         return
-    contract = validate(active['assignmentContract'], app, fleet)
+    contract = validate(active['assignmentContract'], app, fleet, revalidated=True)
     latest = app.triggers.data.get('currentContracts', {}).get(current_key(fleet['id'], contract))
     if latest != contract['id']:
         raise ValueError('The current contract handoff is not durably observed; retry reporting after reconciliation.')

@@ -16,6 +16,8 @@ def project_assignments(agent, reports, handoffs, tasks, tracker, release_id, no
     for report in reports:
         rows.setdefault(report['taskUrl'], {'reports': [], 'handoffs': []})['reports'].append(report)
     for handoff in handoffs:
+        if handoff.get('continuationOf'):
+            continue
         if handoff.get('targetAgentId') == agent['id'] and handoff.get('ticket') and (handoff.get('status') != 'dismissed' or handoff.get('assignmentContract')):
             rows.setdefault(task_key(handoff['ticket']), {'reports': [], 'handoffs': []})['handoffs'].append(handoff)
     projected = []

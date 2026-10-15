@@ -90,6 +90,7 @@ try{
  checks.push('External receipt reconciliation preserves the event and does not send instructions');
  assert.match(await page.locator('#content').innerText(),/No agent receipt/);
  await page.locator('[data-progress-handoff="synthetic-handoff"]').click();
+ assert.match(await page.locator('#progress-detail-body').innerText(),/Recovery:.*work:/s);
  assert.match(await page.locator('#progress-detail-body').innerText(),/queued/);
  await page.locator('[data-progress-edit-link]').click();
  await page.locator('#editor').waitFor({state:'visible'});

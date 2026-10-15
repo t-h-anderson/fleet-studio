@@ -445,3 +445,24 @@ Browser tests use Playwright with installed Microsoft Edge (remove the
 fleets in temporary directories. Real agent launches/controls and live tracker
 reads are disabled. Backend tests mock native sends. Screenshots and generated
 test results are local artifacts and are not committed.
+
+
+### Authorized dependency continuations and recovery
+
+An optional assignment-contract `continuation` records bounded permission to notify the same recipient when all dependencies satisfy the deployed tracker acceptance rules:
+
+```json
+"continuation": {
+  "authorized": true,
+  "when": "dependencies-accepted",
+  "message": "Recheck the dependency evidence and continue the assigned module if current stops allow."
+}
+```
+
+It requires nonempty dependencies, a durable receipt for the original assignment, fresh complete tracker observations for the task and every dependency, and current adoption/session/queue/goal eligibility. Dependencies are included in AI-filtered reads. Closure without an explicit `acceptsDelivery` rule remains insufficient. A blocked work report must explicitly use `blockerCategory: "dependency"` and exactly the authorized dependency set; approval, restriction, host and unknown blockers remain held. A notification never resumes a goal, changes ownership or accepts work.
+
+Periodic reconciliation also handles dependencies already accepted when the original receipt arrives. One stable intent is reserved per immutable contract. Repeated snapshots, restart and display-history retention cannot create another. Review-mode handoffs retain review mode. Eligibility is checked again immediately before the native effect. A continuation has its own receipt and `continuationOf` link; it never becomes a new assignment or resets original milestones. Paused/blocked/limited goals and busy queues remain held. Superseded, withdrawn, submitted or changed-release continuations are invalidated. Compact reservations distinguish unsent, held, sending, delivered, uncertain and invalidated outcomes.
+
+Handoff details now join dispatch receipts, recipient receipts and matching work milestones into a recovery checkpoint. A received or submitted obligation suppresses a prepared send at its final effect boundary. The submitted marker survives subsequent reports and restart; changed work needs a new explicit contract. Target queue acknowledgement is retained even if aggregate receipt finalization was interrupted. Unknown outcomes always require evidence reconciliation and are never blindly replayed. Checkpoints describe observed facts; they cannot restore processes, file handles, checkout state or guarantee exactly-once external execution.
+
+Reviewed policy-only release revalidation preserves the original envelope, digest and event identity. An explicit proof allows reporting under the new release after unchanged routing/scope/bindings are checked. Received typed assignments can be revalidated without resending; unsent work still passes current adoption and delivery guards. Compact event identity remains usable after display-history pruning. A changed binding or work contract requires a new assignment.

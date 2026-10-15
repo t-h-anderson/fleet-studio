@@ -180,6 +180,24 @@ class Controls:
         preview = {"id": uuid.uuid4().hex, "fleetId": fleet["id"], "action": action,
                    "revision": state["revision"], "createdAt": time.time(), "targets": targets,
                    **({"deploymentId": payload["deploymentId"], "automation": payload.get("automation", False), "sourceAgentId": payload.get("sourceAgentId"), "idleOnly": payload.get("idleOnly", False), "purpose": payload.get("purpose", "")} if payload.get("deploymentId") else {})}
+        if 'assignmentContract' in payload:
+            from studio_contracts import validate, delivery_hold
+            contract = validate(payload['assignmentContract'], self.app, fleet, check_base=True)
+            if action != 'message' or ids != [contract['agentId']]:
+                raise ValueError('Contract delivery must target its single named recipient.')
+            reason = delivery_hold(self.app, fleet['id'], contract)
+            if reason:
+                raise ValueError(reason)
+            preview['assignmentContract'] = contract
+        if payload.get('taskUrl'):
+            from studio_progress import plain
+            preview['taskUrl'] = plain(payload['taskUrl'], 'taskUrl', 1000)
+            if not preview.get('assignmentContract'):
+                from studio_contracts import untyped_hold
+                for target in targets:
+                    reason = untyped_hold(self.app, fleet['id'], target['agentId'], preview['taskUrl'])
+                    if reason:
+                        raise ValueError(reason)
         with self.lock:
             self.previews = {key: value for key, value in self.previews.items() if value["createdAt"] > time.time() - 600}
             self.previews[preview["id"]] = preview
@@ -219,6 +237,17 @@ class Controls:
             return deepcopy(receipt)
 
     def automatic_hold(self, preview, target=None):
+        if preview.get('assignmentContract'):
+            from studio_contracts import delivery_hold
+            reason = delivery_hold(self.app, preview['fleetId'], preview['assignmentContract'])
+            if reason:
+                return reason
+        elif preview.get('taskUrl'):
+            from studio_contracts import untyped_hold
+            for recipient in ([target] if target else preview['targets']):
+                reason = untyped_hold(self.app, preview['fleetId'], recipient['agentId'], preview['taskUrl'])
+                if reason:
+                    return reason
         if not preview.get("automation"):
             return ""
         if self.app.deployments.data["paused"].get(preview["fleetId"]):

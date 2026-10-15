@@ -124,6 +124,34 @@ class AssignmentTests(unittest.TestCase):
         app.progress.observe_handoffs([handoff])
         self.assertEqual(self.assignment(app, fleet)['state'], 'assigned')
 
+    def test_new_obligation_does_not_inherit_submission_or_blocker(self):
+        app, fleet = self.app()
+        fleet = self.acceptance_policy(app, fleet)
+        for index, prior_kind in enumerate(('work-finished', 'blocked'), 1):
+            with self.subTest(prior_kind=prior_kind):
+                self.payload.update(eventId='old-' + prior_kind, taskUrl=fleet['backlog']['projectUrl'] + '/-/issues/' + str(index))
+                app.progress.report({**self.payload, 'kind': prior_kind, 'reason': 'Old blocker', 'nextAction': 'Old action'})
+                self.now += 10
+                handoff = {**self.handoff(fleet), 'id': 'handoff-' + prior_kind, 'deploymentId': self.payload['releaseId']}
+                app.progress.observe_handoffs([handoff])
+                self.now += 1
+                app.progress.report({**self.payload, 'kind': 'progress-updated', 'eventId': 'new-' + prior_kind})
+                item = self.assignment(app, fleet)
+                self.assertNotIn(item['state'], ('submitted', 'accepted', 'waiting'))
+                self.observe(app, fleet, 'closed', 'closed')
+                self.assertNotEqual(self.assignment(app, fleet)['state'], 'accepted')
+
+    def test_submitted_phase_never_produces_quiet_work_alert(self):
+        app, fleet = self.app()
+        fleet = self.acceptance_policy(app, fleet)
+        app.progress.report({**self.payload, 'kind': 'progress-updated', 'phase': 'submitted'})
+        self.now += 3601
+        self.assertFalse(any(a['kind'] == 'quiet' for a in self.snapshot(app, fleet)['attention']))
+        self.observe(app, fleet, 'closed', 'closed')
+        result = self.snapshot(app, fleet)
+        self.assertEqual(result['agents'][0]['assignments'][0]['state'], 'accepted')
+        self.assertFalse(any(a['kind'] == 'quiet' for a in result['attention']))
+
     def test_unknown_delivery_is_not_replayed_or_called_received(self):
         app, fleet = self.app()
         for status in ('sending', 'needs-attention'):

@@ -43,6 +43,13 @@ class TrackerReadTests(unittest.TestCase):
                 self.assertEqual(caught.exception.kind, kind)
                 self.assertNotIn('secret', str(caught.exception))
 
+    def test_numeric_ticket_ids_are_not_http_statuses(self):
+        from studio_tracker_io import failure_kind
+        self.assertEqual(failure_kind('Get https://gitlab.example/issues/401: dial tcp 127.0.0.1:64356: connection refused'), 'connectivity')
+        self.assertEqual(failure_kind('Get https://gitlab.example/pipelines/429: x509: certificate signed by unknown authority'), 'tls')
+        for text, kind in [('HTTP/1.1 401 Unauthorized', 'authentication'), ('status code: 403', 'access'), ('HTTP 404', 'access'), ('HTTP 429', 'rate-limit')]:
+            self.assertEqual(failure_kind(text), kind)
+
     def test_default_keeps_dead_proxy_without_probing_or_retry(self):
         environment = {'HTTP_PROXY': 'http://127.0.0.1:65531'}
         with patch('studio_tracker_io.subprocess.run', return_value=result(1, error='proxyconnect connection refused')) as run, patch('studio_tracker_io.socket.create_connection') as probe:

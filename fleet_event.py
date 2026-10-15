@@ -6,7 +6,7 @@ import re
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-def report_event(agent, event, event_id, fleet=None, app_root=None, *, to=None, ticket="", artifact="", context=""):
+def report_event(agent, event, event_id, fleet=None, app_root=None, *, to=None, ticket="", artifact="", context="", contract=None, preview=False):
     root = Path(app_root) if app_root else Path(__file__).resolve().parent
     receipt = json.loads((root / ".runtime/server.json").read_text(encoding="utf-8"))
     url = receipt["url"]
@@ -33,7 +33,9 @@ def report_event(agent, event, event_id, fleet=None, app_root=None, *, to=None, 
             raise ValueError("Choose one recipient by name, ID or session UUID using --to.")
         payload["targetAgentId"] = targets[0]["id"]
     payload.update(ticket=ticket, artifact=artifact, context=context)
-    request = Request(url + "/api/events", data=json.dumps(payload).encode("utf-8"),
+    if contract is not None:
+        payload['assignmentContract'] = contract
+    request = Request(url + ('/api/events/preview' if preview else '/api/events'), data=json.dumps(payload).encode("utf-8"),
                       headers={"Content-Type": "application/json", "X-Fleet-Token": bootstrap["token"]})
     with urlopen(request, timeout=30) as response:
         return json.load(response)
@@ -47,14 +49,21 @@ def main():
     parser.add_argument("--to", help="Recipient name or ID; required when the target role has multiple agents.")
     parser.add_argument("--ticket", default="", help="Current ticket or handoff comment URL (up to 400 characters).")
     parser.add_argument("--artifact", default="", help="Exact head and evidence/artifact location (up to 700 characters).")
+    parser.add_argument('--contract-file', type=Path, help='Optional versioned JSON assignment envelope; no scripts are executed.')
+    parser.add_argument('--preview', action='store_true', help='Validate and display the handoff without reserving an event or sending instructions.')
     context_group = parser.add_mutually_exclusive_group()
     context_group.add_argument("--context", default="", help="Bounded next action and satisfied guard (up to 1800 characters).")
     context_group.add_argument("--context-file", type=Path, help="UTF-8 file containing the handoff instructions.")
     args = parser.parse_args()
     context = args.context_file.read_text(encoding="utf-8-sig") if args.context_file else args.context
     try:
+        contract = None
+        if args.contract_file:
+            if args.contract_file.stat().st_size > 24000:
+                raise ValueError('The assignment contract file is too large.')
+            contract = json.loads(args.contract_file.read_text(encoding='utf-8-sig'))
         result = report_event(args.agent, args.event, args.id, args.fleet,
-                              to=args.to, ticket=args.ticket, artifact=args.artifact, context=context)
+                              to=args.to, ticket=args.ticket, artifact=args.artifact, context=context, contract=contract, preview=args.preview)
     except HTTPError as exc:
         parser.exit(1, json.loads(exc.read()).get("error", str(exc)) + "\n")
     except (ValueError, OSError) as exc:

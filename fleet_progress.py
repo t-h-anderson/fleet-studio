@@ -39,6 +39,14 @@ def report_progress(args, root=None):
             payload[name] = getattr(args, attr)
     if getattr(args, 'phase', None):
         payload['phase'] = args.phase
+    if getattr(args, 'contract_id', None):
+        payload['contractId'] = args.contract_id
+    if getattr(args, 'revision', None) and args.kind != 'test-result':
+        payload['revision'] = args.revision
+    if getattr(args, 'completion_evidence_file', None):
+        if args.completion_evidence_file.stat().st_size > 24000:
+            raise ValueError('Completion evidence file is too large.')
+        payload['completionEvidence'] = json.loads(args.completion_evidence_file.read_text(encoding='utf-8-sig'))
     request = Request(url + '/api/progress/report', data=json.dumps(payload).encode('utf-8'),
                       headers={'Content-Type': 'application/json', 'X-Fleet-Token': bootstrap['token']})
     with urlopen(request, timeout=30) as response:
@@ -55,6 +63,8 @@ def main():
     parser.add_argument('--depends-on', action='append', default=[])
     from studio_assignments import PHASES
     parser.add_argument('--phase', choices=PHASES, help='Optional phase for a progress-updated milestone at a module or substantial-part boundary.')
+    parser.add_argument('--contract-id', help='Current typed assignment contract ID, when one was supplied.')
+    parser.add_argument('--completion-evidence-file', type=Path, help='JSON object mapping contract requirement IDs to canonical project evidence links.')
     for name in ('goal-id', 'completion-criteria', 'blocker-owner', 'resume-condition'):
         parser.add_argument('--' + name, default='')
     from studio_goals import BLOCKERS

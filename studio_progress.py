@@ -159,6 +159,8 @@ class Progress:
                 old = json.loads(prior['data']) if prior else {}
                 value = {k: action.get(k) for k in ('id', 'name', 'createdAt', 'status', 'detail', 'ticket', 'eventId',
                          'targetAgentId', 'targetName', 'targetSessionId', 'targetDirectory', 'triggerId', 'sourceAgentId', 'deploymentId', 'reconciliation', 'releaseRevalidations', 'targetRuntime')}
+                if action.get('assignmentContract'):
+                    value['assignmentContract'] = action['assignmentContract']
                 value['receivedAt'] = old.get('receivedAt')
                 for key in ('receiptSource', 'receiptEvidence'):
                     value[key] = old.get(key)
@@ -243,6 +245,8 @@ class Progress:
                     data[key] = plain(payload.get(key, ''), key, required=kind == 'blocked' and key != 'completionCriteria')
                 if kind == 'blocked' and data['blockerCategory'] not in BLOCKERS:
                     raise ValueError('Choose a supported blockerCategory.')
+            from studio_contracts import report_fields, validate_report
+            data.update(report_fields(payload, fleet))
             digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
             with self.lock, closing(self.connect()) as db, db:
                 prior = db.execute('SELECT digest FROM identities WHERE fleet=? AND agent=? AND event=?', (fid, aid, event)).fetchone()
@@ -250,6 +254,7 @@ class Progress:
                     if prior['digest'] != digest:
                         raise ValueError('This event ID was already used with different report details.')
                     return {'duplicate': True, 'eventId': event}
+                validate_report(db, self.app, fleet, agent, data)
                 now = self.clock()
                 data['at'] = now
                 if data.get('goalId'):
@@ -268,7 +273,7 @@ class Progress:
                 else:
                     prior_row = db.execute('SELECT data FROM agent_tasks WHERE fleet=? AND agent=? AND url=?', (fid, aid, data['taskUrl'])).fetchone()
                     previous = json.loads(prior_row['data']) if prior_row else {}
-                    if previous.get('releaseId') != rid or not same_binding(previous, agent):
+                    if previous.get('releaseId') != rid or not same_binding(previous, agent) or data.get('contractId') != previous.get('contractId'):
                         previous = {}
                     matching = [json.loads(row['data']) for row in db.execute('SELECT data FROM handoffs WHERE fleet=?', (fid,))]
                     matching = [h for h in matching if h.get('targetAgentId') == aid and h.get('deploymentId') == rid
@@ -280,6 +285,10 @@ class Progress:
                                        or obligation['createdAt'] >= previous.get('at', 0) and previous.get('obligationId') != obligation['id']):
                         previous = {}
                     data['obligationId'] = obligation['id'] if obligation else None
+                    if data.get('contractId') and data['contractId'] == previous.get('contractId'):
+                        for field in ('completionEvidence', 'revision'):
+                            if field not in data and field in previous:
+                                data[field] = previous[field]
                     data['phase'] = {'task-started': 'implementing', 'work-finished': 'submitted'}.get(kind) or data.get('phase') or previous.get('phase')
                     data['blockedSince'] = (previous.get('blockedSince') or now) if kind == 'blocked' else previous.get('blockedSince') if kind == 'progress-updated' else None
                     if kind == 'progress-updated' and data['blockedSince']:
@@ -328,11 +337,11 @@ class Progress:
                     self.metrics.prune(db, f['id'], cutoff)
                     for row in db.execute('SELECT * FROM handoffs WHERE fleet=?', (f['id'],)).fetchall():
                         h = json.loads(row['data'])
-                        if (h.get('receivedAt') or h.get('status') == 'dismissed') and h['createdAt'] < cutoff:
+                        if not h.get('assignmentContract') and (h.get('receivedAt') or h.get('status') == 'dismissed') and h['createdAt'] < cutoff:
                             db.execute('DELETE FROM handoffs WHERE fleet=? AND id=?', (f['id'], row['id']))
                     for row in db.execute('SELECT * FROM agent_tasks WHERE fleet=?', (f['id'],)).fetchall():
                         d = json.loads(row['data'])
-                        if d['at'] < cutoff:
+                        if d['at'] < cutoff and not d.get('contractId'):
                             db.execute('DELETE FROM agent_tasks WHERE fleet=? AND agent=? AND url=?', (f['id'], row['agent'], row['url']))
             self.last_prune = now
 

@@ -40,6 +40,11 @@ try{
  const cardBounds=await writerCard.boundingBox();
  assert.ok(cardBounds.x>=0&&cardBounds.x+cardBounds.width<=390,'Assignment cards must fit a narrow viewport');
  await page.setViewportSize({width:1500,height:1050});
+ await page.route('**/api/progress?**',async route=>{const response=await route.fetch();const data=await response.json();const a=data.agents.find(a=>a.id===fixture.writerId);a.assignments[0].contract={id:'module-one-v1',deliverable:'Module <script>window.contractInjected=true</script>',scope:['src/module_one'],requirements:[{id:'tests',description:'Module tests pass',evidenceUrl:''}],missingRequirements:['tests'],baseRevision:'',candidateRevision:'a'.repeat(40)};await route.fulfill({response,json:data});});
+ await page.evaluate(()=>loadProgress(true));
+ assert.match(await writerCard.locator('.assignment-contract').innerText(),/Module tests pass.*Evidence needed/s);
+ assert.equal(await page.evaluate(()=>window.contractInjected),undefined);
+ await page.unroute('**/api/progress?**');await page.evaluate(()=>loadProgress(true));
  await page.locator('[data-progress-agent="'+fixture.writerId+'"]').click();
  await page.locator('#progress-detail').waitFor({state:'visible'});
  assert.match(await page.locator('#progress-detail-body').innerText(),/Coordinator supplies the input contract/);

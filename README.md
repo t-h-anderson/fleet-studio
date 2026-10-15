@@ -172,6 +172,43 @@ tracker**. Partial/stale reads, earlier assignments and conflicting active
 reports cannot establish acceptance. Omitted flags preserve existing v1
 workflow digests.
 
+### Typed assignment contracts
+
+Formal events may carry an optional version-1 JSON assignment envelope. Start
+from [sample.assignment.json](workflows/sample.assignment.json), fill the current
+deployed agent/release/session/folder/role binding, and consult
+[assignment.schema.json](workflows/assignment.schema.json) for the format.
+Specify relative files/directories, the deliverable, named completion
+requirements, dependencies and canonical evidence links in the configured
+project. The envelope documents scope; it cannot grant source permissions,
+enforce filesystem custody, run scripts or change acceptance policy.
+
+Use `fleet_event.py --contract-file assignment.json --preview` with the usual
+event, recipient, ticket, artifact and context arguments to validate and inspect
+the message without sending or reserving anything. Omit `--preview` to record
+the event through its existing configured delivery mode and stop/adoption
+guards. Contract delivery rechecks bindings and optional `baseRevision` (the
+recipient checkout's exact local HEAD) immediately before the native effect.
+An optional `candidateRevision` binds subsequent submission/test evidence to
+that exact SHA. Neither field runs a test or infers correctness.
+
+Milestones for typed assignments supply `fleet_progress.py --contract-id <id>`.
+Submission (`work-finished` or `--phase submitted`) also supplies
+`--completion-evidence-file evidence.json`, an object mapping every requirement
+ID to a project evidence URL, and `--revision <full-SHA>` when the contract names
+a candidate. Progress and blocker reporting do not require completion evidence.
+Evidence presence is checked; technical acceptance stays in the tracker.
+Progress cards show outstanding requirements before submission.
+
+An envelope replacement uses a new ID and names the current ID in `supersedes`.
+Changed candidates require new evidence; old IDs cannot be reused for different
+events. Original retries and earlier handoff receipts remain idempotent after
+replacement or restart. Typed envelopes and their compact identities survive
+ordinary history retention, including withdrawal; this never rolls back files
+or external processes. Legacy handoffs keep their existing digests and behavior
+when no typed assignment is active. Module/substantial-part acceptance remains
+the reporting boundary.
+
 ### Monitoring
 
 Open **Progress → Monitoring** for open tickets by workflow state, hourly backlog

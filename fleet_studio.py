@@ -630,6 +630,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, policy_proposal(app.store.fleet(payload.get("fleetId"))))
             if path == "/api/events":
                 return self.json(202, app.triggers.report(payload))
+            if path == '/api/events/preview':
+                return self.json(200, app.triggers.report(payload, preview=True))
             if path == "/api/triggers/review":
                 return self.json(200, app.triggers.review(payload.get("actionId")))
             if path == "/api/triggers/dismiss":

@@ -74,6 +74,8 @@ class Triggers:
         if self.path.exists():
             self.data = json.loads(self.path.read_text(encoding="utf-8"))
         seen = self.data.setdefault("seenEvents", {})
+        self.data.setdefault('contractIds', {})
+        self.data.setdefault('currentContracts', {})
         for event in self.data["events"]:
             seen.setdefault(event["key"], {"digest": None})
         # Historical turn transitions are never replayed after restart.
@@ -158,6 +160,9 @@ class Triggers:
             for key in ("eventId", "ticket", "artifact", "context"):
                 if event.get(key):
                     text += "\n" + key + ": " + event[key]
+            if event.get('assignmentContract'):
+                from studio_contracts import describe
+                text += '\n\n' + describe(event['assignmentContract'])
         if len(text) > 16000:
             raise ValueError("The trigger instruction and handoff details exceed the 16000 character delivery limit.")
         return text
@@ -188,7 +193,8 @@ class Triggers:
                       "targetAgentId": agent["id"], "targetName": agent["name"],
                       "targetSessionId": agent["sessionId"], "targetDirectory": agent["directory"], "targetRuntime": runtime_binding(agent),
                       "sourceAgentId": event.get("agentId") if event else None, "deploymentId": rule.get("deploymentId"),
-                      **({"eventId": event["eventId"], "ticket": event.get("ticket", ""), "eventKey": event["key"]} if event else {})}
+                      **({"eventId": event["eventId"], "ticket": event.get("ticket", ""), "eventKey": event["key"]} if event else {}),
+                      **({'assignmentContract': deepcopy(event['assignmentContract'])} if event and event.get('assignmentContract') else {})}
             action["message"] += "\n\nFleet handoff action ID: " + action["id"] + ". Report handoff-received with this ID after reading the task evidence.\n" if event else ""
             self.data["actions"].append(action)
             actions.append(action)
@@ -217,6 +223,18 @@ class Triggers:
         if not rule["enabled"]:
             action.update(status="held", detail="This trigger is disabled.")
             return
+        if action.get('assignmentContract'):
+            from studio_contracts import delivery_hold
+            reason = delivery_hold(self.app, action['fleetId'], action['assignmentContract'])
+            if reason:
+                action.update(status='held', detail=reason)
+                return
+        else:
+            from studio_contracts import untyped_hold
+            reason = untyped_hold(self.app, action['fleetId'], action.get('targetAgentId'), action.get('ticket', ''))
+            if reason:
+                action.update(status='held', detail=reason)
+                return
         agents = [a for a in fleet["agents"] if a["id"] == action.get("targetAgentId") and rule["targetRoleId"] in a.get("roleIds", [])]
         if agents and (agents[0]["sessionId"] != action.get("targetSessionId") or agents[0]["directory"] != action.get("targetDirectory") or runtime_binding(agents[0]) != action.get("targetRuntime", {})):
             action.update(status="needs-attention", detail="Recipient session or folder changed; review the original handoff before sending.")
@@ -236,6 +254,8 @@ class Triggers:
                     return
                 preview = self.app.controls.preview({"fleetId": fleet["id"], "agentIds": [a["id"] for a in agents],
                     "action": "message", "message": action["message"],
+                    'taskUrl': action.get('ticket', ''),
+                    **({'assignmentContract': action['assignmentContract']} if action.get('assignmentContract') else {}),
                     **({"deploymentId": rule["deploymentId"], "automation": True, "sourceAgentId": action.get("sourceAgentId"), "idleOnly": rule["kind"] == "idle"} if rule.get("deploymentId") else {})})
                 action.update(controlId=preview["id"], status="sending", detail="Dispatch intent recorded; waiting for Codex receipt.")
                 if rule["kind"] == "idle":
@@ -325,7 +345,7 @@ class Triggers:
             if self.data != before:
                 self.persist()
 
-    def report(self, payload):
+    def report(self, payload, preview=False):
         fleet = self.app.runtime_fleet(self.app.store.fleet(payload.get("fleetId")))
         agent = next((a for a in fleet["agents"] if a["id"] == payload.get("agentId")), None)
         name, event_id = payload.get("eventName"), payload.get("eventId")
@@ -339,6 +359,8 @@ class Triggers:
             if not isinstance(value, str) or len(value) > limit or any(ord(c) < 32 and c not in "\n\t" for c in value):
                 raise ValueError(key + " must be plain text of at most " + str(limit) + " characters.")
             context[key] = value.strip()
+        if 'assignmentContract' in payload:
+            context['assignmentContract'] = deepcopy(payload['assignmentContract'])
         key = fleet["id"] + ":" + agent["id"] + ":" + name + ":" + event_id
         fingerprint = rule_signature(context)
         with self.lock, self.app.store.lock:
@@ -350,16 +372,36 @@ class Triggers:
             rules = [r for r in fleet.get("triggers", []) if r["enabled"] and r["kind"] == "event" and r["eventName"] == name and r["sourceRoleId"] in agent.get("roleIds", [])]
             if not rules:
                 raise ValueError("No enabled deployed handoff matches this reporting role and event. Check the active assignment.")
+            if 'assignmentContract' in context:
+                from studio_contracts import validate, check_new, project_link
+                from studio_progress import configuration
+                contract = validate(context['assignmentContract'], self.app, self.app.store.fleet(fleet['id']), check_base=True)
+                if len(rules) != 1 or context['targetAgentId'] != contract['agentId']:
+                    raise ValueError('A typed assignment needs one handoff rule and its explicitly named recipient.')
+                if project_link(context['ticket'], configuration(fleet)[0], True) != contract['taskUrl']:
+                    raise ValueError('The event ticket must match the assignment contract task.')
+                check_new(self.app, fleet, contract, key)
+                context['assignmentContract'] = contract
             # Validate all routing before recording anything. No partial broadcasts.
             for rule in rules:
                 problem = contract_problem(fleet, rule)
                 if problem:
                     raise ValueError(problem)
-                self.targets(fleet, rule, context["targetAgentId"])
+                targets = self.targets(fleet, rule, context["targetAgentId"])
+                if 'assignmentContract' not in context:
+                    from studio_contracts import untyped_hold
+                    for target in targets:
+                        reason = untyped_hold(self.app, fleet['id'], target['id'], context['ticket'])
+                        if reason:
+                            raise ValueError(reason)
                 if rule.get("workflowLinkId") and any(not context[k] for k in ("ticket", "artifact", "context")):
                     raise ValueError("Formal handoffs require --ticket, --artifact and --context (or --context-file).")
             event = {"key": key, "eventId": event_id, "eventName": name, "agent": agent["name"],
                      "createdAt": time.time(), "agentId": agent["id"], **context}
+            if preview:
+                return {'eventId': event_id, 'assignmentContract': context.get('assignmentContract'),
+                        'messages': [self.message(rule, 'reviewed event preview', event) for rule in rules],
+                        'targetAgentId': context['targetAgentId'], 'notice': 'Preview only. No event reserved or instruction sent.'}
             before = deepcopy(self.data)
             actions = []
             try:
@@ -371,6 +413,11 @@ class Triggers:
                 self.data["events"].append(event)
                 self.data["events"] = self.data["events"][-500:]
                 self.data["seenEvents"][key] = {"digest": fingerprint, "actionIds": [a["id"] for a in actions]}
+                if event.get('assignmentContract'):
+                    from studio_contracts import digest, current_key
+                    contract = event['assignmentContract']
+                    self.data['contractIds'][fleet['id'] + ':' + contract['id']] = {'digest': digest(contract), 'eventKey': key}
+                    self.data['currentContracts'][current_key(fleet['id'], contract)] = contract['id']
                 self.persist()  # Event dedupe and all delivery intents commit together.
             except Exception:
                 self.data = before
@@ -406,6 +453,8 @@ class Triggers:
                 raise ValueError("The original recipient was excluded or rebound. Review current scope and report a new handoff; this action cannot be redirected.")
             preview = self.app.controls.preview({"fleetId": fleet["id"], "action": "message",
                 "agentIds": [a["id"] for a in agents], "message": action["message"],
+                'taskUrl': action.get('ticket', ''),
+                **({'assignmentContract': action['assignmentContract']} if action.get('assignmentContract') else {}),
                 **({"deploymentId": rule["deploymentId"], "automation": True, "sourceAgentId": action.get("sourceAgentId"), "idleOnly": rule["kind"] == "idle"} if rule.get("deploymentId") else {})})
             action["controlId"] = preview["id"]
             self.persist()

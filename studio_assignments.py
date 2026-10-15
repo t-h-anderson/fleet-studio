@@ -16,7 +16,7 @@ def project_assignments(agent, reports, handoffs, tasks, tracker, release_id, no
     for report in reports:
         rows.setdefault(report['taskUrl'], {'reports': [], 'handoffs': []})['reports'].append(report)
     for handoff in handoffs:
-        if handoff.get('targetAgentId') == agent['id'] and handoff.get('ticket') and handoff.get('status') != 'dismissed':
+        if handoff.get('targetAgentId') == agent['id'] and handoff.get('ticket') and (handoff.get('status') != 'dismissed' or handoff.get('assignmentContract')):
             rows.setdefault(task_key(handoff['ticket']), {'reports': [], 'handoffs': []})['handoffs'].append(handoff)
     projected = []
     for url, evidence in rows.items():
@@ -81,6 +81,21 @@ def project_assignments(agent, reports, handoffs, tasks, tracker, release_id, no
                             nextAction='Inspect the acceptance evidence and remaining obligations.')
         if item['state'] == 'submitted':
             item['nextAction'] = report.get('nextAction') or 'Await review and tracker acceptance.'
+        typed = [h for h in evidence['handoffs'] if h.get('assignmentContract')]
+        if typed:
+            from studio_contracts import projection
+            superseded = {h['assignmentContract'].get('supersedes') for h in typed}
+            current = max((h for h in typed if h['assignmentContract']['id'] not in superseded), key=lambda h: (h['createdAt'], h['id']), default=None)
+            if current:
+                item['contract'] = projection(current['assignmentContract'], report)
+                if current.get('status') == 'dismissed':
+                    item.update(state='waiting', reason='The current assignment contract was withdrawn.', owner='Workflow operator',
+                                nextAction='Obtain a new scoped contract; earlier contracts remain superseded.')
+                elif not report or report.get('contractId') != current['assignmentContract']['id']:
+                    if item['state'] in ('implementing', 'verifying', 'submitted', 'accepted'):
+                        item.update(state='unknown', reason='This milestone does not identify the current assignment contract.')
+                elif item['state'] in ('submitted', 'accepted') and item['contract']['missingRequirements']:
+                    item.update(state='unknown', reason='Completion evidence for the current contract is incomplete.')
         item['label'] = LABELS[item['state']]
         projected.append(item)
     projected.sort(key=lambda a: (a['state'] in ('accepted', 'closed'), -(a['evidenceAt'] or 0), a['taskUrl']))

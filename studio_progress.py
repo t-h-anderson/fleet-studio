@@ -223,6 +223,14 @@ class Progress:
                     'source': 'agent-report'}
             if data['dependsOn'] is None:
                 raise ValueError('Supply at most 20 dependency links.')
+            if 'phase' in payload:
+                from studio_assignments import PHASES
+                if kind != 'progress-updated' or payload['phase'] not in PHASES:
+                    raise ValueError('Report implementing, verifying or submitted as the phase of a progress-updated milestone.')
+                data['phase'] = payload['phase']
+            for key in ('blockerOwner', 'resumeCondition'):
+                if key in payload:
+                    data[key] = plain(payload[key], key, 1800)
             if kind == 'test-result':
                 from studio_metrics import clean_test
                 data.update(clean_test(payload))
@@ -260,10 +268,16 @@ class Progress:
                 else:
                     prior_row = db.execute('SELECT data FROM agent_tasks WHERE fleet=? AND agent=? AND url=?', (fid, aid, data['taskUrl'])).fetchone()
                     previous = json.loads(prior_row['data']) if prior_row else {}
+                    if previous.get('releaseId') != rid or not same_binding(previous, agent):
+                        previous = {}
+                    data['phase'] = {'task-started': 'implementing', 'work-finished': 'submitted'}.get(kind) or data.get('phase') or previous.get('phase')
                     data['blockedSince'] = (previous.get('blockedSince') or now) if kind == 'blocked' else previous.get('blockedSince') if kind == 'progress-updated' else None
                     if kind == 'progress-updated' and data['blockedSince']:
                         for k in ('reason', 'nextAction', 'dependsOn', 'blockerCategory', 'blockerOwner', 'resumeCondition'):
                             data[k] = data.get(k) or previous.get(k)
+                    if data['blockedSince']:
+                        from studio_assignments import waiting_observation
+                        data['waitingObservedSeconds'], data['waitingObservationGap'] = waiting_observation(previous, data, now)
                     db.execute('INSERT OR REPLACE INTO agent_tasks VALUES(?,?,?,?)', (fid, aid, data['taskUrl'], json.dumps(data)))
                 db.execute('INSERT INTO identities VALUES(?,?,?,?)', (fid, aid, event, digest))
                 self.record(db, fid, 'agent-report', aid + ':' + event, now, data)
@@ -335,6 +349,7 @@ class Progress:
                 state = project_ticket(t, runtime['workflow'])
                 t['stage'] = state['id']
                 t['roleIds'] = [r['id'] for r in runtime['roles'] if stable(r, 'role') in state['roles']]
+                t['acceptsDelivery'] = state.get('acceptsDelivery', False)
             else:
                 key = {'backlog':'coordinator','ready':'writer','active':'writer','integration':'integrator','blocked':'coordinator'}.get(t['stage'])
                 t['roleIds'] = [r['id'] for r in runtime['roles'] if r['key'] == key]
@@ -351,7 +366,8 @@ class Progress:
                 r['bindingCurrent'] = r['releaseId'] == rid and same_binding(r, agent)
                 t = task_by_url.get(r['taskUrl'])
                 r['trackerState'] = t['state'] if t else None
-                r['conflict'] = bool(t and t['state'] == 'closed' and r['kind'] != 'work-finished')
+                submitted = not r.get('blockedSince') and (r['kind'] == 'work-finished' or r.get('phase') == 'submitted')
+                r['conflict'] = bool(t and t['state'] == 'closed' and not submitted)
                 if not r['bindingCurrent']:
                     continue
                 if r['conflict']:
@@ -371,8 +387,12 @@ class Progress:
                 reason = ('Workflow automation is paused.' if deployment['paused'] else '') or self.app.triggers.hold_reason([agent], monitor, idle_only=True) or self.app.deployments.adoption_hold(fleet_id,[agent['id']])
             availability = {'state':'held' if stopped else 'busy' if observed.get('status') == 'working' else 'held' if reason else 'eligible',
                             'reason':reason or 'Eligible for an idle workflow check; task scope still applies.'}
+            if observed['stale']:
+                availability = {'state': 'held', 'reason': 'Session observation is stale; refresh before assessing availability.'}
+            from studio_assignments import project_assignments
+            assignments = project_assignments(agent, rs, handoffs, task_by_url, backlog, rid, now, settings['quietMinutes'] * 60)
             agents.append({'id':agent['id'],'name':agent['name'],'roleIds':agent.get('roleIds',[]),'enabled':agent['enabled'],
-                           'session':observed,'reports':rs,'availability':availability,'adoption':next((a for a in deployment['adoption'] if a['agentId']==agent['id']),None)})
+                           'session':observed,'reports':rs,'assignments':assignments,'availability':availability,'adoption':next((a for a in deployment['adoption'] if a['agentId']==agent['id']),None)})
         for h in handoffs:
             h['awaitingReceipt'] = not h.get('receivedAt') and h['status'] != 'dismissed'
             h['overdue'] = h['awaitingReceipt'] and now - h['createdAt'] >= settings['handoffMinutes'] * 60

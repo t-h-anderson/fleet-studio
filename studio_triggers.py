@@ -76,6 +76,7 @@ class Triggers:
         seen = self.data.setdefault("seenEvents", {})
         self.data.setdefault('contractIds', {})
         self.data.setdefault('currentContracts', {})
+        self.data.setdefault('continuations', {})
         for event in self.data["events"]:
             seen.setdefault(event["key"], {"digest": None})
         # Historical turn transitions are never replayed after restart.
@@ -85,6 +86,15 @@ class Triggers:
 
     def persist(self):
         from fleet_studio import atomic_json
+        from studio_continuations import identity
+        for action in self.data['actions']:
+            if action.get('continuationOf'):
+                key = identity(action['fleetId'], action['assignmentContract'])
+                record = self.data['continuations'].get(key)
+                if record:
+                    record['state'] = {'pending': 'unsent', 'held': 'held', 'sending': 'sending', 'queued': 'delivered',
+                                       'needs-attention': 'uncertain', 'reconciled': 'delivered', 'dismissed': 'invalidated',
+                                       'invalidated': 'invalidated'}.get(action['status'], 'uncertain')
         self.path.parent.mkdir(exist_ok=True)
         atomic_json(self.path, self.data)
         # Telemetry cannot undo a committed delivery intent. Persist every
@@ -206,7 +216,14 @@ class Triggers:
         return actions
 
     def deliver(self, action, monitor):
-        if action["mode"] != "automatic" or action["status"] not in ("pending", "held") or action.get("controlId"):
+        if action["status"] not in ("pending", "held") or action.get("controlId"):
+            return
+        if action.get('continuationOf'):
+            from studio_continuations import invalidated
+            if invalidated(self.app, action):
+                action.update(status='invalidated', detail='The original assignment was replaced, withdrawn, submitted or changed release; this continuation will not send.')
+                return
+        if action["mode"] != "automatic":
             return
         try:
             fleet = self.app.runtime_fleet(self.app.store.fleet(action["fleetId"]))
@@ -223,6 +240,18 @@ class Triggers:
         if not rule["enabled"]:
             action.update(status="held", detail="This trigger is disabled.")
             return
+        if action.get('eventId'):
+            from studio_recovery import replay_hold
+            reason = replay_hold(self.app, action['fleetId'], action['id'])
+            if reason:
+                action.update(status='held', detail=reason)
+                return
+        if action.get('continuationOf'):
+            from studio_continuations import hold
+            reason = hold(self.app, action['fleetId'], action['assignmentContract'], action['continuationOf'])
+            if reason:
+                action.update(status='held', detail=reason)
+                return
         if action.get('assignmentContract'):
             from studio_contracts import delivery_hold
             reason = delivery_hold(self.app, action['fleetId'], action['assignmentContract'])
@@ -255,7 +284,9 @@ class Triggers:
                 preview = self.app.controls.preview({"fleetId": fleet["id"], "agentIds": [a["id"] for a in agents],
                     "action": "message", "message": action["message"],
                     'taskUrl': action.get('ticket', ''),
+                    **({'handoffId': action['id']} if action.get('eventId') else {}),
                     **({'assignmentContract': action['assignmentContract']} if action.get('assignmentContract') else {}),
+                    **({'continuationOf': action['continuationOf']} if action.get('continuationOf') else {}),
                     **({"deploymentId": rule["deploymentId"], "automation": True, "sourceAgentId": action.get("sourceAgentId"), "idleOnly": rule["kind"] == "idle"} if rule.get("deploymentId") else {})})
                 action.update(controlId=preview["id"], status="sending", detail="Dispatch intent recorded; waiting for Codex receipt.")
                 if rule["kind"] == "idle":
@@ -292,6 +323,8 @@ class Triggers:
                 elif action["status"] == "sending":
                     action.update(status="needs-attention", detail="Studio restarted during dispatch. Check the session before retrying.")
                 self.deliver(action, monitor)
+            from studio_continuations import reconcile
+            reconcile(self, state, monitor)
             for draft in state["fleets"]:
                 fleet = self.app.runtime_fleet(draft)
                 for rule in fleet.get("triggers", []):
@@ -340,7 +373,10 @@ class Triggers:
                                 self.fire(fleet, rule, agent["name"] + " / " + rule["condition"], monitor)
                         self.observed[rule["id"]] = observations
             # Retain every unresolved delivery. Only completed history is bounded.
-            completed = [a["id"] for a in self.data["actions"] if a["status"] in ("queued", "dismissed")][:-100]
+            from studio_contracts import current_key
+            completed = [a['id'] for a in self.data['actions'] if a['status'] in ('queued', 'dismissed', 'invalidated')
+                         and (not a.get('assignmentContract') or a.get('continuationOf')
+                              or self.data['currentContracts'].get(current_key(a['fleetId'], a['assignmentContract'])) != a['assignmentContract']['id'])][:-100]
             self.data["actions"] = [a for a in self.data["actions"] if a["id"] not in completed]
             if self.data != before:
                 self.persist()
@@ -454,7 +490,9 @@ class Triggers:
             preview = self.app.controls.preview({"fleetId": fleet["id"], "action": "message",
                 "agentIds": [a["id"] for a in agents], "message": action["message"],
                 'taskUrl': action.get('ticket', ''),
+                    **({'handoffId': action['id']} if action.get('eventId') else {}),
                 **({'assignmentContract': action['assignmentContract']} if action.get('assignmentContract') else {}),
+                    **({'continuationOf': action['continuationOf']} if action.get('continuationOf') else {}),
                 **({"deploymentId": rule["deploymentId"], "automation": True, "sourceAgentId": action.get("sourceAgentId"), "idleOnly": rule["kind"] == "idle"} if rule.get("deploymentId") else {})})
             action["controlId"] = preview["id"]
             self.persist()

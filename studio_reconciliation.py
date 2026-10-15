@@ -1,6 +1,7 @@
 """Reviewed handoff repair and external receipts, without dispatch or acceptance."""
 from studio_bindings import runtime_binding, same_binding
 from copy import deepcopy
+from contextlib import closing
 import hashlib
 import json
 import time
@@ -18,8 +19,15 @@ class Reconciliation:
         self.previews = {}
 
     def source(self, action):
-        """Recover only from an exact retained event and its namespaced identity."""
+        """Recover from the retained event or its committed compact identity."""
         event = next((e for e in self.app.triggers.data['events'] if e['key'] == action.get('eventKey')), None)
+        if not event:
+            seen = self.app.triggers.data['seenEvents'].get(action.get('eventKey'), {})
+            fields = (action.get('eventKey') or '').split(':', 3)
+            if (len(fields) == 4 and fields[0] == action['fleetId'] and fields[3] == action.get('eventId')
+                    and action['id'] in seen.get('actionIds', []) and seen.get('digest')):
+                event = {'key': action['eventKey'], 'eventId': fields[3], 'eventName': fields[2],
+                         'agentId': fields[1], 'ticket': action.get('ticket')}
         if not event or event.get('eventId') != action.get('eventId') or event.get('ticket') != action.get('ticket'):
             return None
         fields = event['key'].split(':', 3)
@@ -39,12 +47,17 @@ class Reconciliation:
         rid = self.app.deployments.data['active'].get(fid)
         if not rid or not action.get('deploymentId') or rid == action['deploymentId']:
             raise ValueError('This handoff does not need release revalidation.')
-        if action.get('controlId') or action['status'] not in ('pending', 'held', 'needs-attention') or not action.get('sourceAgentId'):
+        with self.app.progress.lock, closing(self.app.progress.connect()) as db:
+            row = db.execute('SELECT data FROM handoffs WHERE fleet=? AND id=?', (fid, action['id'])).fetchone()
+        received = bool(row and json.loads(row['data']).get('receivedAt'))
+        typed_received = received and bool(action.get('assignmentContract')) and not action.get('continuationOf')
+        if (not typed_received and (action.get('controlId') or action['status'] not in ('pending', 'held', 'needs-attention'))
+                or not action.get('sourceAgentId')):
             raise ValueError('Only a proven unsent handoff with its original source can be revalidated.')
         source = self.source(action)
         if not source or source['id'] != action['sourceAgentId']:
             raise ValueError('The original event source cannot be verified.')
-        if action['id'] not in {h['id'] for h in self.app.progress.pending_handoffs(fid)}:
+        if received and not typed_received:
             raise ValueError('This handoff already has a receipt.')
         old = self.app.deployments.release(action['deploymentId'])
         new = self.app.deployments.release(rid)
@@ -68,12 +81,21 @@ class Reconciliation:
             raise ValueError('Original or current trigger cannot be verified. Preserve the held event.')
         if {k:v for k,v in rule.items() if k != 'deploymentId'} != previous:
             raise ValueError('The original trigger changed.')
-        return {'previousDeploymentId': old['id'], 'deploymentId': rid, 'ruleSignature': rule_signature(rule)}
+        proof = {'previousDeploymentId': old['id'], 'deploymentId': rid, 'ruleSignature': rule_signature(rule)}
+        if action.get('assignmentContract'):
+            from studio_contracts import validate, digest, current_key
+            contract = action['assignmentContract']
+            if self.app.triggers.data['currentContracts'].get(current_key(fid, contract)) != contract['id']:
+                raise ValueError('A superseded contract cannot be revalidated.')
+            validate({**contract, 'releaseId': rid}, self.app, live, check_base=not received)
+            proof.update(contractDigest=digest(contract), received=received)
+        return proof
 
     def preview(self, payload):
         with self.app.triggers.lock:
             action = next((a for a in self.app.triggers.data['actions'] if a['id'] == payload.get('actionId')), None)
-            if not action or not action.get('eventId') or action['status'] in ('dismissed', 'reconciled'):
+            if (not action or not action.get('eventId') or action['status'] == 'dismissed'
+                    or action['status'] == 'reconciled' and not (payload.get('mode') == 'refresh-release' and action.get('assignmentContract'))):
                 raise ValueError('Choose an unresolved handoff retained by the dispatcher.')
             mode = payload.get('mode')
             if mode not in ('repair-source', 'record-receipt', 'refresh-release'):
@@ -110,7 +132,7 @@ class Reconciliation:
                        'evidenceUrl': evidence, 'note': note, 'recipientMessage': receipt,
                        'previousStatus': action['status'],
                        'releaseRefresh': refresh,
-                       'effect': 'Return this proven-unsent event to normal delivery under the current release, preserving its identity, message, recipient and adoption/availability guards. No receipt or acceptance is recorded.' if refresh else 'Record an operator-reconciled receipt and suppress further delivery of this event; no acceptance or completion is recorded.' if mode == 'record-receipt' else 'Restore the original source identity and leave the unsent handoff awaiting review; no delivery is triggered.'}
+                       'effect': 'Revalidate the received assignment for current-release reporting without rewriting its envelope or resending work. Current adoption and stop guards remain.' if refresh and refresh.get('received') else 'Return this proven-unsent event to normal delivery under the current release, preserving its identity, message, recipient and adoption/availability guards. No receipt or acceptance is recorded.' if refresh else 'Record an operator-reconciled receipt and suppress further delivery of this event; no acceptance or completion is recorded.' if mode == 'record-receipt' else 'Restore the original source identity and leave the unsent handoff awaiting review; no delivery is triggered.'}
             self.previews = {k:v for k,v in self.previews.items() if time.time() - v['createdAt'] < 600}
             self.previews[preview['id']] = preview
             return deepcopy(preview)
@@ -136,8 +158,9 @@ class Reconciliation:
                 record['sourceRecoveredFrom'] = action['eventKey']
             if refresh:
                 action.setdefault('releaseRevalidations', []).append({**record, **refresh})
-                action.update(deploymentId=refresh['deploymentId'], ruleSignature=refresh['ruleSignature'], status='pending',
-                              detail='Unsent event revalidated against unchanged contracts and bindings; normal adoption and availability checks remain.')
+                action.update(deploymentId=refresh['deploymentId'], ruleSignature=refresh['ruleSignature'],
+                              status=action['status'] if refresh.get('received') else 'pending',
+                              detail='Assignment revalidated against unchanged contracts and bindings; normal adoption and availability checks remain.')
             elif preview['mode'] == 'record-receipt':
                 action['reconciliation'] = record
                 self.app.controls.previews.pop(action.get('controlId'), None)

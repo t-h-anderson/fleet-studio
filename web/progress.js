@@ -100,11 +100,13 @@ async function openProgressDetail(detail,append=false){
   const h=d.handoffs.find(h=>h.id===detail.handoffId);if(!h)return;
   title=h.name;task=h.ticket;
   body='<p>Delivery: <strong>'+esc(h.status)+'</strong> · '+esc(h.detail||'')+'</p><p>Agent receipt: '+(h.receivedAt?esc(new Date(h.receivedAt*1000).toLocaleString()):'Not reported')+'</p><p>Recipient: '+esc(h.targetName)+'</p>'+stamp('Delivery observation',h.observedAt)+evidenceLink(task,'Open tracker task');
+  if(h.checkpoint)body+='<p>Recovery: <strong>'+esc(h.checkpoint.delivery)+'</strong>; work: '+esc(h.checkpoint.work)+'</p><p>'+esc(h.checkpoint.nextAction)+'</p>'+evidenceLink(h.checkpoint.evidenceUrl,'Checkpoint evidence');
+  if(h.continuationOf)body+='<p>Dependency continuation of handoff <code>'+esc(h.continuationOf)+'</code>; original assignment unchanged.</p>';
   if(h.assignmentContract)body+=assignmentContractMarkup(h.assignmentContract);
-  if(h.releaseRevalidations?.length)body+='<p>Unsent event revalidated across '+h.releaseRevalidations.length+' policy release(s); original event identity retained.</p>'+h.releaseRevalidations.map(r=>evidenceLink(r.evidenceUrl,'Revalidation evidence')).join('');
+  if(h.releaseRevalidations?.length)body+='<p>Assignment revalidated across '+h.releaseRevalidations.length+' policy release(s); original event identity retained.</p>'+h.releaseRevalidations.map(r=>evidenceLink(r.evidenceUrl,'Revalidation evidence')).join('');
   if(h.receiptSource)body+='<p>Receipt source: '+esc(h.receiptSource)+'</p>'+evidenceLink(h.receiptEvidence,'Inspect receipt evidence');
   if(h.reconciliation)body+='<p>'+esc(h.reconciliation.note)+'</p><p>Original delivery state: '+esc(h.reconciliation.previousStatus)+'. Technical acceptance remains separate.</p>';
-  if(h.awaitingReceipt&&h.status!=='sending')body+='<button class="button small" data-reconcile-handoff="'+h.id+'">Reconcile receipt or source</button>';
+  if((h.awaitingReceipt||(h.assignmentContract&&h.deploymentId!==d.deployment.active?.id))&&h.status!=='sending')body+='<button class="button small" data-reconcile-handoff="'+h.id+'">Reconcile receipt or source</button>';
   if(['pending','held','needs-attention'].includes(h.status))body+='<button class="button small" data-review-progress-handoff="'+h.id+'">Review delivery</button>';
   const rule=current().triggers.find(t=>t.id===h.triggerId);if(rule?.workflowLinkId)body+='<button class="button small" data-progress-edit-link="'+rule.workflowLinkId+'">Edit handoff draft</button>';
  }

@@ -466,3 +466,24 @@ Periodic reconciliation also handles dependencies already accepted when the orig
 Handoff details now join dispatch receipts, recipient receipts and matching work milestones into a recovery checkpoint. A received or submitted obligation suppresses a prepared send at its final effect boundary. The submitted marker survives subsequent reports and restart; changed work needs a new explicit contract. Target queue acknowledgement is retained even if aggregate receipt finalization was interrupted. Unknown outcomes always require evidence reconciliation and are never blindly replayed. Checkpoints describe observed facts; they cannot restore processes, file handles, checkout state or guarantee exactly-once external execution.
 
 Reviewed policy-only release revalidation preserves the original envelope, digest and event identity. An explicit proof allows reporting under the new release after unchanged routing/scope/bindings are checked. Received typed assignments can be revalidated without resending; unsent work still passes current adoption and delivery guards. Compact event identity remains usable after display-history pruning. A changed binding or work contract requires a new assignment.
+
+
+### Current context and resolved notices
+
+Open an agent's Progress details and choose **Current context**, or run:
+
+```powershell
+python fleet_context.py --fleet <fleet-id> --agent <agent-id>
+```
+
+The default CLI prints bounded text including its pagination metadata (default 12000 characters, `--max-chars` between 2000 and 16000). `--json` is an explicit full structured inspection mode; its text field is bounded, while metadata and duplicate structured items add output. Context supplements the full immutable deployed policy document; read that document before acting. Every page repeats release/binding and pause/goal observations, and preserves explicit-stop and source-permission requirements. It includes current contracts, unresolved obligations, matching milestones and canonical evidence instead of copying transcripts. Earlier superseded handoff instructions are replaced by reconciliation references. No context request sends a message or starts work.
+
+Follow `nextCursor` using `--cursor`; changed assignment/stop/evidence snapshots reject old cursors. Poll-only timestamps do not invalidate a page. `--since <fingerprint>` returns the safety header and an explicit unchanged result when facts match. Oversized obligations produce an overflow reference and required size; retrieve the complete record with `--handoff <id>` before acting. An oversized header explicitly points to the full policy document. Unresolved work is never silently dropped to meet the bound.
+
+**Preview notice retirement** shows up to 100 qualifying notices before applying a display-only change. A withdrawal must be proven unsent. Completed/superseded work requires receipt and submission evidence; current accepted work also needs fresh tracker acceptance under the deployed rules. Current withdrawal constraints and unresolved/uncertain effects remain visible. Apply rechecks the selected records and current binding/stop/evidence; changed facts require a new preview. Retired notices are hidden only while the retirement evidence remains valid. Reopened tasks, removed acceptance, later reports or stale acceptance observations restore their visibility for reconciliation. Their canonical records, receipt evidence, submission markers, supersession tombstones and deduplication IDs remain available through `/api/context/handoff`. No branch, file or canonical record is deleted.
+
+### Reliability observations and scenarios
+
+Monitoring includes durable counts of duplicate events/reports actually suppressed and manual reconciliations actually observed, with a counter-start timestamp. Retained delivery states and current blocker intervals are qualified separately; unavailable time stays unknown. These are neither lifetime totals nor estimates of saved time, cost or technical correctness.
+
+The existing `python -m unittest discover -s tests` suite includes composed scenarios for accepted dependencies during a stop, repeated/out-of-order reports, restart around dispatch, uncertain native acknowledgement, changed assignments, policy changes, evidence retention and bounded-context pagination. `node tests/ui.mjs` uses the installed Playwright/Edge tooling for browser verification. All fixtures are synthetic and native boundaries are mocked; no model calls, tracker mutations, package downloads or MATLAB processes are needed. Acceptance remains at completed module/substantial-part boundaries.

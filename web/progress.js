@@ -114,7 +114,7 @@ async function openProgressDetail(detail,append=false){
   const a=d.agents.find(a=>a.id===agent);if(!a)return;
   title=a.name;body='<p><strong>'+esc(a.availability?.reason||'Availability unknown')+'</strong></p><p>Session: '+esc(a.session.stale?'Unknown / stale':labels[a.session.status]||'Unknown')+'</p>'+stamp('Session observation',a.session.observedAt)+(a.adoption?'<p>Workflow: '+(a.adoption.acknowledged?'Acknowledged':'Awaiting acknowledgement')+' ? Entry point: '+esc(a.adoption.entryPoint)+' ? Binding: '+(a.adoption.bindingMatches?'Current':'Needs deployment')+'</p><button class="button small" data-progress-view="workflow">Review workflow adoption</button>':'')+'<h3>Assignment observations</h3>'+((a.assignments||[]).length?a.assignments.map(assignmentMarkup).join(''):assignmentMarkup(null))+'<h3>Reported milestones</h3>'+a.reports.map(reportMarkup).join('')+'<button class="button small" data-progress-activity="'+a.id+'">Inspect agent activity</button><button class="button small" data-progress-message="'+a.id+'">Review instruction</button>';
  }
- if(agent)body+=agentGoalMarkup(d,agent);
+ if(agent)body+='<button class="button small" data-current-context="'+agent+'">Current context</button><button class="button small" data-retire-context="'+agent+'">Preview notice retirement</button>'+agentGoalMarkup(d,agent);
  if(detail.taskUrl){
   const t=d.tasks.find(t=>t.url===detail.taskUrl);title=t?'#'+t.iid+' '+t.title:'Reported task';
   body=(t?'<p>Tracker state: <strong>'+esc(t.state)+' / '+esc(d.stages.find(s=>s.id===t.stage)?.name||t.stage)+'</strong></p><p>Tracker assignees: '+esc(t.assignees.join(', ')||'Unassigned')+'</p><p>Observed in stage: '+elapsed(t.stageObservedAt)+(t.initialStageUnknown?' (entry time unknown)':'')+(t.observationGap?' · Observation gap':'')+'</p>'+stamp('Tracker',t.observedAt):'<p>No matching tracker observation.</p>')+evidenceLink(detail.taskUrl,'Open tracker task')+d.agents.flatMap(a=>a.reports).filter(r=>r.taskUrl===detail.taskUrl).map(reportMarkup).join('');
@@ -159,6 +159,8 @@ async function progressClick(e){
   if(b.dataset.goalAction)goalActionForm(b.dataset.goalAgent,b.dataset.goalAction);
   if(b.id==='progress-pause'){await api('/api/workflow/pause',{fleetId:activeId,paused:!progressData().deployment.paused});await loadProgress(true);}
   if(b.id==='progress-more-history')await openProgressDetail(progressDetail,true);
+  if(b.dataset.currentContext)await showCurrentContext(b.dataset.currentContext,b.dataset.contextCursor);
+  if(b.dataset.retireContext)await previewContextRetirement(b.dataset.retireContext);
   if(b.dataset.progressEditRole){detailDialog.close();setView('roles');openEditor('role',b.dataset.progressEditRole);}
   if(b.dataset.progressEditLink){detailDialog.close();setView('board');openEditor('rolelink',b.dataset.progressEditLink);}
   if(b.dataset.progressActivity){detailDialog.close();activityAgent=b.dataset.progressActivity;setView('activity');loadActivity();}
@@ -168,3 +170,21 @@ async function progressClick(e){
 }
 $('content').addEventListener('click',progressClick);detailDialog.addEventListener('click',progressClick);
 setInterval(()=>{if(state&&!stopped&&view==='progress')loadProgress();},5000);
+
+async function showCurrentContext(agentId,cursor){
+ const selected={fleetId:activeId,agentId,context:true};progressDetail=selected;
+ const d=await api('/api/context',{fleetId:selected.fleetId,agentId,cursor});
+ if(activeId!==selected.fleetId||progressDetail!==selected)return;
+ $('progress-detail-title').textContent='Current assignment context';
+ $('progress-detail-body').innerHTML='<pre class="context-text">'+esc(d.text)+'</pre><p>'+d.totalItems+' obligations; '+(d.remainingItems||0)+' on later pages. '+(d.retiredCount||0)+' resolved notices retired from the default view.</p>'+(d.nextCursor?'<button class="button" data-current-context="'+agentId+'" data-context-cursor="'+esc(d.nextCursor)+'">Next context page</button>':'');
+ detailDialog.showModal();
+}
+async function previewContextRetirement(agentId){
+ const selected={fleetId:activeId,agentId,retirement:true};progressDetail=selected;
+ const p=await api('/api/context/retire/preview',{fleetId:selected.fleetId,agentId});
+ if(activeId!==selected.fleetId||progressDetail!==selected)return;
+ $('progress-detail-title').textContent='Review resolved notices';
+ $('progress-detail-body').innerHTML='<p>'+esc(p.effect)+'</p>'+(p.records.length?'<ul>'+p.records.map(r=>'<li>'+esc(r.handoff.name)+' '+evidenceLink(r.handoff.submissionEvidence||r.handoff.receiptEvidence||r.handoff.ticket,'Evidence')+' ('+esc(r.handoff.id)+')</li>').join('')+'</ul><button class="button primary" id="apply-context-retirement">Retire these notices</button>':'<p>No notices currently have sufficient evidence for retirement.</p>');
+ if(p.records.length)$('apply-context-retirement').onclick=async()=>{try{await api('/api/context/retire/apply',{previewId:p.id});detailDialog.close();await loadProgress(true);toast('Resolved notices retired; canonical evidence retained.');}catch(error){toast(error.message,true);}};
+ detailDialog.showModal();
+}

@@ -404,6 +404,8 @@ class Triggers:
             if previous:
                 if previous.get("digest") and previous["digest"] != fingerprint:
                     raise ValueError("This event ID was already used with different recipients or handoff details.")
+                if not preview:
+                    self.app.progress.count(fleet["id"], "duplicateEvents")
                 return {"duplicate": True, "eventId": event_id, "actionIds": previous.get("actionIds", [])}
             rules = [r for r in fleet.get("triggers", []) if r["enabled"] and r["kind"] == "event" and r["eventName"] == name and r["sourceRoleId"] in agent.get("roleIds", [])]
             if not rules:

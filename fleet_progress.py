@@ -37,6 +37,8 @@ def report_progress(args, root=None):
         attr = re.sub(r'([A-Z])', lambda m: '_' + m[1].lower(), name)
         if getattr(args, attr, None):
             payload[name] = getattr(args, attr)
+    if getattr(args, 'phase', None):
+        payload['phase'] = args.phase
     request = Request(url + '/api/progress/report', data=json.dumps(payload).encode('utf-8'),
                       headers={'Content-Type': 'application/json', 'X-Fleet-Token': bootstrap['token']})
     with urlopen(request, timeout=30) as response:
@@ -51,6 +53,8 @@ def main():
     for name in ('summary', 'reason', 'next-action', 'handoff'):
         parser.add_argument('--' + name, default='')
     parser.add_argument('--depends-on', action='append', default=[])
+    from studio_assignments import PHASES
+    parser.add_argument('--phase', choices=PHASES, help='Optional phase for a progress-updated milestone at a module or substantial-part boundary.')
     for name in ('goal-id', 'completion-criteria', 'blocker-owner', 'resume-condition'):
         parser.add_argument('--' + name, default='')
     from studio_goals import BLOCKERS

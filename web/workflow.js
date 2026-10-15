@@ -88,10 +88,14 @@ function editWorkflowItem(id=null){
   if(values)return '<div class="field"><label for="'+fieldId+'">'+esc(label)+'</label><select id="'+fieldId+'">'+values.map(v=>'<option '+(value===v?'selected':'')+'>'+esc(v)+'</option>').join('')+'</select></div>';
   if(['text','guard','summary','note'].includes(key))return textarea(label,fieldId,value,key==='text'?60000:12000);
   return '<div class="field"><label for="'+fieldId+'">'+esc(label)+(Array.isArray(value)?' (comma-separated)':'')+'</label><input id="'+fieldId+'" value="'+esc(Array.isArray(value)?value.join(', '):value)+'" '+(key==='id'&&id?'readonly':'')+'></div>';
- }).join('');$('workflow-item-delete').hidden=!id;$('workflow-item-editor').showModal();
+ }).join('');
+ if(section==='states'&&!('acceptsDelivery' in item))$('workflow-editor-fields').insertAdjacentHTML('beforeend','<label class="checkbox-field"><input type="checkbox" id="wf-acceptsDelivery">This closed tracker state establishes accepted delivery</label>');
+ if(section==='states')$('workflow-editor-fields').insertAdjacentHTML('beforeend','<p class="field-hint">Mark acceptance only when this rule explicitly represents accepted delivery in your tracker. Closure alone may also mean cancelled or superseded work. Changes take effect after deployment.</p>');
+ $('workflow-item-delete').hidden=!id;$('workflow-item-editor').showModal();
 }
 $('workflow-item-form').onsubmit=async event=>{event.preventDefault();const edit=workflowEditing,item=clone(edit.item);try{
  for(const [key,value] of Object.entries(item)){if(['roles','sources'].includes(key))item[key]=[...document.querySelectorAll('[data-wf-list="'+key+'"]:checked')].map(n=>n.value);else if(typeof value==='boolean')item[key]=$('wf-'+key).checked;else if(Array.isArray(value))item[key]=$('wf-'+key).value.split(',').map(s=>s.trim()).filter(Boolean);else item[key]=$('wf-'+key).value.trim();}
+ if(edit.section==='states'&&($('wf-acceptsDelivery').checked||'acceptsDelivery' in item))item.acceptsDelivery=$('wf-acceptsDelivery').checked;
  await mutate(next=>{const f=next.fleets.find(f=>f.id===edit.fleetId);f.workflow??=Object.fromEntries(Object.entries(workflowData().spec).filter(([k])=>!['roles','handoffs','triggers'].includes(k)));const list=f.workflow[edit.section];if(edit.id)list[list.findIndex(r=>r.id===edit.id)]=item;else if(edit.section==='states'&&list.some(r=>r.fallback))list.splice(list.findIndex(r=>r.fallback),0,item);else list.push(item);},'Workflow draft saved.');$('workflow-item-editor').close();await loadWorkflow(true);
  }catch(e){toast(e.message,true);}};
 $('workflow-item-delete').onclick=async()=>{const edit=workflowEditing;try{await mutate(next=>{const f=next.fleets.find(f=>f.id===edit.fleetId);f.workflow[edit.section]=f.workflow[edit.section].filter(r=>r.id!==edit.id);},'Removed from draft.');$('workflow-item-editor').close();await loadWorkflow(true);}catch(e){toast(e.message,true);}};

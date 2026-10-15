@@ -32,7 +32,7 @@ now=time.time();writer=f['agents'][1];integrator=f['agents'][2]
 url=f['backlog']['projectUrl']+'/-/issues/101'
 payload={'fleetId':f['id'],'agentId':writer['id'],'sessionId':writer['sessionId'],'releaseId':rid,'eventId':'blocked-101','kind':'blocked',
          'taskUrl':url,'evidenceUrl':url+'#note_1','summary':'Review input contract <script>window.injected=true</script>',
-         'reason':'Waiting for reviewed input','nextAction':'Coordinator supplies the input contract'}
+         'reason':'Waiting for reviewed input','blockerOwner':'Coordinator','nextAction':'Coordinator supplies the input contract'}
 app.progress.report(payload)
 app.progress.report({**payload,'eventId':'test-101','kind':'test-result','suite':'Contract checks',
                      'testStatus':'passed','revision':'a'*40,'passed':12,'failed':0,'skipped':1,'durationSeconds':2.5})

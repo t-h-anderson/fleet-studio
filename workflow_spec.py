@@ -57,6 +57,7 @@ SCHEMA["properties"]["triggers"]["items"]["properties"]["recipientMode"] = choic
 RUNTIME = obj({"backends": {"type": "array", "items": choice("codex", "claude-code"), "maxItems": 2, "uniqueItems": True},
                "location": choice("any", "local", "remote")})
 SCHEMA["properties"]["roles"]["items"]["properties"]["runtime"] = RUNTIME
+SCHEMA["properties"]["states"]["items"]["properties"]["acceptsDelivery"] = {"type": "boolean"}
 
 
 def validate_node(value, schema, at="$", depth=0):
@@ -107,6 +108,9 @@ def validate(spec):
         indices[section] = index
     if not spec["roles"]:
         raise ValueError("A workflow needs roles.")
+    for state in spec['states']:
+        if state.get('acceptsDelivery') and (state['issueState'] != 'closed' or state['fallback']):
+            raise ValueError('An acceptance rule must explicitly match closed tracker tasks and cannot be the fallback.')
     if len({r["name"].casefold() for r in spec["roles"]}) != len(spec["roles"]):
         raise ValueError("Role names must be unique.")
     def ref(section, value):
@@ -260,7 +264,8 @@ def render(spec, role_ids=None):
     lines += ["## Ticket states (first matching rule wins)", ""]
     for s in spec["states"]:
         lines += ["- " + s["id"] + ": " + s["name"] + "; queue roles: " + ", ".join(s["roles"]) + "; " +
-                  ("fallback" if s["fallback"] else s["issueState"] + " / labels " + ", ".join(s["labelsAny"]) + " / prefixes " + ", ".join(s["labelPrefixes"]))]
+                  ("fallback" if s["fallback"] else s["issueState"] + " / labels " + ", ".join(s["labelsAny"]) + " / prefixes " + ", ".join(s["labelPrefixes"])) +
+                  ("; establishes accepted delivery" if s.get('acceptsDelivery') else "")]
     lines += ["", "## Ticket transitions", ""]
     for t in spec["transitions"]:
         lines += ["- " + t["id"] + ": " + t["from"] + " -> " + t["to"] + "; " + t["action"] + " by " + names[t["role"]] , "  Guard: " + t["guard"]]
@@ -312,6 +317,7 @@ def assignment_document(fleet, spec, agent, release_id, app_root):
         command = ("python " + quote(Path(app_root) / "fleet_progress.py") + " --fleet " + fleet['id'] + " --agent " + agent['id'] +
                    " --release " + release_id + " --id '<stable-milestone-id>' --kind task-started --task '<ticket-URL>' --evidence '<evidence-comment-URL>' --summary '<meaningful progress>'")
         lines += ["## Progress reports", "", "Report meaningful milestones after recording tracker evidence. Kinds: task-started, progress-updated, blocked, unblocked, handoff-received, work-finished, test-result. Report existing local test evidence with test-result, --suite, --test-status, --revision (full tested commit SHA), and optional --passed/--failed/--skipped counts and --duration-seconds. Explain scope and any uncommitted changes in the evidence. A test report never authorizes a new test run or overrides runtime custody. Blocked reports require --reason and --next-action. Receipts require --handoff with the delivery action ID. Use --depends-on for an explicitly reported dependency. A work-finished report does not close or accept a task. Reuse an event ID and identical details when retrying. If Studio is unavailable, keep the tracker current and retry at the next safe boundary.", "", "```powershell", command, "```", ""]
+        lines += ['Optional: use --kind progress-updated --phase implementing, verifying or submitted at a module/substantial-part milestone. Supply --blocker-owner and --resume-condition for a blocker even without a native goal. No per-function report or test gate is required. These observations never start verification, change task ownership or resume a stopped goal.', '']
     if any(p['id'] == 'bounded-goals' for p in spec.get('policies', [])):
         lines += ['## Bounded goal evidence', '',
                   'When explicitly authorized to use a native goal, define one bounded work packet with a ticket and completion criterion. Roles remain in the workflow. In Progress > Goals, link the exact observed goal ID to the ticket, or add --goal-id <native-goal-ID-shown-in-Studio> and --completion-criteria <done-condition> to your first task-started/progress-updated report. Later substantive reports use the same --goal-id. Goal-linked blocked reports also require --blocker-category (dependency, approval, restricted, host, capacity or other), --reason, --next-action, --blocker-owner and --resume-condition; use --depends-on for dependency links. Keep task evidence in the tracker. Missing native observations are unknown, not proof of completion.', '',

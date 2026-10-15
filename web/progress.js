@@ -58,7 +58,7 @@ function renderProgress(){
  const d=progressData();
  if(!d||d.error){$('content').innerHTML='<div class="empty-state"><h3>'+(d?.error?'Progress unavailable':'Loading progress')+'</h3><p>'+esc(d?.error||'Combining tracker facts, agent reports and handoff receipts.')+'</p><button class="button" id="progress-refresh">Refresh</button></div>';if(!d)loadProgress();return;}
  const s=d.summary,needle=query.toLowerCase(),match=x=>JSON.stringify(x).toLowerCase().includes(needle);
- const notice=[d.transportError,d.observationError,!d.tracker.url?'Connect your external tracker in Backlog ? Project & links.':trackerSnapshotNotice(d.tracker)].filter(Boolean).join(' ');
+ const notice=[d.transportError,d.observationError,!d.tracker.url?'Connect your external tracker in Backlog > Project & links.':trackerSnapshotNotice(d.tracker)].filter(Boolean).join(' ');
  let body='';
  if(progressTab==='attention')body='<div class="progress-attention-list">'+d.attention.filter(match).map(attentionProgress).join('')+(!d.attention.length?'<p class="field-hint">No attention signals in the available observations.</p>':'')+'</div>';
  if(progressTab==='agents')body='<div class="assignment-grid">'+d.agents.filter(match).map(agentProgress).join('')+'</div>';

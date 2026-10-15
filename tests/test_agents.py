@@ -297,7 +297,7 @@ class TrackerTests(unittest.TestCase):
         self.assertIn("test totals", notice)
 
     def test_gh_cli_failure_does_not_echo_output(self):
-        with patch("studio_trackers.subprocess.run", return_value=types.SimpleNamespace(returncode=1, stdout="token=secret", stderr="secret")):
+        with patch("studio_tracker_io.subprocess.run", return_value=types.SimpleNamespace(returncode=1, stdout="token=secret", stderr="secret")):
             with self.assertRaises(ValueError) as failure:
                 studio_trackers.github_get("https://github.com/o/r", "issues")
         self.assertNotIn("secret", str(failure.exception))

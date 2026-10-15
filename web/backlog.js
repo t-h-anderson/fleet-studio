@@ -3,6 +3,12 @@ const backlogCache=new Map(),backlogRequests=new Set();
 let backlogStage='open',backlogLabel='',backlogAgent='',backlogRole='',backlogReferenceRole='',backlogPage=0,backlogLimit=20;
 let backlogView=localStorage.getItem('fleet-backlog-view')||'board';
 const backlogData=()=>backlogCache.get(activeId);
+function trackerSnapshotNotice(data,label='Tracker'){
+ if(!data)return '';
+ const state=data.error||data.stale?'stale':data.partial?'partial':'current';
+ const last=data.observedAt?'Last successful '+label.toLowerCase()+' read: '+new Date(data.observedAt*1000).toLocaleString()+'.':'No successful '+label.toLowerCase()+' read yet; counts are unknown.';
+ return [data.error||'',data.observedAt&&state==='stale'?'Retained '+label.toLowerCase()+' observations are stale.':'',data.partial?'Partial results; unseen records may have changed.':'',(!data.observedAt||state!=='current')?last:''].filter(Boolean).join(' ');
+}
 const backlogItems=()=>backlogData()?.items||[];
 const stageName=id=>backlogData()?.stages?.find(s=>s.id===id)?.name||id;
 const agentReferences=t=>[...new Set((t.references||[]).map(r=>r.agentId))];
@@ -43,7 +49,7 @@ function backlogSummary(){
  const data=backlogData();
  if(!data?.config.projectUrl)return '<div class="backlog-strip"><span>Connect a GitLab or GitHub project to see tickets across the fleet.</span><button class="text-button" data-backlog-settings>Connect backlog</button></div>';
  const counts=Object.fromEntries((data.stages||[]).map(s=>[s.id,backlogItems().filter(t=>t.stage===s.id).length]));
- return '<div class="backlog-strip"><strong>Ticket flow</strong>'+(data.stages||[]).map(s=>'<button class="flow-chip '+s.id+'" data-backlog-stage="'+s.id+'">'+esc(s.name)+' <b>'+counts[s.id]+'</b></button>').join('')+'<span class="sync-note">'+(data.loading?'Refreshing tracker…':data.error?'Tracker unavailable':data.observedAt?(data.stale?'Last snapshot · ':'Tracker · ')+ago(data.observedAt):'Loading tracker…')+'</span></div>';
+ return '<div class="backlog-strip"><strong>Ticket flow</strong>'+(data.stages||[]).map(s=>'<button class="flow-chip '+s.id+'" data-backlog-stage="'+s.id+'">'+esc(s.name)+' <b>'+(data.observedAt?counts[s.id]:'?')+'</b></button>').join('')+'<span class="sync-note">'+(data.loading?'Refreshing tracker…':data.error?'Tracker unavailable':data.observedAt?(data.stale?'Last snapshot · ':'Tracker · ')+ago(data.observedAt):'Loading tracker…')+'</span></div>';
 }
 function renderBacklog(){
  const data=backlogData(),items=selectedTickets();
@@ -53,7 +59,8 @@ function renderBacklog(){
  const role=current().roles.find(r=>r.id===(backlogRole||backlogReferenceRole));
  const toolbar='<div class="definition-toolbar"><div><strong>Tickets moving through the project</strong><p>Live tracker labels define queue stage. Agent links are display references.</p></div><div><button class="button small" data-backlog-settings>Project & links</button><button class="button small" id="refresh-backlog">'+icon('refresh')+'Refresh tickets</button></div></div>';
  const filters='<div class="backlog-filters"><label>Stage<select id="backlog-stage"><option value="open">All open</option><option value="all">All tickets</option>'+(data?.stages||[]).map(s=>'<option value="'+s.id+'">'+esc(s.name)+'</option>').join('')+'</select></label><label>Label<select id="backlog-label"><option value="">All labels</option>'+labels.map(l=>'<option value="'+esc(l)+'">'+esc(l)+'</option>').join('')+'</select></label><label>Agent reference<select id="backlog-agent"><option value="">All agents</option>'+current().agents.map(a=>'<option value="'+a.id+'">'+esc(a.name)+'</option>').join('')+'</select></label><div class="backlog-view-switch"><button class="button small '+(backlogView==='board'?'primary':'')+'" data-backlog-view="board">Flow board</button><button class="button small '+(backlogView==='table'?'primary':'')+'" data-backlog-view="table">Table</button></div>'+(role?'<button class="flow-chip" id="clear-backlog-role">'+esc(role.name)+(backlogReferenceRole?' references':' queue')+' &times;</button>':'')+'</div>';
- const notice=data?.error?'<div class="backlog-notice">'+esc(data.error)+(data.observedAt?' Showing the last successful snapshot.':'')+'</div>':data?.partial?'<div class="backlog-notice">The project exceeds the 5,000-ticket read limit. Counts cover loaded tickets only.</div>':'';
+ const snapshotNotice=trackerSnapshotNotice(data);
+ const notice=snapshotNotice?'<div class="backlog-notice">'+esc(snapshotNotice)+'</div>':'';
  let body='';
  if(!data?.observedAt)body='<div class="activity-empty backlog-empty">'+(!settings.projectUrl?'Connect the project in Project & links.':data?.loading?'Reading project tickets…':data?.error?'Refresh after reconnecting to the tracker.':'Waiting for the first tracker snapshot.')+'</div>';
  else if(backlogView==='board')body='<div class="kanban">'+data.stages.filter(s=>backlogStage==='open'?s.id!=='closed':backlogStage==='all'||s.id===backlogStage).map(s=>{const tickets=items.filter(t=>t.stage===s.id);return '<section class="kanban-lane '+s.id+'"><div class="kanban-heading"><strong>'+esc(s.name)+'</strong><span>'+tickets.length+'</span></div>'+tickets.slice(0,backlogLimit).map(ticketCard).join('')+(tickets.length>backlogLimit?'<button class="text-button" data-more-tickets>Show more</button>':'')+(!tickets.length?'<p class="field-hint">No matching tickets</p>':'')+'</section>';}).join('')+'</div>';
@@ -74,11 +81,14 @@ function backlogSettings(){
  $('backlog-dialog-title').textContent='Backlog project & agent links';
  $('backlog-dialog-body').innerHTML='<form id="backlog-settings-form"><div class="field"><label for="backlog-project-url">Project URL</label><input id="backlog-project-url" type="url" value="'+esc(cfg.projectUrl)+'" placeholder="https://gitlab.example.com/group/project or https://github.com/owner/repo"></div><div class="field"><label for="backlog-provider">Tracker</label><select id="backlog-provider"><option value="auto">Detect from URL</option><option value="gitlab">GitLab</option><option value="github">GitHub</option></select></div><div class="field"><label for="backlog-scope">Project scope</label><select id="backlog-scope"><option value="all">All project tickets</option><option value="ai">AI workflow tickets</option></select></div><p class="field-hint">Uses your existing glab or gh login. Reads tickets, label history and CI from the tracker. Self-hosted GitHub needs the GitHub tracker selected.</p><h3>Additional ticket links</h3><p class="field-hint">Link ticket numbers to agents for display. This does not change tracker assignment. Existing local session-status references also appear.</p>'+current().agents.map(a=>'<div class="field"><label for="tickets-'+a.id+'">'+esc(a.name)+'</label><input id="tickets-'+a.id+'" data-agent-ticket-input="'+a.id+'" value="'+esc((cfg.agentTickets?.[a.id]||[]).join(', '))+'" placeholder="1144, 1008"></div>').join('')+'<button class="button primary" type="submit">Save backlog settings</button></form>';
  $('backlog-scope').value=cfg.scope;$('backlog-provider').value=cfg.provider||'auto';
+ $('backlog-provider').closest('.field').insertAdjacentHTML('afterend','<div class="field"><label><input id="backlog-recover-proxy" type="checkbox"> Retry tracker reads without an unavailable local proxy</label><p class="field-hint">Optional. Retry once when an unauthenticated loopback proxy is unreachable. Other configured proxies remain in effect. Applies to tickets, history and CI.</p></div>');
+ $('backlog-recover-proxy').checked=cfg.recoverLocalProxy===true;
  const fleetId=activeId;
  $('backlog-settings-form').onsubmit=async e=>{e.preventDefault();try{
   const agentTickets={};document.querySelectorAll('[data-agent-ticket-input]').forEach(n=>{const text=n.value.trim();const ids=text?text.split(/[,\s]+/).map(v=>Number(v.replace(/^#/,''))):[];if(ids.some(i=>!Number.isInteger(i)||i<=0))throw new Error('Use positive ticket numbers separated by commas.');agentTickets[n.dataset.agentTicketInput]=ids;});
   // Keep settings this form does not edit, such as legacy status references.
   const backlog={...cfg,projectUrl:$('backlog-project-url').value.trim(),scope:$('backlog-scope').value,agentTickets};
+  if($('backlog-recover-proxy').checked||'recoverLocalProxy' in cfg)backlog.recoverLocalProxy=$('backlog-recover-proxy').checked;
   if($('backlog-provider').value==='auto')delete backlog.provider;else backlog.provider=$('backlog-provider').value;
   await mutate(next=>next.fleets.find(f=>f.id===fleetId).backlog=backlog,'Backlog settings saved.');
   backlogCache.delete(fleetId);$('backlog-dialog').close();loadBacklog(true);

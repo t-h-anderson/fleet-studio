@@ -8,6 +8,7 @@ from pathlib import Path
 import threading
 import time
 from urllib.parse import urlsplit
+from studio_tracker_io import TrackerReadError, freshness
 
 STAGES = [('backlog', 'Scope / backlog'), ('ready', 'Ready'), ('active', 'In progress'),
           ('integration', 'Awaiting merge'), ('blocked', 'Blocked'), ('closed', 'Closed')]
@@ -41,6 +42,10 @@ def clean_config(value, agents, source=None):
     # Only record a provider when chosen, so existing GitLab configurations are unchanged.
     if provider != 'auto':
         config['provider'] = provider
+    if 'recoverLocalProxy' in value:
+        if type(value['recoverLocalProxy']) is not bool:
+            raise ValueError('Local proxy recovery must be enabled or disabled.')
+        config['recoverLocalProxy'] = value['recoverLocalProxy']
     return config
 
 
@@ -66,12 +71,12 @@ class Backlog:
         fleet = self.app.runtime_fleet(draft) if active else draft
         config = clean_config(draft.get('backlog'), {a['id'] for a in fleet['agents']}, fleet.get('roleSource'))
         refs = local_references(fleet, config)
-        key = json.dumps([config['projectUrl'], config['scope']] + ([config['provider']] if 'provider' in config else []) + ([sorted(refs)] if config['scope'] == 'ai' else []))
+        key = json.dumps([config['projectUrl'], config['scope'], config.get('recoverLocalProxy', False)] + ([config['provider']] if 'provider' in config else []) + ([sorted(refs)] if config['scope'] == 'ai' else []))
         with self.lock:
             item = self.cache.get(fleet_id)
             if not item or item['key'] != key:
                 item = {'key': key, 'items': [], 'changes': [], 'observedAt': None, 'attemptedAt': 0,
-                        'loading': False, 'error': '', 'partial': False}
+                        'loading': False, 'error': '', 'errorKind': '', 'partial': False}
                 cached = self.app.progress.cached_backlog(draft) if hasattr(self.app, 'progress') else None
                 if cached:
                     item.update(cached)
@@ -92,8 +97,9 @@ class Backlog:
                 ticket['stage'] = mapped['id']
                 ticket['roleIds'] = [r['id'] for r in fleet['roles'] if stable(r, 'role') in mapped['roles']]
         result.pop('key', None)
+        quality = freshness(result, time.time())
         result.update(config=config, workflowProjection="deployed" if active else "draft", stages=([{'id': s['id'], 'name': s['name']} for s in fleet['workflow']['states']] if fleet.get('workflow', {}).get('states') else [{'id': i, 'name': n} for i, n in STAGES]),
-                      stale=bool(result['observedAt'] and (result['error'] or time.time() - result['observedAt'] > 180)))
+                      freshness=quality, stale=quality == 'stale' or bool(result['error']))
         return result
 
     def _refresh(self, fleet_id, config, item):
@@ -103,7 +109,7 @@ class Backlog:
                 rows = json.loads(Path(self.fixture).read_text(encoding='utf-8'))
                 issues, partial = (fetch_github_issues if provider_of(config) == 'github' else fetch_issues)(config, lambda url, suffix: rows if 'page=1&' in suffix else [])
             elif not self.app.launch_enabled:
-                raise ValueError('Live tracker reads are disabled in this test instance.')
+                raise TrackerReadError('disabled', 'Live tracker reads are disabled in this test instance.')
             else:
                 issues, partial = tracker_for(config).snapshot(config)
             with self.lock:
@@ -112,17 +118,18 @@ class Backlog:
                 old = {i['iid']: i for i in item['items']}
                 changes = [{'iid': i['iid'], 'title': i['title'], 'from': old[i['iid']]['stage'], 'to': i['stage'], 'time': time.time()}
                            for i in issues if i['iid'] in old and old[i['iid']]['stage'] != i['stage']]
-                item.update(items=issues, partial=partial, observedAt=time.time(), error='',
+                item.update(items=issues, partial=partial, observedAt=time.time(), error='', errorKind='',
                             changes=(changes + item['changes'])[:40])
                 captured = deepcopy(item)
             if hasattr(self.app, 'progress'):
                 current_fleet = self.app.store.fleet(fleet_id)
                 current_config = clean_config(current_fleet.get('backlog'), {a['id'] for a in current_fleet['agents']}, current_fleet.get('roleSource'))
-                if (current_config['projectUrl'], current_config['scope'], provider_of(current_config)) == (config['projectUrl'], config['scope'], provider_of(config)):
+                if (current_config['projectUrl'], current_config['scope'], provider_of(current_config), current_config.get('recoverLocalProxy', False)) == (config['projectUrl'], config['scope'], provider_of(config), config.get('recoverLocalProxy', False)):
                     self.app.progress.observe_backlog(current_fleet, captured)
         except Exception as exc:
             with self.lock:
-                item['error'] = str(exc) if isinstance(exc, ValueError) else 'Tracker refresh failed. The last successful snapshot is retained.'
+                item['error'] = str(exc) if isinstance(exc, TrackerReadError) else 'Tracker refresh failed. Check tracker configuration and availability; any last successful snapshot is retained.'
+                item['errorKind'] = exc.kind if isinstance(exc, TrackerReadError) else 'unknown'
         finally:
             with self.lock:
                 item['loading'] = False

@@ -269,6 +269,9 @@
           },
           "fallback": {
             "type": "boolean"
+          },
+          "acceptsDelivery": {
+            "type": "boolean"
           }
         },
         "required": [

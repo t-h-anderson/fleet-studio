@@ -7,6 +7,7 @@ import json
 import math
 import re
 import threading
+from studio_tracker_io import TrackerReadError, freshness
 
 
 def blocker_category(task, execution_reported=False):
@@ -120,9 +121,9 @@ class Metrics:
         project, now = config['projectUrl'], self.progress.clock()
         with self.ci_lock:
             item = self.ci.get(fleet['id'])
-            if not item or item['project'] != project or item.get('provider', 'gitlab') != provider:
+            if not item or item['project'] != project or item.get('provider', 'gitlab') != provider or item.get('recoverLocalProxy', False) != config.get('recoverLocalProxy', False):
                 item = {'project': project, 'provider': provider, 'label': tracker_label(fleet) + ' CI', 'pipelines': [], 'observedAt': None, 'attemptedAt': None,
-                        'loading': False, 'error': '', 'testSummary': None, 'testNotice': ''}
+                        'loading': False, 'error': '', 'errorKind': '', 'testSummary': None, 'testNotice': ''}
                 with self.progress.lock, closing(self.progress.connect()) as db:
                     row = db.execute('SELECT data FROM ci_snapshots WHERE fleet=? AND project=?', (fleet['id'], project)).fetchone()
                 if row:
@@ -130,30 +131,34 @@ class Metrics:
                     if saved.get('provider', 'gitlab') == provider:
                         item.update(saved)
                 self.ci[fleet['id']] = item
+                item['recoverLocalProxy'] = config.get('recoverLocalProxy', False)
             if project and self.app.launch_enabled and not item['loading'] and (item['attemptedAt'] is None or now - item['attemptedAt'] > 90):
                 item.update(loading=True, attemptedAt=now)
                 threading.Thread(target=self._refresh_ci, args=(fleet['id'], item), daemon=True).start()
             result = deepcopy(item)
-        result['stale'] = bool(result['observedAt'] and (result['error'] or now - result['observedAt'] > 180))
+        result['freshness'] = freshness(result, now)
+        result['stale'] = result['freshness'] == 'stale' or bool(result['error'])
         return result
 
     def _refresh_ci(self, fid, item):
         from studio_trackers import tracker_for
-        tracker = tracker_for({'provider': item.get('provider', 'gitlab'), 'projectUrl': item['project']})
+        tracker = tracker_for({'provider': item.get('provider', 'gitlab'), 'projectUrl': item['project'],
+                               'recoverLocalProxy': item.get('recoverLocalProxy', False)})
         try:
             project = item['project']
             pipelines, summary, notice = tracker.pipelines(project)
             data = {'provider': tracker.name, 'pipelines': pipelines, 'testSummary': summary, 'testNotice': notice,
-                    'observedAt': self.progress.clock(), 'error': ''}
+                    'observedAt': self.progress.clock(), 'error': '', 'errorKind': ''}
             with self.ci_lock:
                 if self.ci.get(fid) is not item:
                     return
                 item.update(data)
                 with self.progress.lock, closing(self.progress.connect()) as db, db:
                     db.execute('INSERT OR REPLACE INTO ci_snapshots VALUES(?,?,?)', (fid, project, json.dumps(data)))
-        except Exception:
+        except Exception as exc:
             with self.ci_lock:
-                item['error'] = tracker.label + ' CI could not be read. Check project access and the ' + ('gh' if tracker.name == 'github' else 'glab') + ' login.'
+                item['error'] = str(exc) if isinstance(exc, TrackerReadError) else tracker.label + ' CI read failed. Check tracker configuration and availability; any earlier results are retained.'
+                item['errorKind'] = exc.kind if isinstance(exc, TrackerReadError) else 'unknown'
         finally:
             with self.ci_lock:
                 item['loading'] = False

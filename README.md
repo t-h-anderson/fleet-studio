@@ -14,6 +14,20 @@ Claude Code). GitLab reads use an existing `glab` login and GitHub reads an
 existing `gh` login. Windows opens agents in Windows Terminal; Linux and macOS
 use tmux. Node is needed only for browser/layout tests.
 
+Tracker refresh errors distinguish authentication, project access, connectivity,
+TLS, timeout, rate limits, missing CLI and unexpected responses. Raw CLI output
+is never displayed. Failed reads retain the last successful snapshot with its
+timestamp and a stale warning; counts remain unknown until a successful read.
+
+In **Backlog → Project & links**, **Retry tracker reads without an unavailable
+local proxy** is off by default. Enable it for launch environments that inherit
+temporary loopback proxies. After a connectivity failure, Studio probes only
+unauthenticated loopback proxy endpoints and retries a read-only GET once with
+unreachable proxy entries omitted from that child process. Live, remote and
+credentialed proxies, `NO_PROXY`, and the parent environment stay unchanged.
+Recovery is logged without proxy values or credentials. This setting applies
+to tickets, history and CI; it never retries a tracker mutation.
+
 ```powershell
 python fleet_studio.py --open
 ```

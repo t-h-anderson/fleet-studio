@@ -54,7 +54,7 @@ function renderProgress(){
  const d=progressData();
  if(!d||d.error){$('content').innerHTML='<div class="empty-state"><h3>'+(d?.error?'Progress unavailable':'Loading progress')+'</h3><p>'+esc(d?.error||'Combining tracker facts, agent reports and handoff receipts.')+'</p><button class="button" id="progress-refresh">Refresh</button></div>';if(!d)loadProgress();return;}
  const s=d.summary,needle=query.toLowerCase(),match=x=>JSON.stringify(x).toLowerCase().includes(needle);
- const notice=d.transportError?d.transportError:d.observationError?d.observationError:!d.tracker.url?'Connect your external tracker in Backlog → Project & links.':d.tracker.error?d.tracker.error:!d.tracker.observedAt?'Tracker data unavailable. Reports remain agent-reported.':d.tracker.stale?'Tracker observations are stale.':d.tracker.partial?'Partial tracker results. Counts include retained observations; unseen tasks may have changed.':'';
+ const notice=[d.transportError,d.observationError,!d.tracker.url?'Connect your external tracker in Backlog ? Project & links.':trackerSnapshotNotice(d.tracker)].filter(Boolean).join(' ');
  let body='';
  if(progressTab==='attention')body='<div class="progress-attention-list">'+d.attention.filter(match).map(attentionProgress).join('')+(!d.attention.length?'<p class="field-hint">No attention signals in the available observations.</p>':'')+'</div>';
  if(progressTab==='agents')body='<div class="table-wrap"><table><thead><tr><th>AGENT / ROLE</th><th>SESSION OBSERVATION</th><th>REPORTED WORK</th><th>NEXT ACTION</th></tr></thead><tbody>'+d.agents.filter(match).map(agentProgress).join('')+'</tbody></table></div>';

@@ -1,0 +1,169 @@
+{
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,99}$",
+      "maxLength": 100
+    },
+    "taskUrl": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "agentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "releaseId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "binding": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "directory": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "roleIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "maxItems": 50,
+          "uniqueItems": true
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude-code"
+          ]
+        },
+        "hostId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      },
+      "required": [
+        "sessionId",
+        "directory",
+        "roleIds",
+        "backend",
+        "hostId"
+      ],
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1000
+      },
+      "maxItems": 50,
+      "uniqueItems": true
+    },
+    "deliverable": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,99}$",
+            "maxLength": 100
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "id",
+          "description"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 20
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1000
+      },
+      "maxItems": 20,
+      "uniqueItems": true
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1000
+      },
+      "maxItems": 20,
+      "uniqueItems": true
+    },
+    "nextAgentId": {
+      "type": "string",
+      "maxLength": 100
+    },
+    "baseRevision": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})?$",
+      "maxLength": 64
+    },
+    "candidateRevision": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})?$",
+      "maxLength": 64
+    },
+    "supersedes": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,99}$",
+      "maxLength": 100
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "id",
+    "taskUrl",
+    "agentId",
+    "releaseId",
+    "binding",
+    "scope",
+    "deliverable",
+    "requirements",
+    "dependencies",
+    "evidence",
+    "nextAgentId",
+    "baseRevision",
+    "candidateRevision"
+  ],
+  "additionalProperties": false
+}

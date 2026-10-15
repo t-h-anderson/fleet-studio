@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "module-one-v1",
+  "taskUrl": "https://gitlab.example/team/project/-/issues/1",
+  "agentId": "replace-with-recipient-agent-id",
+  "releaseId": "replace-with-active-release-id",
+  "binding": {
+    "sessionId": "replace-with-recipient-session-id",
+    "directory": "replace-with-recipient-checkout",
+    "roleIds": ["replace-with-deployed-role-id"],
+    "backend": "codex",
+    "hostId": "local"
+  },
+  "scope": ["src/module_one", "tests/test_module_one.py"],
+  "deliverable": "Reviewed module first pass with its tests and documentation",
+  "requirements": [
+    {"id": "tests", "description": "The module tests pass"},
+    {"id": "review", "description": "Review findings are resolved"}
+  ],
+  "dependencies": [],
+  "evidence": ["https://gitlab.example/team/project/-/issues/1#note_1"],
+  "nextAgentId": "",
+  "baseRevision": "",
+  "candidateRevision": ""
+}

@@ -12,6 +12,20 @@ INTEGRATION_POLICY = {
     'text': 'Before final integration or acceptance checks, the Integrator records a bounded integration reservation in the existing ticket: responsible integration owner, candidate and base revisions, affected files and shared interfaces, required checks and the exact revisions tested, start time, next review/expiry time and release condition. This is coordination of current custody, not a global freeze or transfer of ownership. Before merging, rebasing or changing overlapping files/interfaces, Writers, the Coordinator and agents arranging externally managed work consult that record and agree sequencing with the integration owner. Non-overlapping authorized work may continue. The Coordinator brings externally managed changes into the same overlap check; an unacknowledged external reservation is a reported risk, not an assumed lock. An urgent overlapping change requires an explicit recorded decision identifying which evidence it invalidates. When the candidate or relevant main dependencies change, the Integrator records impacted checks and withdraws superseded acceptance requests; refresh affected evidence against the new submitted revision before requesting acceptance again. Keep unaffected evidence only with a documented applicability assessment. Rebase completion, passing tests at an older revision, cleared goals and workflow adoption do not establish current acceptance. Release the reservation when integration completes, is withdrawn or is deliberately rescheduled; review expired reservations with the owner rather than automatically completing, resuming or transferring work. Preserve genuine blockers, explicit stops, source/publication restrictions and serialized runtime ownership. Existing progress and blocked/unblocked reports should link the reservation evidence, owner, dependency and bounded next action.'}
 
 
+def brief_changes(old, new):
+    """Headings of brief sections whose text differs."""
+    def sections(text):
+        result, heading = {}, "Header"
+        for line in text.splitlines():
+            if line.startswith("## "):
+                heading = line[3:].strip()
+            elif not line.startswith("Brief "):
+                result.setdefault(heading, []).append(line)
+        return result
+    before, after = sections(old), sections(new)
+    return [name for name in list(after) + [n for n in before if n not in after] if before.get(name) != after.get(name)]
+
+
 class Deployments:
     def __init__(self, app):
         self.app = app
@@ -151,7 +165,7 @@ class Deployments:
                     if any(p['id'] == 'progress-reporting' for p in spec['policies']):
                         raise ValueError('Progress reporting is already deployed.')
                     spec['policies'].append({'id':'progress-reporting','name':'Meaningful progress and receipt reports','roles':[],'sources':[],
-                        'text':'After recording substantive evidence in the existing tracker, report task start, meaningful progress, blocker changes, handoff receipt and work completion through fleet_progress.py. Record one brief handoff-received receipt after reading the exact handoff and its evidence; receiving work is separate from technical acceptance, execution and issue closure. Report existing local test results with suite, exact commit and evidence. Reuse identical event IDs for retries. Do not repeat technical review, tests, unchanged updates or historical deliveries to populate metrics. Preserve actual blocker reasons, explicit paused/blocked/limited goals, task and file custody, source/publication restrictions and serialized runtime ownership. Adoption and receipts do not resume stopped work.'})
+                        'text':'Studio observes sessions, so agents report only done, blocked and hand-off with workflow_client.py report. Studio infers starts, progress and receipts from session activity. Do not post repeated or no-change updates.'})
                     version = spec['version'].split('.')
                     if len(version) == 3 and all(v.isdigit() for v in version):
                         spec['version'] = '.'.join(version[:2] + [str(int(version[2]) + 1)])
@@ -209,10 +223,8 @@ class Deployments:
                 for agent in fleet["agents"]:
                     instruction = assignment_document(fleet, spec, agent, rid, Path(__file__).parent)
                     (directory / "agents" / (agent["id"] + ".md")).write_text(instruction, encoding="utf-8")
-                entry = ("# Fleet Studio workflow entry point\n\nWorkflow release " + rid + ".\n\nRead [WORKFLOW.md](WORKFLOW.md) and your assigned file under agents/ before continuing. "
-                         "This release defines workflow responsibilities, handoffs and acceptance. Existing ticket scopes, explicit stops, source/publication restrictions, "
-                         "host recovery and engineering standards remain applicable. Report conflicts instead of silently choosing a weaker rule.\n\n"
-                         "Studio draft edits take effect after a new deployment. Keep technical work and evidence in the existing tickets/MRs.\n")
+                entry = ("# Fleet Studio workflow release " + rid + "\n\nYour brief is in agents/<your agent ID>.md. "
+                         "[WORKFLOW.md](WORKFLOW.md) is the full workflow for reference; you do not need to read it to do your work.\n")
                 (directory / "AGENTS.md").write_text(entry, encoding="utf-8")
                 # Publishing a release is local. Agent notification is a separate explicit control.
                 saved = self.app.store.save(state)
@@ -274,20 +286,25 @@ class Deployments:
             stored = self.app.controls.previews[preview["id"]]
             for target in stored["targets"]:
                 agent = bindings[target["agentId"]]
-                target["text"] = (
-                    "Adopt Fleet Studio workflow release " + rid + " at your next safe boundary.\n\n"
-                    "Your Fleet Studio identity: " + agent["name"] + " (" + agent["id"] + ").\n"
-                    "Assigned folder: " + agent["directory"] + ".\n"
-                    "Read " + str(self.root / rid / "agents" / (agent["id"] + ".md")) +
-                    ". This contains your assignment and the applicable deployed policy. "
-                    "Use your folder entry point to read the active release on future safe boundaries. "
-                    "These workflow definitions replace the historical workflow documents; continue using project engineering standards and ticket records.\n\n"
-                    "This is a policy-adoption instruction, not a new work assignment. Preserve explicit stops, current bounded tasks, claims, file custody, "
-                    "owned runtime and source/publication restrictions. Read the latest current ticket and host/session record; do not revive a historical task "
-                    "from a source citation or begin stopped work. Report conflicts before adopting. Do not launch MATLAB just to acknowledge.\n\n"
-                    "After reading and accepting your assignment, acknowledge only for yourself:\n"
-                    "python " + client + " acknowledge --fleet " + fleet["id"] + " --agent " + agent["id"] + " --release " + rid)
+                target["text"] = self.brief_notice(fleet["id"], rid, agent, client)
             return deepcopy(stored)
+
+    def brief_notice(self, fleet_id, release_id, agent, client):
+        """A short notice naming the brief sections that changed since the agent's previous release."""
+        command = "python " + client + " instructions --fleet " + fleet_id + " --agent " + agent["id"]
+        previous = [r["id"] for r in self.data["history"] if r["fleetId"] == fleet_id and r["id"] != release_id]
+        changed = []
+        if previous:
+            try:
+                old = (self.root / previous[-1] / "agents" / (agent["id"] + ".md")).read_text(encoding="utf-8")
+                new = (self.root / release_id / "agents" / (agent["id"] + ".md")).read_text(encoding="utf-8")
+                changed = brief_changes(old, new)
+            except OSError:
+                changed = []
+        summary = ("Changed: " + ", ".join(changed) + "." if changed else
+                   "Nothing in your brief changed." if previous else "This is your first brief.")
+        return ("[Fleet Studio] Your brief was updated (release " + release_id[:8] + "). " + summary + "\n\n"
+                "Read it when you reach a natural stopping point, then carry on with your current work:\n" + command)
 
     def acknowledge(self, payload):
         with self.app.store.lock:

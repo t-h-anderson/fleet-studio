@@ -1,0 +1,125 @@
+"""Goal-first briefs, the three agent reports and observed receipts."""
+from contextlib import closing
+import json
+from pathlib import Path
+import sys
+import time
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import test_design as fixtures
+from studio_deployments import brief_changes
+from workflow_spec import apply_spec, brief_document, export_spec, validate
+
+
+class BriefTests(unittest.TestCase):
+    setUp = fixtures.DesignTests.setUp
+    tearDown = fixtures.DesignTests.tearDown
+    app = fixtures.DesignTests.app
+
+    def with_goal(self, app):
+        state = app.store.snapshot()
+        fleet = state['fleets'][0]
+        writer = next(r for r in fleet['roles'] if r['key'] == 'writer')
+        writer.update(goal='Ship small, tested changes that close tickets.',
+                      successCriteria=['Tests pass', 'Ticket closed'], doneWhen='The MR is merged.')
+        app.store.save(state)
+        return app.store.fleet(fleet['id'])
+
+    def test_brief_leads_with_goal_and_stays_short(self):
+        app, fleet = self.app()
+        fleet = self.with_goal(app)
+        spec = export_spec(fleet)
+        self.assertEqual(spec['schemaVersion'], 2)
+        text = brief_document(fleet, spec, fleet['agents'][0], 'a' * 32, Path('/studio'))
+        self.assertTrue(text.startswith('# ' + fleet['agents'][0]['name'] + ' — Writer'))
+        self.assertLess(text.index('Ship small'), text.index('## Reporting'))
+        self.assertIn('- Tests pass', text)
+        self.assertIn('Done when: The MR is merged.', text)
+        self.assertLess(len(text.split()), 400)
+        for phrase in ('workflow_client.py" acknowledge', 'handoff-received', 'stable event ID', '## Ticket states'):
+            self.assertNotIn(phrase, text)
+
+    def test_goal_fields_round_trip_and_v1_specs_still_validate(self):
+        app, fleet = self.app()
+        fleet = self.with_goal(app)
+        spec = export_spec(fleet)
+        restored = apply_spec(fleet, spec)
+        writer = next(r for r in restored['roles'] if r['key'] == 'writer')
+        self.assertEqual(writer['successCriteria'], ['Tests pass', 'Ticket closed'])
+        sample = json.loads((Path(__file__).resolve().parents[1] / 'workflows' / 'sample.workflow.json').read_text(encoding='utf-8'))
+        self.assertEqual(sample['schemaVersion'], 2)
+        sample['schemaVersion'] = 1
+        for role in sample['roles']:
+            for key in ('goal', 'successCriteria', 'doneWhen'):
+                role.pop(key, None)
+        self.assertEqual(validate(sample)['schemaVersion'], 1)
+
+    def test_brief_changes_name_sections(self):
+        old = '# A\n\n## Goal\n\nOld\n\n## Reporting\n\nSame\n\nBrief 1 · release x'
+        new = '# A\n\n## Goal\n\nNew\n\n## Reporting\n\nSame\n\nBrief 2 · release y'
+        self.assertEqual(brief_changes(old, new), ['Goal'])
+
+
+class ReportTests(unittest.TestCase):
+    setUp = fixtures.DesignTests.setUp
+    tearDown = fixtures.DesignTests.tearDown
+    app = fixtures.DesignTests.app
+
+    def open_work(self, app, fleet, agent):
+        with closing(app.progress.connect()) as db:
+            return app.health.open_work(db, fleet['id'], agent)
+
+    def test_blocked_persists_until_done(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        result = app.reports.report({'kind': 'blocked', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Need the API key'})
+        self.assertTrue(result['recorded'])
+        work, blocked = self.open_work(app, fleet, writer)
+        self.assertTrue(work)
+        self.assertEqual(blocked['reason'], 'Need the API key')
+        app.reports.report({'kind': 'done', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Merged',
+                            'ticket': 'https://gitlab.example/team/project/-/issues/1'})
+        self.assertEqual(self.open_work(app, fleet, writer), (False, None))
+
+    def test_direct_handoff_reaches_a_role_member(self):
+        app, fleet = self.app()
+        writer, integrator = fleet['agents']
+        with patch.object(app.controls, 'send', return_value={'id': 'r1'}) as send:
+            result = app.reports.report({'kind': 'handoff', 'fleetId': fleet['id'], 'agentId': writer['id'],
+                                         'to': 'Integrator', 'note': 'Packet ready on branch x'})
+            preview = app.controls.previews[send.call_args[0][0]]
+        self.assertEqual(result['recipient'], integrator['name'])
+        self.assertEqual(preview['targets'][0]['agentId'], integrator['id'])
+        self.assertIn('Packet ready on branch x', preview['targets'][0]['text'])
+        fire = app.automation.data['fires'][-1]
+        self.assertEqual((fire['ruleId'], fire['status']), ('agent-handoff', 'sending'))
+
+    def test_unknown_handoff_target_is_one_clear_error(self):
+        app, fleet = self.app()
+        with self.assertRaisesRegex(ValueError, 'No role or agent called Nobody'):
+            app.reports.report({'kind': 'handoff', 'fleetId': fleet['id'], 'agentId': fleet['agents'][0]['id'],
+                                'to': 'Nobody', 'note': 'x'})
+
+    def test_receipt_is_observed_from_the_next_turn(self):
+        app, fleet = self.app()
+        integrator = fleet['agents'][1]
+        created = time.time() - 60
+        handoff = {'id': 'h1', 'createdAt': created, 'status': 'queued', 'targetAgentId': integrator['id'], 'receivedAt': None}
+        with closing(app.progress.connect()) as db, db:
+            db.execute('INSERT INTO handoffs VALUES(?,?,?)', (fleet['id'], 'h1', json.dumps(handoff)))
+        app.progress.observe_receipts([fleet])
+        with closing(app.progress.connect()) as db:
+            self.assertIsNone(json.loads(db.execute('SELECT data FROM handoffs').fetchone()['data'])['receivedAt'])
+        app.telemetry.store(fleet['id'], integrator['id'], [{
+            'id': 't1', 'session': integrator['sessionId'], 'startedAt': created + 5, 'lastAt': created + 20, 'status': 'completed',
+            'tokens': {}, 'calls': [], 'classes': {}}])
+        app.progress.observe_receipts([fleet])
+        with closing(app.progress.connect()) as db:
+            saved = json.loads(db.execute('SELECT data FROM handoffs').fetchone()['data'])
+        self.assertEqual((saved['receivedAt'], saved['receiptSource']), (created + 5, 'observed-turn'))
+
+
+if __name__ == '__main__':
+    unittest.main()

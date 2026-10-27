@@ -221,28 +221,37 @@ class Health:
         self.current = {}
 
     def open_work(self, db, fleet_id, agent):
-        """Assigned, unsubmitted work for this agent, and its current blocker if any."""
+        """Assigned, unfinished work for this agent, and its current blocker if any."""
         from studio_progress import task_key
         closed = {row['url'] for row in db.execute('SELECT url, data FROM tasks WHERE fleet=?', (fleet_id,))
                   if json.loads(row['data']).get('state') == 'closed'}
+        note = None
+        if db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_notes'").fetchone():
+            row = db.execute('SELECT data FROM agent_notes WHERE fleet=? AND agent=?', (fleet_id, agent['id'])).fetchone()
+            note = json.loads(row['data']) if row else None
+        # A done or hand-off report closes everything the agent held before it.
+        settled = note['at'] if note and note['kind'] in ('done', 'handoff') else 0
+        if note and note['kind'] == 'blocked':
+            return True, {'reason': note['note'], 'at': note['at']}
         work, blocked = False, None
         for row in db.execute('SELECT data FROM agent_tasks WHERE fleet=? AND agent=?', (fleet_id, agent['id'])):
             report = json.loads(row['data'])
-            if report.get('taskUrl') in closed or report.get('phase') == 'submitted' or report.get('kind') == 'work-finished':
+            if (report.get('taskUrl') in closed or report.get('phase') == 'submitted' or report.get('kind') == 'work-finished'
+                    or report['at'] <= settled):
                 continue
             work = True
             if report.get('blockedSince'):
                 blocked = report
+        cutoff = max(self.clock() - 86400, settled)
         if not work and hasattr(self.app, 'automation'):
             work = any(f.get('recipientId') == agent['id'] and f['fleetId'] == fleet_id and f['status'] == 'sent'
-                       and f.get('ticket') and task_key(f['ticket']) not in closed and f['at'] >= self.clock() - 86400
+                       and f.get('ticket') and task_key(f['ticket']) not in closed and f['at'] > cutoff
                        for f in self.app.automation.data['fires'])
         if not work:
-            cutoff = self.clock() - 86400
             for row in db.execute('SELECT data FROM handoffs WHERE fleet=?', (fleet_id,)):
                 handoff = json.loads(row['data'])
                 if (handoff.get('targetAgentId') == agent['id'] and handoff.get('status') == 'queued'
-                        and handoff.get('createdAt', 0) >= cutoff and task_key(handoff.get('ticket') or '') not in closed
+                        and handoff.get('createdAt', 0) > cutoff and task_key(handoff.get('ticket') or '') not in closed
                         and not handoff.get('submittedAt')):
                     work = True
                     break

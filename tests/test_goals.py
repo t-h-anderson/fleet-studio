@@ -219,8 +219,10 @@ class GoalTests(unittest.TestCase):
         self.assertEqual(release['fleet']['roles'], f['roles'])
         self.assertEqual(release['fleet']['triggers'], f['triggers'])
         text = (app.deployments.root / release['id'] / 'agents' / (f['agents'][0]['id'] + '.md')).read_text()
-        self.assertIn('--resume-condition', text)
-        self.assertIn('never automatically clear', text)
+        # Untagged process policies stay in WORKFLOW.md; the brief keeps only the agent's own content.
+        self.assertNotIn('--resume-condition', text)
+        self.assertIn('report blocked', text)
+        self.assertLess(len(text.split()), 500)
         self.assertEqual(self.native['status'], 'blocked')
         with self.assertRaisesRegex(ValueError, 'already deployed'):
             app.deployments.preview({'fleetId': f['id'], 'kind': 'bounded-goals', 'revision': app.store.snapshot()['revision']})

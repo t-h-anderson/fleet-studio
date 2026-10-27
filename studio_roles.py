@@ -129,6 +129,31 @@ def runtime_constraint(value):
     return deepcopy(value)
 
 
+def bounded_text(value, label, limit):
+    if not isinstance(value, str) or len(value) > limit:
+        raise ValueError("Invalid " + label + ".")
+    return value.strip()
+
+
+def role_goal(row):
+    """Optional outcome fields; omitted when empty so earlier release digests are unchanged."""
+    bounded = bounded_text
+    result = {}
+    goal = row.get("goal", "")
+    if goal:
+        result["goal"] = bounded(goal, "role goal", 4000)
+    criteria = row.get("successCriteria", [])
+    if not isinstance(criteria, list) or len(criteria) > 20:
+        raise ValueError("A role can list at most 20 success criteria.")
+    criteria = [bounded(item, "success criterion", 500) for item in criteria if isinstance(item, str) and item.strip()]
+    if criteria:
+        result["successCriteria"] = criteria
+    done = row.get("doneWhen", "")
+    if done:
+        result["doneWhen"] = bounded(done, "done condition", 2000)
+    return result
+
+
 def clean_design(raw, agents):
     def bounded(value, label, limit, empty=True):
         if not isinstance(value, str) or len(value) > limit or (not empty and not value.strip()):
@@ -162,7 +187,8 @@ def clean_design(raw, agents):
                       "authority": bounded(row.get("authority", ""), "authority", 12000),
                       "baseline": baseline, "position": xy,
                       **{k: deepcopy(row[k]) for k in ("specId", "kind", "sources") if k in row},
-                      **({"runtime": runtime_constraint(row["runtime"])} if row.get("runtime") else {})})
+                      **({"runtime": runtime_constraint(row["runtime"])} if row.get("runtime") else {}),
+                      **role_goal(row)})
     for original, agent in zip(raw.get("agents", []), agents):
         assigned = original.get("roleIds", [])
         if not isinstance(assigned, list) or len(assigned) != len(set(assigned)) or any(rid not in ids for rid in assigned):

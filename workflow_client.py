@@ -1,14 +1,21 @@
-"""Acknowledge a deployed Fleet Studio workflow after reading the assignment."""
+"""Read your Fleet Studio brief and report done, blocked or hand-off.
+
+    python workflow_client.py instructions --fleet F --agent A
+    python workflow_client.py report done --fleet F --agent A --ticket URL --note "what changed"
+    python workflow_client.py report blocked --fleet F --agent A --note "what you need"
+    python workflow_client.py report handoff --fleet F --agent A --to ROLE --note "what to pick up"
+"""
 import argparse
 import json
 from pathlib import Path
 import re
 import sys
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from studio_bindings import same_binding
 
 
-def acknowledge(fleet, agent, release, root=None):
+def post(path, payload, root=None):
     root = Path(root) if root else Path(__file__).resolve().parent
     receipt = json.loads((root / ".runtime/server.json").read_text(encoding="utf-8"))
     url = receipt["url"]
@@ -20,10 +27,23 @@ def acknowledge(fleet, agent, release, root=None):
         raise ValueError("Saved Studio instance no longer matches.")
     with urlopen(url + "/api/bootstrap", timeout=5) as response:
         bootstrap = json.load(response)
-    request = Request(url + "/api/workflow/acknowledge", data=json.dumps({"fleetId": fleet, "agentId": agent, "releaseId": release}).encode(),
+    request = Request(url + path, data=json.dumps(payload).encode(),
                       headers={"Content-Type": "application/json", "X-Fleet-Token": bootstrap["token"]})
     with urlopen(request, timeout=30) as response:
         return json.load(response)
+
+
+def acknowledge(fleet, agent, release, root=None):
+    return post("/api/workflow/acknowledge", {"fleetId": fleet, "agentId": agent, "releaseId": release}, root)
+
+
+def report(kind, fleet, agent, note, ticket=None, to=None, root=None):
+    payload = {"kind": kind, "fleetId": fleet, "agentId": agent, "note": note}
+    if ticket:
+        payload["ticket"] = ticket
+    if to:
+        payload["to"] = to
+    return post("/api/report", payload, root)
 
 
 def instructions(fleet_id, agent_id, root=None, directory=None):
@@ -51,15 +71,30 @@ def instructions(fleet_id, agent_id, root=None, directory=None):
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["acknowledge", "instructions"])
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("action", choices=["instructions", "report", "acknowledge"])
+    parser.add_argument("kind", nargs="?", choices=["done", "blocked", "handoff"])
     parser.add_argument("--fleet", required=True)
     parser.add_argument("--agent", required=True)
+    parser.add_argument("--note")
+    parser.add_argument("--ticket")
+    parser.add_argument("--to")
     parser.add_argument("--release")
     parser.add_argument("--directory")
     args = parser.parse_args()
     if args.action == "instructions":
         print(instructions(args.fleet, args.agent, directory=args.directory))
+    elif args.action == "report":
+        if not args.kind or not args.note:
+            parser.error("report needs done, blocked or handoff and --note")
+        try:
+            result = report(args.kind, args.fleet, args.agent, args.note, args.ticket, args.to)
+        except HTTPError as exc:
+            # One clear line, so an agent does not investigate Studio internals.
+            print("Not recorded: " + json.load(exc).get("error", str(exc.code)))
+            sys.exit(1)
+        print("Recorded " + result["kind"] + (" for " + result["recipient"] if result.get("recipient") else "") + ". Carry on.")
     else:
-        if not args.release: parser.error("acknowledge requires --release")
+        if not args.release:
+            parser.error("acknowledge requires --release")
         print(json.dumps(acknowledge(args.fleet, args.agent, args.release)))

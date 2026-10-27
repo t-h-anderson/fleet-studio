@@ -262,6 +262,7 @@ class Automation:
         with self.lock:
             changed = self.track_outcomes(now)
             for fleet in state['fleets']:
+                changed = self.retry_direct(fleet, monitor) or changed
                 if self.app.deployments.data['paused'].get(fleet['id']):
                     continue
                 for rule in fleet.get('automations', []):
@@ -300,6 +301,28 @@ class Automation:
         self.execute(fleet, rule, agent, health, fire, monitor)
         self.app.event('Automation · ' + rule['name'], agent['name'] + ': ' + action + ' (' + fire['status'] + ')', fleet['id'])
         return True
+
+    def retry_direct(self, fleet, monitor):
+        """Agent-requested hand-offs have no rule; resend them until delivered."""
+        changed = False
+        for fire in self.data['fires']:
+            if fire['fleetId'] != fleet['id'] or fire['ruleId'] != 'agent-handoff' or fire['status'] not in ('held', 'sending'):
+                continue
+            if fire['status'] == 'sending':
+                changed = self.retry(fleet, fire, monitor) or changed
+                continue
+            recipient = next((a for a in fleet['agents'] if a['id'] == fire['recipientId']), None)
+            if not recipient or self.clock() - fire['at'] > 86400:
+                fire.update(status='failed', detail='The hand-off recipient is gone or the hand-off expired.')
+                changed = True
+                continue
+            before = fire['detail']
+            try:
+                self.send(fleet, recipient, fire['message'], fire, monitor)
+            except Exception as exc:
+                fire['detail'] = str(exc)[-600:]
+            changed = changed or fire['detail'] != before
+        return changed
 
     def retry(self, fleet, fire, monitor):
         if fire['status'] == 'sending':

@@ -23,24 +23,16 @@ class EntryPoints:
             agents = [agents]
         client = Path(__file__).parent / "workflow_client.py"
         quote = lambda value: "'" + str(value).replace("'", "''") + "'"
-        folder = Path(agents[0]["directory"]).resolve()
         commands = "\n".join(
-            "### " + agent["name"] + "\n\nFleet agent ID: " + agent["id"] + "\n\n```powershell\npython " + quote(client) +
-            " instructions --fleet " + fleet["id"] + " --agent " + agent["id"] + " --directory (Get-Location).Path\n```\n"
+            "### " + agent["name"] + "\n\n```shell\npython " + quote(client) +
+            " instructions --fleet " + fleet["id"] + " --agent " + agent["id"] + "\n```\n"
             for agent in agents)
-        return ("# Fleet Studio managed workflow\n\n"
-                "## Folder and agent scope\n\nThis entry point applies only to the named Fleet Studio agents working directly in `" + str(folder) + "`. "
-                "If inherited by a different or nested checkout, do not adopt these assignments; use that checkout's own entry point and assigned workflow. "
-                "Match your existing fleet name and agent ID below. Read only your own assignment; sharing a folder does not combine roles or transfer custody. "
-                "If you cannot identify your assignment, report the ambiguity before adopting.\n\n"
-                "Workflow roles, assignments, handoffs, acceptance and coordination are managed by the active Fleet Studio release. "
-                "Read your current deployed instructions at each safe task boundary and after a workflow notification:\n\n" + commands + "\n"
-                "This command reads the locally deployed release and works while the browser/server is closed. "
-                "If no release is available, stop workflow work and report the missing deployment; do not silently revert to an older process.\n\n"
-                "The deployed workflow replaces workflow instructions in the older roles, agent backlog and handoff documents. "
-                "Continue to read repository AGENTS.md and applicable engineering guides for coding/testing requirements, source/publication restrictions and safety. "
-                "Preserve explicit task stops, current ticket/file custody, claims and host recovery rules. A workflow deployment does not grant new source permissions or resume stopped work. "
-                "Report conflicts or missing assignments at a safe boundary. " + tracker_label(fleet) + " remains the live task, claim and evidence record.\n")
+        return ("# Fleet Studio\n\n"
+                "This folder is worked by the Fleet Studio agents below. Find your name and read your brief once at the start of a session:\n\n" + commands + "\n"
+                "The brief gives your goal, what done looks like, your hand-offs and the three commands for done, blocked and hand-off. "
+                "Studio watches your session and tells you when the brief changes, so you do not need to re-read it, post progress updates or acknowledge messages. "
+                "If you are working in a different or nested checkout, ignore this file. "
+                "Repository AGENTS.md files and engineering guides still apply. " + tracker_label(fleet) + " remains the task record.\n")
 
     @staticmethod
     def target(directory):

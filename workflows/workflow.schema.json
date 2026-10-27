@@ -2,8 +2,11 @@
   "type": "object",
   "properties": {
     "schemaVersion": {
-      "const": 1,
-      "type": "integer"
+      "type": "integer",
+      "enum": [
+        1,
+        2
+      ]
     },
     "id": {
       "type": "string",
@@ -138,6 +141,25 @@
               "location"
             ],
             "additionalProperties": false
+          },
+          "goal": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "successCriteria": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "maxItems": 20
+          },
+          "doneWhen": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
           }
         },
         "required": [
@@ -570,5 +592,5 @@
   ],
   "additionalProperties": false,
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Fleet Studio workflow v1"
+  "title": "Fleet Studio workflow"
 }

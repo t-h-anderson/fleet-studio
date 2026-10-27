@@ -1,6 +1,6 @@
 # Reviewed delivery
 
-Workflow example-delivery / 1.0.0 / SHA-256 600cb7f69b468666ff55e750204b2ae3ea7c438669c2766e02d5fc215dd82f3e
+Workflow example-delivery / 1.0.0 / SHA-256 e0d015588354246d28def3605d06042be16b2411a0f40194dca06054eb424269
 
 Generated from workflow.json. Edit the workflow in Fleet Studio, then review and deploy a new release.
 
@@ -14,6 +14,8 @@ Prose guards and ticket transitions are agent responsibilities. Studio evaluates
 
 Kind: agent
 
+Goal: Keep every writer on the most valuable ready ticket, with nothing blocked for long.
+
 Set bounded work, assign owners and resolve blockers.
 
 Authority: Own scope and assignments.
@@ -21,6 +23,8 @@ Authority: Own scope and assignments.
 ## Role: Writer [writer]
 
 Kind: agent
+
+Goal: Turn assigned tickets into small, tested, reviewed changes.
 
 Implement assigned work, verify it and resolve review findings.
 
@@ -37,6 +41,8 @@ Authority: Read-only review; implementation stays with the parent.
 ## Role: Integrator [integrator]
 
 Kind: agent
+
+Goal: Merge reviewed work quickly without breaking the main branch.
 
 Integrate reviewed work and complete delivery.
 

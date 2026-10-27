@@ -32,6 +32,7 @@ from studio_activity import activity
 from studio_progress import Progress, clean_settings
 from studio_telemetry import Telemetry
 from studio_health import Health, clean_health_settings
+from studio_reports import Reports
 from studio_automation import Automation, backtest, clean_alerts, clean_automations, clean_throttles
 from studio_reconciliation import Reconciliation
 from studio_goals import Goals
@@ -324,6 +325,7 @@ class Application:
         self.telemetry = Telemetry(self)
         self.health = Health(self)
         self.automation = Automation(self)
+        self.reports = Reports(self)
         self.goals = Goals(self)
         self.reconciliation = Reconciliation(self)
         from studio_context import CurrentContext
@@ -605,6 +607,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, app.context.preview_retirement(payload))
             if path == '/api/context/retire/apply':
                 return self.json(200, app.context.retire(payload.get('previewId')))
+            if path == "/api/report":
+                return self.json(200, app.reports.report(payload))
             if path == "/api/automation/acknowledge":
                 return self.json(200, app.automation.acknowledge(payload.get("fleetId"), payload.get("escalationId")))
             if path == "/api/automation/resume":

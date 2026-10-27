@@ -110,8 +110,9 @@ class AssignmentTests(unittest.TestCase):
         app.progress.report({**self.payload, 'kind': 'progress-updated', 'eventId': 'after-gap'})
         app.progress = Progress(app, lambda: self.now)
         item = self.assignment(app, fleet)
-        self.assertEqual(item['waitingObservedSeconds'], 120)
-        self.assertTrue(item['waitingObservationGap'])
+        # An unchanged blocker keeps counting without repeated reports.
+        self.assertEqual(item['waitingObservedSeconds'], 720)
+        self.assertFalse(item['waitingObservationGap'])
         self.assertTrue(app.progress.report(blocked)['duplicate'])
         app.progress.report({**self.payload, 'kind': 'unblocked', 'eventId': 'ready'})
         self.assertNotEqual(self.assignment(app, fleet)['state'], 'waiting')

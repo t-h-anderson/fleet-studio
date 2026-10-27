@@ -173,9 +173,7 @@ class Triggers:
 
     @staticmethod
     def message(rule, cause, event=None):
-        text = ("Automated Fleet Studio trigger: " + rule["name"] + ".\nCause: " + cause + ".\n"
-                "Respect explicit pauses/stops, current task scope, custody, source restrictions and approval requirements. "
-                "Read your active Fleet Studio assignment at this safe boundary. Record substantive work and handoffs in the normal ticket/MR.\n\n" + rule["message"])
+        text = "[Fleet Studio] " + rule["name"] + " (" + cause + ")\n\n" + rule["message"]
         if event:
             text += "\n\nReported handoff (verify against the current ticket):\nFrom: " + event["agent"]
             for key in ("eventId", "ticket", "artifact", "context"):
@@ -216,7 +214,8 @@ class Triggers:
                       "sourceAgentId": event.get("agentId") if event else None, "deploymentId": rule.get("deploymentId"),
                       **({"eventId": event["eventId"], "ticket": event.get("ticket", ""), "eventKey": event["key"]} if event else {}),
                       **({'assignmentContract': deepcopy(event['assignmentContract'])} if event and event.get('assignmentContract') else {})}
-            action["message"] += "\n\nFleet handoff action ID: " + action["id"] + ". Report handoff-received with this ID after reading the task evidence.\n" if event else ""
+            # Receipt is observed from the recipient's next turn; no report is requested.
+            action["message"] += "\n\nHandoff " + action["id"][:8] + "." if event else ""
             self.data["actions"].append(action)
             actions.append(action)
         if dispatch:

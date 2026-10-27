@@ -355,8 +355,28 @@ class Progress:
                 break
         return {'items': result, 'nextBefore': result[-1]['id'] if len(result) == 100 else rows[-1]['id'] if len(rows) == 1000 else None}
 
+    def observe_receipts(self, fleets):
+        """A delivered handoff counts as received once the recipient starts a turn after it."""
+        telemetry = getattr(self.app, 'telemetry', None)
+        if not telemetry:
+            return
+        with self.lock, closing(self.connect()) as db, db:
+            for fleet in fleets:
+                for row in db.execute('SELECT id, data FROM handoffs WHERE fleet=?', (fleet['id'],)).fetchall():
+                    handoff = json.loads(row['data'])
+                    if handoff.get('receivedAt') or handoff.get('status') != 'queued' or not handoff.get('targetAgentId'):
+                        continue
+                    turns = telemetry.turns(fleet['id'], handoff['targetAgentId'], since=handoff['createdAt'], limit=20)
+                    started = min((t['startedAt'] for t in turns if (t.get('startedAt') or 0) >= handoff['createdAt']), default=None)
+                    if started is None:
+                        continue
+                    handoff.update(receivedAt=started, receiptSource='observed-turn')
+                    db.execute('UPDATE handoffs SET data=? WHERE fleet=? AND id=?', (json.dumps(handoff), fleet['id'], row['id']))
+                    self.record(db, fleet['id'], 'handoff', row['id'] + ':received', started, handoff)
+
     def tick(self, state, monitor):
         self.observe_handoffs(monitor.get('automation', {}).get('actions', []))
+        self.observe_receipts(state['fleets'])
         self.observe_sessions(state['fleets'], monitor)
         self.app.goals.observe(state['fleets'], monitor)
         self.metrics.observe_tokens(state['fleets'], monitor)

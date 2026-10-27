@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "example-delivery",
   "name": "Reviewed delivery",
   "version": "1.0.0",
@@ -97,7 +97,13 @@
       "kind": "agent",
       "responsibilities": "Set bounded work, assign owners and resolve blockers.",
       "authority": "Own scope and assignments.",
-      "sources": []
+      "sources": [],
+      "goal": "Keep every writer on the most valuable ready ticket, with nothing blocked for long.",
+      "successCriteria": [
+        "Each ready ticket has one owner",
+        "Blockers are resolved or escalated within a day"
+      ],
+      "doneWhen": "The backlog has no unowned ready work."
     },
     {
       "id": "writer",
@@ -105,7 +111,13 @@
       "kind": "agent",
       "responsibilities": "Implement assigned work, verify it and resolve review findings.",
       "authority": "Own only assigned files and scope.",
-      "sources": []
+      "sources": [],
+      "goal": "Turn assigned tickets into small, tested, reviewed changes.",
+      "successCriteria": [
+        "Tests cover the change and pass",
+        "Review findings are resolved"
+      ],
+      "doneWhen": "The reviewed packet is handed to the integrator."
     },
     {
       "id": "subagent-reviewers",
@@ -121,7 +133,13 @@
       "kind": "agent",
       "responsibilities": "Integrate reviewed work and complete delivery.",
       "authority": "Own assigned integration and delivery.",
-      "sources": []
+      "sources": [],
+      "goal": "Merge reviewed work quickly without breaking the main branch.",
+      "successCriteria": [
+        "CI is green on the merged result",
+        "The ticket is closed with a link to the merge"
+      ],
+      "doneWhen": "The change is merged and the ticket closed."
     }
   ],
   "handoffs": [

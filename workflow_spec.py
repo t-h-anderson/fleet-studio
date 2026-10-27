@@ -49,7 +49,7 @@ SCHEMA = obj({
     "gaps": rows({"id": ID, "summary": TEXT, "roles": REFS, "blocking": {"type": "boolean"},
                   "resolution": choice("open", "accepted"), "sources": REFS})
 })
-SCHEMA.update({"$schema": "https://json-schema.org/draft/2020-12/schema", "title": "Fleet Studio workflow v1"})
+SCHEMA.update({"$schema": "https://json-schema.org/draft/2020-12/schema", "title": "Fleet Studio workflow"})
 # Optional for backward-compatible reading of immutable v1.0/v1.1 releases.
 SCHEMA["properties"]["triggers"]["items"]["properties"]["recipientMode"] = choice("single", "all")
 # Optional role runtime constraint: which agent backends and locations may hold the role.
@@ -58,6 +58,13 @@ RUNTIME = obj({"backends": {"type": "array", "items": choice("codex", "claude-co
                "location": choice("any", "local", "remote")})
 SCHEMA["properties"]["roles"]["items"]["properties"]["runtime"] = RUNTIME
 SCHEMA["properties"]["states"]["items"]["properties"]["acceptsDelivery"] = {"type": "boolean"}
+# Schema v2: optional outcome fields lead each agent's brief. Absent fields keep v1 digests.
+GOAL_FIELDS = ("goal", "successCriteria", "doneWhen")
+SCHEMA["properties"]["roles"]["items"]["properties"].update({
+    "goal": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "successCriteria": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 500}, "maxItems": 20},
+    "doneWhen": {"type": "string", "minLength": 1, "maxLength": 2000}})
+SCHEMA["properties"]["schemaVersion"] = {"type": "integer", "enum": [1, 2]}
 
 
 def validate_node(value, schema, at="$", depth=0):
@@ -172,7 +179,10 @@ def export_spec(fleet):
         raise ValueError("A trigger links to a removed handoff. Remove or rebuild that trigger before exporting or deploying.")
     meta["roles"] = [{"id": rid[r["id"]], "name": r["name"], "kind": r.get("kind", "subagent" if r.get("key") == "subagent-reviewers" else "human" if r.get("key") == "project-owner" else "agent"),
                       "responsibilities": r["responsibilities"], "authority": r["authority"], "sources": r.get("sources", []),
-                      **({"runtime": deepcopy(r["runtime"])} if r.get("runtime") else {})} for r in fleet["roles"]]
+                      **({"runtime": deepcopy(r["runtime"])} if r.get("runtime") else {}),
+                      **{k: deepcopy(r[k]) for k in GOAL_FIELDS if r.get(k)}} for r in fleet["roles"]]
+    if any(k in role for role in meta["roles"] for k in GOAL_FIELDS):
+        meta["schemaVersion"] = 2
     meta["handoffs"] = [{"id": hid[h["id"]], "source": rid[h["source"]], "target": rid[h["target"]],
                          "action": h["label"], "when": h["trigger"], "artifact": h["artifact"], "guard": h["condition"],
                          "sources": h.get("sources", [])} for h in fleet["roleLinks"]]
@@ -201,6 +211,7 @@ def apply_spec(fleet, spec):
         roles.append({"id": old["id"] if old else str(uuid.uuid4()), "specId": role["id"], "key": key_for(role["name"]),
                       **{k: role[k] for k in ("name", "kind", "responsibilities", "authority", "sources")},
                       **({"runtime": deepcopy(role["runtime"])} if "runtime" in role else {}),
+                      **{k: deepcopy(role[k]) for k in GOAL_FIELDS if k in role},
                       "baseline": deepcopy(old.get("baseline")) if old else None,
                       "position": deepcopy(old["position"]) if old else {"x": 80 + i % 3 * 360, "y": 80 + i // 3 * 260}})
     rmap = {r["specId"]: r["id"] for r in roles}
@@ -253,7 +264,10 @@ def render(spec, role_ids=None):
     names = {r["id"]: r["name"] for r in spec["roles"]}
     for role in spec["roles"]:
         if role_ids is None or role["id"] in role_ids:
-            lines += ["## Role: " + role["name"] + " [" + role["id"] + "]", "", "Kind: " + role["kind"], "", role["responsibilities"], "", "Authority: " + role["authority"], ""]
+            lines += ["## Role: " + role["name"] + " [" + role["id"] + "]", "", "Kind: " + role["kind"], ""]
+            if role.get("goal"):
+                lines += ["Goal: " + role["goal"], ""]
+            lines += [role["responsibilities"], "", "Authority: " + role["authority"], ""]
             if "runtime" in role:
                 lines += ["Runtime: " + (", ".join(role["runtime"]["backends"]) or "any backend") + "; location " + role["runtime"]["location"], ""]
     lines += ["## Handoffs", ""]
@@ -296,36 +310,66 @@ def render(spec, role_ids=None):
     return "\n".join(line.rstrip() for line in lines)
 
 
-def assignment_document(fleet, spec, agent, release_id, app_root):
-    from studio_trackers import tracker_label
-    def quote(value):
-        return "'" + str(value).replace("'", "''") + "'"
+def brief_document(fleet, spec, agent, release_id, app_root):
+    """A short, goal-first brief: what this agent is for, what done looks like and how to say so.
+
+    Studio observes sessions itself, so the brief asks for no receipts, progress
+    updates or acknowledgements. Only this agent's roles, handoffs and tagged
+    policies are included.
+    """
     by_id = {r["id"]: stable(r, "role") for r in fleet["roles"]}
-    roles = [by_id[r] for r in agent.get("roleIds", [])]
-    lines = ["# Assignment: " + agent["name"], "", "Agent ID: " + agent["id"], "Release: " + release_id, "",
-             "Individual scope: " + agent.get("notes", ""), "", "## Workflow event reporting", "",
-             "Only report a handoff after its artifact and guard are satisfied and the trigger is enabled in this release. Use the same stable event ID and identical details for retries of the same logical handoff (ticket + exact head + handoff); do not create a new ID to retry delivery. Name the actual recipient with --to; multiple Writers must never receive the same assignment by accident. Include the current ticket/comment, exact candidate/evidence artifact, and bounded next action. A report notifies the target; it does not grant acceptance or revoke a stop. Held deliveries retry automatically while this release remains active; uncertain dispatch outcomes require inspection.", "",
-             "Recurring idle checks are scheduled by the Studio server. Check current authorized work and handoffs, then finish the check if none is eligible; do not run your own polling/sleep loop or post repeated no-change ticket comments. Explicit pauses, blocked/limited goals and custody remain in force. " + tracker_label(fleet) + " remains the task record and fallback when Studio is unavailable.", ""]
-    for trigger in fleet.get("triggers", []):
-        if trigger["kind"] == "event" and trigger["sourceRoleId"] in agent.get("roleIds", []):
-            command = ("python " + quote(Path(app_root) / "fleet_event.py") + " --fleet " + fleet["id"] + " --agent " + agent["id"] +
-                       " --event " + quote(trigger["eventName"]) + " --id '<ticket>-<exact-head>-<handoff>' --to '<recipient-name-or-id>'" +
-                       " --ticket '<current-ticket-or-comment-URL>' --artifact '<exact-head-and-evidence-location>' --context '<bounded next action and satisfied guard>'")
-            targets = [a["name"] for a in fleet["agents"] if trigger["targetRoleId"] in a.get("roleIds", [])]
-            lines += ["### " + trigger["name"] + (" (enabled)" if trigger["enabled"] else " (disabled; wait for a deployment enabling it)"), "", "Eligible recipients: " + ", ".join(targets), "", "```powershell", command, "```", ""]
-    if any(p['id'] == 'progress-reporting' for p in spec.get('policies', [])):
-        command = ("python " + quote(Path(app_root) / "fleet_progress.py") + " --fleet " + fleet['id'] + " --agent " + agent['id'] +
-                   " --release " + release_id + " --id '<stable-milestone-id>' --kind task-started --task '<ticket-URL>' --evidence '<evidence-comment-URL>' --summary '<meaningful progress>'")
-        lines += ["## Progress reports", "", "Report meaningful milestones after recording tracker evidence. Kinds: task-started, progress-updated, blocked, unblocked, handoff-received, work-finished, test-result. Report existing local test evidence with test-result, --suite, --test-status, --revision (full tested commit SHA), and optional --passed/--failed/--skipped counts and --duration-seconds. Explain scope and any uncommitted changes in the evidence. A test report never authorizes a new test run or overrides runtime custody. Blocked reports require --reason and --next-action. Receipts require --handoff with the delivery action ID. Use --depends-on for an explicitly reported dependency. A work-finished report does not close or accept a task. Reuse an event ID and identical details when retrying. If Studio is unavailable, keep the tracker current and retry at the next safe boundary.", "", "```powershell", command, "```", ""]
-        lines += ['Optional: use --kind progress-updated --phase implementing, verifying or submitted at a module/substantial-part milestone. Supply --blocker-owner and --resume-condition for a blocker even without a native goal. No per-function report or test gate is required. These observations never start verification, change task ownership or resume a stopped goal.', '']
-    if any(p['id'] == 'bounded-goals' for p in spec.get('policies', [])):
-        lines += ['## Bounded goal evidence', '',
-                  'When explicitly authorized to use a native goal, define one bounded work packet with a ticket and completion criterion. Roles remain in the workflow. In Progress > Goals, link the exact observed goal ID to the ticket, or add --goal-id <native-goal-ID-shown-in-Studio> and --completion-criteria <done-condition> to your first task-started/progress-updated report. Later substantive reports use the same --goal-id. Goal-linked blocked reports also require --blocker-category (dependency, approval, restricted, host, capacity or other), --reason, --next-action, --blocker-owner and --resume-condition; use --depends-on for dependency links. Keep task evidence in the tracker. Missing native observations are unknown, not proof of completion.', '',
-                  'Complete only the bounded goal whose criterion has actually been met. Never clear or resume a stopped goal merely to accept new work. Report resolved dependencies with unblocked and evidence; that report does not activate a native goal. Operator complete/cancel/resume actions are separately reviewed with ticket evidence and require the session to be closed with an empty queue. Budget/usage-limited goals cannot be resumed by this control. Keep handoff-received and test-result reports separate: omit --goal-id. Receipts and adoption acknowledgements remain possible during stops and do not resume technical work.', '']
-    lines += ["## Acknowledge adoption", "", "After reading and accepting your assignment, acknowledge this release yourself. Report conflicts before acknowledging.", "", "```powershell",
-              "python " + quote(Path(app_root) / "workflow_client.py") + " acknowledge --fleet " + fleet["id"] + " --agent " + agent["id"] + " --release " + release_id,
-              "```", "", render(spec, roles)]
-    return "\n".join(lines)
+    spec_roles = {r["id"]: r for r in spec["roles"]}
+    mine = [spec_roles[by_id[rid]] for rid in agent.get("roleIds", []) if by_id.get(rid) in spec_roles]
+    names = {r["id"]: r["name"] for r in fleet["roles"]}
+    client = '"' + str(Path(app_root) / "workflow_client.py") + '"'
+    identity = " --fleet " + fleet["id"] + " --agent " + agent["id"]
+    lines = ["# " + agent["name"] + " — " + (", ".join(r["name"] for r in mine) or "unassigned"), ""]
+    for role in mine:
+        heading = "## Goal" if len(mine) == 1 else "## Goal as " + role["name"]
+        lines += [heading, "", role.get("goal") or role["responsibilities"], ""]
+        if role.get("successCriteria"):
+            lines += ["Success looks like:", ""] + ["- " + item for item in role["successCriteria"]] + [""]
+        if role.get("doneWhen"):
+            lines += ["Done when: " + role["doneWhen"], ""]
+        if role.get("goal") and role["responsibilities"]:
+            lines += ["Responsibilities: " + role["responsibilities"], ""]
+        if role["authority"]:
+            lines += ["Authority: " + role["authority"], ""]
+    if agent.get("notes"):
+        lines += ["## Your scope", "", agent["notes"], ""]
+    outgoing = [link for link in fleet.get("roleLinks", []) if link["source"] in agent.get("roleIds", [])]
+    if outgoing:
+        lines += ["## Hand-offs", ""]
+        for link in outgoing:
+            recipients = [a["name"] for a in fleet["agents"] if link["target"] in a.get("roleIds", []) and a.get("enabled", True)]
+            detail = "; ".join(part for part in (
+                "when " + link["trigger"] if link.get("trigger") else "",
+                "pass " + link["artifact"] if link.get("artifact") else "",
+                "only if " + link["condition"] if link.get("condition") else "") if part)
+            lines.append("- **" + link["label"] + "** → " + names.get(link["target"], "?") +
+                         (" (" + ", ".join(recipients) + ")" if recipients else "") + (": " + detail if detail else ""))
+        lines.append("")
+    lines += ["## Reporting", "",
+              "Studio watches your session, so do not post progress updates, receipts or acknowledgements, "
+              "and do not poll, sleep-loop or re-read this brief. Studio wakes you when there is work and tells you when this brief changes. "
+              "Keep technical evidence where it normally goes (commits, the ticket or MR). Run one command only when:", "",
+              "```shell",
+              "python " + client + " report done" + identity + ' --ticket "<ticket URL>" --note "<what changed and where>"',
+              "python " + client + " report blocked" + identity + ' --note "<what you need, and from whom>"',
+              "python " + client + " report handoff" + identity + ' --to "<role or agent>" --note "<what to pick up>"',
+              "```", "",
+              "A blocked report stays in force until you report done or hand off; there is no need to repeat it.", ""]
+    policies = [p for p in spec.get("policies", []) if set(p["roles"]) & {r["id"] for r in mine}]
+    if policies:
+        lines += ["## Policies for your role", ""]
+        for policy in policies:
+            lines += ["### " + policy["name"], "", policy["text"], ""]
+    lines += ["Brief " + digest({"spec": digest(spec), "agent": agent["id"]})[:12] + " · release " + release_id]
+    return "\n".join(line.rstrip() for line in lines)
+
+
+# Callers and stored releases refer to the brief by its earlier name.
+assignment_document = brief_document
 
 
 def runtime_problems(fleet):

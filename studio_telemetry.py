@@ -14,12 +14,18 @@ from pathlib import Path
 import re
 import sqlite3
 import threading
+import time
 
 from studio_bindings import session_key
 
 CLASSES = ('work', 'explore', 'admin', 'wait', 'other')
 SIGNATURE_LIMIT = 160
-CALL_LIMIT = 400
+# Calls are stored in their own table; a turn row and the parser keep only the latest few.
+CALL_LIMIT = 5000
+TAIL_CALLS = 20
+PENDING_LIMIT = 500
+OFFSET_SAVE_SECONDS = 30
+CALL_RETENTION_DAYS = 3
 INITIAL_TAIL = 8_000_000
 STUDIO_MARKERS = ('[Fleet Studio]', '[Fleet Studio · check]', 'Automated Fleet Studio')
 CHECK_MARKER = '[Fleet Studio · check]'
@@ -234,6 +240,12 @@ def new_turn(session, turn_id, at, from_studio=False):
             'replies': []}
 
 
+def copy_turn(turn):
+    """Copy of a turn; its values are flat apart from these containers, so deepcopy is not needed."""
+    return {**turn, 'tokens': dict(turn['tokens']), 'buckets': dict(turn['buckets']), 'classes': dict(turn['classes']),
+            'calls': [dict(call) for call in turn['calls']], 'replies': list(turn['replies'])}
+
+
 def add_tokens(turn, delta, at):
     """Add token counts to a turn and to its five-minute bucket, so long turns are spread over time."""
     for key, value in delta.items():
@@ -258,6 +270,7 @@ class TurnParser:
         self.message_turns = {}
         self.codex_total = None
         self.task_events = False
+        self.dirty = {}
 
     def touch(self, turn, at):
         if at:
@@ -291,11 +304,19 @@ class TurnParser:
         turn = self.ensure(at)
         turn['callCount'] += 1
         turn['classes'][meta['cls']] += 1
-        if len(turn['calls']) < CALL_LIMIT:
-            turn['calls'].append({**meta, 'seq': turn['callCount'], 'at': at, 'error': False, 'open': True})
+        if turn['callCount'] <= CALL_LIMIT:
+            call = {**meta, 'seq': turn['callCount'], 'at': at, 'error': False, 'open': True}
+            turn['calls'] = (turn['calls'] + [call])[-TAIL_CALLS:]
+            turn['tail'] = True
+            self.dirty.setdefault(turn['id'], {})[call['seq']] = call
             if call_id:
-                self.pending_calls[call_id] = turn['calls'][-1]
+                self.pending_calls[call_id] = call
+                if len(self.pending_calls) > PENDING_LIMIT:
+                    self.pending_calls.pop(next(iter(self.pending_calls)))
+            self.touch(turn, at)
+            return call
         self.touch(turn, at)
+        return None
 
     def mark_result(self, call_id, failed, at):
         call = self.pending_calls.pop(call_id, None)
@@ -304,6 +325,8 @@ class TurnParser:
         if call is not None and failed and not call['error']:
             call['error'] = True
             self.current['errors'] += 1
+        if call is not None and self.current:
+            self.dirty.setdefault(self.current['id'], {})[call['seq']] = call
         if self.current:
             self.touch(self.current, at)
 
@@ -378,9 +401,9 @@ class TurnParser:
             if block.get('type') == 'tool_use':
                 if block.get('id') and any(c.get('callId') == block['id'] for c in turn['calls'][-20:]):
                     continue
-                self.add_call(call_metadata(block.get('name') or 'tool', block.get('input')), block.get('id'), at)
-                if block.get('id') and turn['calls']:
-                    turn['calls'][-1]['callId'] = block['id']
+                call = self.add_call(call_metadata(block.get('name') or 'tool', block.get('input')), block.get('id'), at)
+                if block.get('id') and call:
+                    call['callId'] = block['id']
             elif block.get('type') == 'text' and isinstance(block.get('text'), str) and turn is self.current:
                 self.add_reply(block['text'], at)
         self.touch(turn, at)
@@ -477,11 +500,15 @@ class TurnParser:
         self.message_turns = {mid: self.current if turn_id == current_id else 'ended' for mid, turn_id in (saved.get('messages') or {}).items()}
 
     def drain(self):
-        changed = [deepcopy(turn) for turn in self.changed.values()]
-        self.changed = {}
-        for turn in changed:
-            for call in turn['calls']:
+        """Changed turns, each with `newCalls`: the calls added or updated since the last drain."""
+        changed = []
+        for turn in self.changed.values():
+            copy = copy_turn(turn)
+            copy['newCalls'] = [dict(call) for call in sorted(self.dirty.pop(turn['id'], {}).values(), key=lambda call: call['seq'])]
+            for call in copy['calls'] + copy['newCalls']:
                 call.pop('callId', None)
+            changed.append(copy)
+        self.changed, self.dirty = {}, {}
         return changed
 
 
@@ -542,6 +569,7 @@ class Telemetry:
         self.lock = threading.RLock()
         self.followers = {}
         self.errors = {}
+        self.saved_at = {}
         with closing(self.connect()) as db, db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS turns (
@@ -550,7 +578,13 @@ class Telemetry:
                     PRIMARY KEY(session, id));
                 CREATE INDEX IF NOT EXISTS turns_agent ON turns(fleet, agent, last);
                 CREATE TABLE IF NOT EXISTS telemetry_offsets (follower TEXT PRIMARY KEY, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS turn_calls (
+                    session TEXT NOT NULL, turn TEXT NOT NULL, seq INTEGER NOT NULL, fleet TEXT NOT NULL,
+                    at REAL, data TEXT NOT NULL, PRIMARY KEY(session, turn, seq));
+                -- Pruning is by age; a narrow index keeps each call row small.
+                CREATE INDEX IF NOT EXISTS turn_calls_at ON turn_calls(at);
             ''')
+            db.execute('CREATE INDEX IF NOT EXISTS turns_fleet ON turns(fleet, last)')
 
     def connect(self):
         db = sqlite3.connect(self.app.root / '.runtime' / 'progress.sqlite', timeout=10)
@@ -566,7 +600,7 @@ class Telemetry:
         return locate(agent['sessionId']) if locate else None
 
     def tick(self, state):
-        seen = set()
+        seen, batch = set(), []
         for fleet in state['fleets']:
             for agent in fleet['agents']:
                 key = (fleet['id'], agent['id'], session_key(agent))
@@ -580,12 +614,35 @@ class Telemetry:
                         follower = self.followers[key] = TranscriptFollower(path, key[2], agent.get('backend', 'codex'), self.saved(key))
                     before = follower.offset
                     turns = follower.read()
-                    self.store(fleet['id'], agent['id'], turns, key if follower.offset != before else None, follower)
+                    batch.append((fleet['id'], agent['id'], turns, key if self.save_due(key, follower, before, turns) else None, follower, key))
                     self.errors.pop(key, None)
                 except (OSError, sqlite3.Error) as exc:
                     self.errors[key] = str(exc)
+        try:
+            self.store_all([entry[:5] for entry in batch])
+        except sqlite3.Error as exc:
+            # Followers have moved past what was stored; start them again from their saved positions.
+            for entry in batch:
+                self.followers.pop(entry[5], None)
+                self.saved_at.pop(entry[5], None)
+                self.errors[entry[5]] = str(exc)
         for key in set(self.followers) - seen:
             self.followers.pop(key)
+            self.saved_at.pop(key, None)
+
+    def save_due(self, key, follower, before, turns):
+        """Save the read position at most every 30 s, and whenever a turn ends.
+
+        Re-reading records after a restart is harmless: the saved parser state matches
+        the saved offset, and turns and calls are keyed, so replays overwrite in place.
+        """
+        if follower.offset == before:
+            return False
+        now = time.monotonic()
+        if any(turn['status'] != 'open' for turn in turns) or now - self.saved_at.get(key, 0) >= OFFSET_SAVE_SECONDS:
+            self.saved_at[key] = now
+            return True
+        return False
 
     def saved(self, key):
         with self.lock, closing(self.connect()) as db:
@@ -597,20 +654,35 @@ class Telemetry:
         return (fleet_id, agent['id'], session_key(agent)) in self.followers
 
     def store(self, fleet_id, agent_id, turns, key=None, follower=None):
-        if not turns and key is None:
+        self.store_all([(fleet_id, agent_id, turns, key, follower)])
+
+    def store_all(self, batch):
+        """Write every agent's changes in one transaction: a commit per agent per tick dominates the cost."""
+        batch = [entry for entry in batch if entry[2] or entry[3] is not None]
+        if not batch:
             return
         with self.lock, closing(self.connect()) as db, db:
-            for turn in turns:
-                db.execute('INSERT OR REPLACE INTO turns VALUES(?,?,?,?,?,?,?,?)',
-                           (turn['session'], turn['id'], fleet_id, agent_id, turn['startedAt'], turn['lastAt'],
-                            turn['status'], json.dumps(turn, separators=(',', ':'))))
-            # Turns and the read position commit together, so a restart neither skips nor repeats records.
-            if key is not None:
-                db.execute('INSERT OR REPLACE INTO telemetry_offsets VALUES(?,?)',
-                           (json.dumps(key), json.dumps(follower.state(), separators=(',', ':'))))
+            for fleet_id, agent_id, turns, key, follower in batch:
+                self.write(db, fleet_id, agent_id, turns, key, follower)
 
-    def turns(self, fleet_id, agent_id=None, since=0, limit=200):
-        query = 'SELECT agent, data FROM turns WHERE fleet=? AND last>=?'
+    @staticmethod
+    def write(db, fleet_id, agent_id, turns, key, follower):
+        for turn in turns:
+            calls = turn.pop('newCalls', [])
+            db.executemany('INSERT OR REPLACE INTO turn_calls VALUES(?,?,?,?,?,?)',
+                           [(turn['session'], turn['id'], call['seq'], fleet_id, call.get('at'), json.dumps(call, separators=(',', ':')))
+                            for call in calls])
+            db.execute('INSERT OR REPLACE INTO turns VALUES(?,?,?,?,?,?,?,?)',
+                       (turn['session'], turn['id'], fleet_id, agent_id, turn['startedAt'], turn['lastAt'],
+                        turn['status'], json.dumps(turn, separators=(',', ':'))))
+        # A read position is saved in the same transaction as the turns read up to it.
+        if key is not None:
+            db.execute('INSERT OR REPLACE INTO telemetry_offsets VALUES(?,?)',
+                       (json.dumps(key), json.dumps(follower.state(), separators=(',', ':'))))
+
+    def turns(self, fleet_id, agent_id=None, since=0, limit=200, calls=True):
+        """Turns newest first, each with all of its stored calls, or only the latest few when `calls` is False."""
+        query = 'SELECT session, id FROM turns WHERE fleet=? AND last>=?'
         values = [fleet_id, since]
         if agent_id:
             query += ' AND agent=?'
@@ -618,8 +690,76 @@ class Telemetry:
         query += ' ORDER BY last DESC LIMIT ?'
         values.append(limit)
         with self.lock, closing(self.connect()) as db:
-            rows = db.execute(query, values).fetchall()
-        return [{**json.loads(row['data']), 'agentId': row['agent']} for row in rows]
+            keys = [(row['session'], row['id']) for row in db.execute(query, values)]
+            return self.load(db, keys, calls)
 
-    def prune(self, db, fleet_id, cutoff):
+    def index(self, fleet_id, since):
+        """Cheap listing of turns changed since a time, so callers can reload only what changed."""
+        with self.lock, closing(self.connect()) as db:
+            # The row size changes with every update (an error flag, a token count), so it marks changes cheaply.
+            return [(row['session'], row['id'], row['agent'], row['last'], (row['status'], row['size']))
+                    for row in db.execute('SELECT session, id, agent, last, status, length(data) AS size FROM turns WHERE fleet=? AND last>=?',
+                                          (fleet_id, since))]
+
+    def load_turns(self, keys, cached=None):
+        """Full turns for keys; a turn already in `cached` reads only the calls added since."""
+        cached = cached or {}
+        with self.lock, closing(self.connect()) as db:
+            fresh = [key for key in keys if not cached.get(key, {}).get('tail')]
+            output = self.load(db, fresh)
+            for key in keys:
+                if key in fresh:
+                    continue
+                row = db.execute('SELECT agent, data FROM turns WHERE session=? AND id=?', key).fetchone()
+                if not row:
+                    continue
+                turn = {**json.loads(row['data']), 'agentId': row['agent']}
+                old = cached[key].get('calls', [])
+                last = old[-1]['seq'] if old else 0
+                calls = {call['seq']: call for call in old}
+                for call in db.execute('SELECT data FROM turn_calls WHERE session=? AND turn=? AND seq>? ORDER BY seq', (*key, last)):
+                    call = json.loads(call['data'])
+                    calls[call['seq']] = call
+                # The row's own tail is the latest state of recent calls, such as a result that just failed.
+                for call in turn['calls']:
+                    calls[call['seq']] = call
+                turn['calls'] = [calls[seq] for seq in sorted(calls)]
+                output.append(turn)
+            return output
+
+    @staticmethod
+    def load(db, keys, with_calls=True):
+        output = []
+        for start in range(0, len(keys), 200):
+            chunk = keys[start:start + 200]
+            where = ' OR '.join(['(session=? AND id=?)'] * len(chunk))
+            rows = {(row['session'], row['id']): row for row in
+                    db.execute('SELECT session, id, agent, data FROM turns WHERE ' + where, [v for key in chunk for v in key])}
+            calls = {}
+            tailed = [key for key in chunk if with_calls and key in rows and '"tail":true' in rows[key]['data']]
+            if tailed:
+                where = ' OR '.join(['(session=? AND turn=?)'] * len(tailed))
+                for row in db.execute('SELECT session, turn, data FROM turn_calls WHERE ' + where + ' ORDER BY seq',
+                                      [v for key in tailed for v in key]):
+                    calls.setdefault((row['session'], row['turn']), []).append(json.loads(row['data']))
+            for key in chunk:
+                if key not in rows:
+                    continue
+                turn = {**json.loads(rows[key]['data']), 'agentId': rows[key]['agent']}
+                if key in calls:
+                    turn['calls'] = calls[key]
+                output.append(turn)
+        return output
+
+    def prune(self, db, fleet_id, cutoff, now=None):
+        # Per-call detail serves health (one day) and recent timelines; turn summaries keep the full retention.
+        call_cutoff = max(cutoff, (now or time.time()) - CALL_RETENTION_DAYS * 86400)
+        db.execute('DELETE FROM turn_calls WHERE fleet=? AND at<?', (fleet_id, call_cutoff))
         db.execute('DELETE FROM turns WHERE fleet=? AND last<?', (fleet_id, cutoff))
+        # Read positions of agents no longer followed only cost a re-read of the tail if they return.
+        with self.lock:
+            active = {json.dumps(key) for key in self.followers if key[0] == fleet_id}
+        for row in db.execute('SELECT follower FROM telemetry_offsets').fetchall():
+            key = json.loads(row['follower'])
+            if key[0] == fleet_id and row['follower'] not in active:
+                db.execute('DELETE FROM telemetry_offsets WHERE follower=?', (row['follower'],))

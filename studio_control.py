@@ -123,6 +123,14 @@ class Controls:
             if preview:
                 self.previews.pop(preview_id, None)
             return None
+    def prune(self, cutoff):
+        """Drop completed sends older than the cutoff; the file is rewritten on every send."""
+        with self.lock:
+            old = [key for key, receipt in self.receipts.items() if receipt["status"] == "completed" and receipt.get("createdAt", 0) < cutoff]
+            for key in old:
+                del self.receipts[key]
+            if old:
+                self.persist()
     def persist(self):
         from fleet_studio import atomic_json
         self.receipt_path.parent.mkdir(exist_ok=True)

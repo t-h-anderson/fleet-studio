@@ -1,8 +1,13 @@
+from contextlib import closing
 import json
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
+import uuid
+from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -247,6 +252,125 @@ class AccuracyTests(unittest.TestCase):
             self.assertEqual(after['status'], 'completed')
             self.assertTrue(after['calls'][0]['error'])
             self.assertEqual(after['tokens']['output'], 11)
+
+
+def stamp(at):
+    return datetime.fromtimestamp(at, timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+
+
+def call_rows(index, at, command='make build', error=False, prompt=False):
+    """One Claude Code tool call and its result; `prompt` opens a new turn first."""
+    rows = [{'type': 'user', 'uuid': 'u' + str(index), 'timestamp': stamp(at), 'message': {'role': 'user', 'content': 'Work the ticket'}}] if prompt else []
+    rows.append({'type': 'assistant', 'timestamp': stamp(at), 'message': {'id': 'm' + str(index), 'stop_reason': 'tool_use',
+                 'usage': {'input_tokens': 100, 'output_tokens': 10},
+                 'content': [{'type': 'tool_use', 'id': 't' + str(index), 'name': 'Bash', 'input': {'command': command}}]}})
+    rows.append({'type': 'user', 'timestamp': stamp(at + 1), 'message': {'role': 'user', 'content': [
+        {'type': 'tool_result', 'tool_use_id': 't' + str(index), 'is_error': error, 'content': 'failed' if error else 'ok'}]}})
+    return rows
+
+
+class StorageTests(unittest.TestCase):
+    """Calls live in their own table so long turns stay cheap to store, read and keep."""
+
+    def setUp(self):
+        from fleet_studio import Application
+        self.temporary = tempfile.TemporaryDirectory(prefix='.test-unit-', dir=Path(__file__).resolve().parent)
+        self.root = Path(self.temporary.name).resolve()
+        agents = [{'name': 'Agent ' + str(i), 'directory': str(self.root), 'sessionId': str(uuid.uuid4()), 'enabled': True} for i in range(10)]
+        (self.root / 'fleet.json').write_text(json.dumps({'version': 1, 'windowName': 'scale', 'codexPath': sys.executable, 'agents': agents}))
+        self.app = Application(self.root)
+        state = self.app.store.snapshot()
+        for agent in state['fleets'][0]['agents']:
+            agent['backend'] = 'claude-code'
+        self.app.store.save(state)
+        self.state = self.app.store.snapshot()
+        self.fleet = self.state['fleets'][0]
+        self.paths = {a['id']: self.root / (a['id'] + '.jsonl') for a in self.fleet['agents']}
+        self.app.telemetry.source = lambda agent: self.paths.get(agent['id'])
+        self.now = time.time() - 3600
+        self.app.health.clock = lambda: self.now
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def append(self, agent_id, rows):
+        with self.paths[agent_id].open('a', encoding='utf-8') as stream:
+            stream.write(''.join(json.dumps(row) + '\n' for row in rows))
+
+    def test_long_turn_keeps_every_call_and_health_sees_a_late_loop(self):
+        agent = self.fleet['agents'][0]['id']
+        rows = []
+        for i in range(450):
+            rows += call_rows(i, self.now - 900 + i, 'edit step ' + str(i), prompt=i == 0)
+        for i in range(450, 455):
+            rows += call_rows(i, self.now - 400 + i, 'pytest tests/test_a.py', error=True)
+        self.append(agent, rows)
+        self.app.telemetry.tick(self.state)
+        [turn] = self.app.telemetry.turns(self.fleet['id'], agent)
+        self.assertEqual(len(turn['calls']), 455)
+        with closing(self.app.telemetry.connect()) as db:
+            stored = json.loads(db.execute('SELECT data FROM turns').fetchone()['data'])
+        self.assertEqual(len(stored['calls']), 20)
+        self.app.health.tick(self.state, {'sessions': {}})
+        self.assertEqual(self.app.health.get(self.fleet['id'], agent)['state'], 'looping')
+        # A later tick reloads only the new calls of the open turn.
+        self.append(agent, call_rows(455, self.now + 60, 'git status'))
+        self.app.telemetry.tick(self.state)
+        self.app.health.tick(self.state, {'sessions': {}})
+        cached = next(t for _, t in self.app.health.turn_cache[self.fleet['id']].values())
+        self.assertEqual([c['seq'] for c in cached['calls']], list(range(1, 457)))
+
+    def test_read_position_is_saved_at_most_every_30_seconds_and_replay_does_not_duplicate(self):
+        agent = self.fleet['agents'][0]['id']
+        self.append(agent, call_rows(0, self.now, prompt=True))
+        self.app.telemetry.tick(self.state)
+        self.append(agent, call_rows(1, self.now + 5))
+        self.app.telemetry.tick(self.state)
+        with closing(self.app.telemetry.connect()) as db:
+            saved = json.loads(db.execute('SELECT data FROM telemetry_offsets').fetchone()['data'])
+        self.assertLess(saved['offset'], self.paths[agent].stat().st_size)
+        # A restart replays from the older position; keyed rows are overwritten, not added.
+        from studio_telemetry import Telemetry
+        restarted = Telemetry(self.app)
+        restarted.source = self.app.telemetry.source
+        restarted.tick(self.state)
+        [turn] = restarted.turns(self.fleet['id'], agent)
+        self.assertEqual((turn['callCount'], len(turn['calls']), turn['tokens']['input']), (2, 2, 200))
+
+    def test_pruning_drops_old_call_detail_but_keeps_turn_summaries(self):
+        agent = self.fleet['agents'][0]['id']
+        self.append(agent, call_rows(0, self.now, prompt=True))
+        self.app.telemetry.tick(self.state)
+        with closing(self.app.telemetry.connect()) as db, db:
+            db.execute("INSERT INTO telemetry_offsets VALUES(?, '{}')", (json.dumps([self.fleet['id'], 'gone', 'x']),))
+            self.app.telemetry.prune(db, self.fleet['id'], self.now - 90 * 86400, now=self.now + 4 * 86400)
+            self.app.health.prune(db, {**self.fleet, 'agents': []})
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM turn_calls').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM turns').fetchone()[0], 1)
+            followers = [json.loads(row[0])[1] for row in db.execute('SELECT follower FROM telemetry_offsets')]
+        self.assertEqual(followers, [agent])
+
+    def test_completed_receipts_are_trimmed(self):
+        controls = self.app.controls
+        controls.receipts = {'old': {'id': 'old', 'status': 'completed', 'createdAt': 10, 'targets': []},
+                             'open': {'id': 'open', 'status': 'needs-attention', 'createdAt': 10, 'targets': []},
+                             'new': {'id': 'new', 'status': 'completed', 'createdAt': time.time(), 'targets': []}}
+        controls.prune(time.time() - 86400)
+        self.assertEqual(sorted(controls.receipts), ['new', 'open'])
+
+    def test_a_busy_fleet_tick_stays_fast(self):
+        """Ten agents, each making a call every five seconds, for 200 ticks."""
+        start = time.perf_counter()
+        for tick in range(200):
+            self.now += 5
+            for index, agent in enumerate(self.paths):
+                self.append(agent, call_rows(tick, self.now, 'edit f' + str(tick % 30), prompt=tick == 0))
+            self.app.telemetry.tick(self.state)
+            self.app.health.tick(self.state, {'sessions': {}})
+        mean = (time.perf_counter() - start) / 200
+        self.assertLess(mean, 0.2)
+        with closing(self.app.telemetry.connect()) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM turn_calls').fetchone()[0], 2000)
 
 
 if __name__ == '__main__':

@@ -602,7 +602,7 @@ class Automation:
         self.send(fleet, recipient, message, fire)
 
     def recent_steps(self, fleet_id, agent_id, count=6):
-        turns = self.app.telemetry.turns(fleet_id, agent_id, limit=5)
+        turns = self.app.telemetry.turns(fleet_id, agent_id, limit=5, calls=False)
         calls = sorted((c for t in turns for c in t.get('calls', [])), key=lambda c: c.get('at') or 0)[-count:]
         return ', '.join('`' + (c['label'] or c['tool']) + '`' + (' (failed)' if c.get('error') else '') for c in calls)
 

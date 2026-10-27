@@ -56,7 +56,9 @@ def fresh_tokens(turn):
 
 
 def recent_calls(turns, since):
-    calls = [call for turn in turns for call in turn.get('calls', []) if (call.get('at') or turn.get('lastAt') or 0) >= since]
+    # A turn's calls are no later than its last activity, so older turns can be skipped whole.
+    calls = [call for turn in turns if (turn.get('lastAt') or 0) >= since
+             for call in turn.get('calls', []) if (call.get('at') or turn.get('lastAt') or 0) >= since]
     return sorted(calls, key=lambda call: (call.get('at') or 0, call.get('seq', 0)))
 
 
@@ -132,7 +134,15 @@ def repeats_without_work(calls):
     return next(c for c in since_work if c['sig'] == sig), count
 
 
-def detect_loop(turns, now, settings, since=0):
+def call_window(turns, now):
+    """Calls of the longest detector window, sorted once; detectors filter it by their own start."""
+    window = recent_calls(turns, now - 2 * WINDOW_SECONDS)
+    def since(start):
+        return [call for call in window if (call.get('at') or 0) >= start] if start > now - 2 * WINDOW_SECONDS else window
+    return since
+
+
+def detect_loop(turns, now, settings, since=0, calls_since=None):
     """Evidence that the agent is repeating itself, or None.
 
     Only calls after `since` (the latest Studio intervention) count, so a
@@ -140,7 +150,7 @@ def detect_loop(turns, now, settings, since=0):
     """
     repeats = settings['loopRepeats']
     start = max(now - WINDOW_SECONDS, since)
-    calls = [c for c in recent_calls(turns, start)[-60:] if not c.get('exempt')]
+    calls = [c for c in (calls_since or (lambda s: recent_calls(turns, s)))(start)[-60:] if not c.get('exempt')]
     streak = failing_streak(calls)
     if streak and streak[1] >= repeats:
         call, count = streak
@@ -176,8 +186,8 @@ def detect_loop(turns, now, settings, since=0):
     return None
 
 
-def detect_admin(turns, now, settings):
-    calls = recent_calls(turns, now - 2 * WINDOW_SECONDS)
+def detect_admin(turns, now, settings, calls_since=None):
+    calls = (calls_since or (lambda s: recent_calls(turns, s)))(now - 2 * WINDOW_SECONDS)
     if len(calls) < 8:
         return None
     admin = [call for call in calls if call['cls'] == 'admin']
@@ -189,9 +199,9 @@ def detect_admin(turns, now, settings):
             'message': str(round(share * 100)) + '% of the last ' + str(len(calls)) + ' tool calls were reporting or tracker writes (most often `' + top + '`).'}
 
 
-def polling_note(turns, now):
+def polling_note(turns, now, calls_since=None):
     """How much of the last hour went on polling or sleeping; shown as context, not a problem."""
-    calls = recent_calls(turns, now - WINDOW_SECONDS)
+    calls = (calls_since or (lambda s: recent_calls(turns, s)))(now - WINDOW_SECONDS)
     waits = [call for call in calls if call['cls'] == 'wait']
     if len(calls) < 5 or len(waits) / len(calls) < 0.5:
         return ''
@@ -206,10 +216,10 @@ def tokens_since(turn, since):
     return fresh_tokens(turn) if (turn.get('lastAt') or 0) >= since else 0
 
 
-def detect_burn(turns, now, settings):
+def detect_burn(turns, now, settings, calls_since=None):
     since = now - WINDOW_SECONDS
     tokens = sum(tokens_since(turn, since) for turn in turns)
-    work = sum(1 for call in recent_calls(turns, since) if call['cls'] == 'work')
+    work = sum(1 for call in (calls_since or (lambda s: recent_calls(turns, s)))(since) if call['cls'] == 'work')
     if tokens < settings['burnTokensPerHour'] or work:
         return None
     return {'kind': 'burn', 'tokens': tokens,
@@ -269,6 +279,29 @@ def turn_waste(turn, settings):
     return waste
 
 
+def cached_waste(turn, settings):
+    """Waste of a turn, kept on the turn: health reuses unchanged turns from tick to tick."""
+    key = (settings['loopRepeats'], turn.get('lastAt'), turn.get('status'), turn.get('callCount'))
+    cached = turn.get('_waste')
+    if not cached or cached[0] != key:
+        cached = turn['_waste'] = (key, turn_waste(turn, settings))
+    return cached[1]
+
+
+def last_work(turns):
+    """Latest successful work call; only work that succeeded counts, a failing test run is not recovery."""
+    best = 0
+    for turn in turns:
+        if (turn.get('lastAt') or 0) <= best:
+            continue
+        # Calls are in order, so the last successful one is the turn's latest.
+        for call in reversed(turn.get('calls', [])):
+            if call['cls'] == 'work' and not call.get('error'):
+                best = max(best, call.get('at') or 0)
+                break
+    return best or None
+
+
 def assess(session, turns, now, settings, open_work=False, blocked=None, since_intervention=0, observed=True):
     """Health for one agent from its observation and turns (newest first).
 
@@ -278,10 +311,11 @@ def assess(session, turns, now, settings, open_work=False, blocked=None, since_i
     turns = sorted(turns, key=lambda turn: turn.get('lastAt') or 0, reverse=True)
     status = session.get('status') or 'unknown'
     signals = []
-    loop = detect_loop(turns, now, settings, since_intervention)
-    burn = detect_burn(turns, now, settings)
+    calls_since = call_window(turns, now)
+    loop = detect_loop(turns, now, settings, since_intervention, calls_since)
+    burn = detect_burn(turns, now, settings, calls_since)
     stall = None if blocked else detect_stall(session, turns, now, settings, open_work)
-    admin = detect_admin(turns, now, settings)
+    admin = detect_admin(turns, now, settings, calls_since)
     for state, evidence in (('looping', loop), ('burning', burn), ('stalled', stall), ('admin-heavy', admin)):
         if evidence:
             signals.append({'state': state, **evidence})
@@ -302,10 +336,11 @@ def assess(session, turns, now, settings, open_work=False, blocked=None, since_i
     day = [turn for turn in turns if (turn.get('lastAt') or 0) >= now - 86400]
     waste = dict.fromkeys(WASTE_KINDS, 0)
     for turn in day:
-        for kind, value in turn_waste(turn, settings).items():
+        for kind, value in cached_waste(turn, settings).items():
             waste[kind] += value
-    day_calls = [call for turn in day for call in turn.get('calls', [])]
-    classes = Counter(call['cls'] for call in day_calls)
+    classes = Counter()
+    for turn in day:
+        classes.update(turn.get('classes') or Counter(call['cls'] for call in turn.get('calls', [])))
     current = next((turn for turn in turns if turn.get('status') == 'open'), None)
     return {
         'state': state,
@@ -313,14 +348,14 @@ def assess(session, turns, now, settings, open_work=False, blocked=None, since_i
         'sessionStatus': status,
         'lastActivityAt': max((turn.get('lastAt') or 0 for turn in turns), default=None) or None,
         # Only work that succeeded counts: a failing test run is not recovery.
-        'lastWorkAt': max((call.get('at') or 0 for turn in turns for call in turn.get('calls', []) if call['cls'] == 'work' and not call.get('error')), default=None) or None,
+        'lastWorkAt': last_work(turns),
         'currentTurnStartedAt': current['startedAt'] if current else None,
         'tokensLastHour': sum(tokens_since(turn, hour_start) for turn in turns),
-        'polling': polling_note(turns, now),
+        'polling': polling_note(turns, now, calls_since),
         'tokens24h': sum(fresh_tokens(turn) for turn in day),
         'cacheRead24h': sum(turn.get('tokens', {}).get('cacheRead', 0) for turn in day),
         'turns24h': len(day),
-        'calls24h': len(day_calls),
+        'calls24h': sum(turn.get('callCount', len(turn.get('calls', []))) for turn in day),
         'classes24h': {name: classes.get(name, 0) for name in ('work', 'explore', 'admin', 'wait', 'other')},
         'errors24h': sum(turn.get('errors', 0) for turn in day),
         'waste24h': waste,
@@ -336,6 +371,7 @@ class Health:
         self.lock = threading.RLock()
         self.current = {}
         self.sends = {}
+        self.turn_cache = {}
         with closing(app.progress.connect()) as db, db:
             db.execute('CREATE TABLE IF NOT EXISTS health_state (fleet TEXT, agent TEXT, state TEXT, since REAL, PRIMARY KEY(fleet, agent))')
 
@@ -362,28 +398,37 @@ class Health:
                         latest[target['agentId']] = max(latest.get(target['agentId'], 0), receipt.get('createdAt', 0))
         return latest
 
-    def open_work(self, db, fleet_id, agent, turns=()):
+    @staticmethod
+    def fleet_context(db, fleet_id):
+        """What open_work needs that is the same for every agent in a fleet, read once a tick."""
+        tables = {row['name'] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        closed = {row['url'] for row in db.execute('SELECT url, data FROM tasks WHERE fleet=?', (fleet_id,))
+                  if json.loads(row['data']).get('state') == 'closed'} if 'tasks' in tables else set()
+        return {'tables': tables, 'closed': closed}
+
+    def open_work(self, db, fleet_id, agent, turns=(), context=None):
         """Assigned, unfinished work for this agent, and its current blocker if any.
 
         A blocked report holds until the agent reports unblocked, done or hand-off,
         or until it is seen doing work again after the report.
         """
         from studio_progress import task_key
-        closed = {row['url'] for row in db.execute('SELECT url, data FROM tasks WHERE fleet=?', (fleet_id,))
-                  if json.loads(row['data']).get('state') == 'closed'}
+        context = context or self.fleet_context(db, fleet_id)
+        closed, tables = context['closed'], context['tables']
         note = None
-        if db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_notes'").fetchone():
+        if 'agent_notes' in tables:
             row = db.execute('SELECT data FROM agent_notes WHERE fleet=? AND agent=?', (fleet_id, agent['id'])).fetchone()
             note = json.loads(row['data']) if row else None
         # A done or hand-off report closes everything the agent held before it.
         settled = note['at'] if note and note['kind'] in ('done', 'handoff') else 0
         if note and note['kind'] == 'blocked':
-            resumed = any(call['cls'] == 'work' and (call.get('at') or 0) > note['at'] for turn in turns for call in turn.get('calls', []))
+            resumed = any(call['cls'] == 'work' and (call.get('at') or 0) > note['at']
+                          for turn in turns if (turn.get('lastAt') or 0) > note['at'] for call in turn.get('calls', []))
             if not resumed:
                 return True, {'reason': note['note'], 'at': note['at']}
         # An unblocked or resumed agent falls through to the normal checks below.
         work, blocked = False, None
-        if db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='dispatch_claims'").fetchone():
+        if 'dispatch_claims' in tables:
             # A ticket Studio offered or routed to the agent is its open work until it reports back.
             work = bool(db.execute("SELECT 1 FROM dispatch_claims WHERE fleet=? AND agent=? AND status!='done' AND at>?",
                                    (fleet_id, agent['id'], settled)).fetchone())
@@ -412,18 +457,19 @@ class Health:
 
     def tick(self, state, monitor):
         now = self.clock()
-        recent = {fleet['id']: self.app.telemetry.turns(fleet['id'], since=now - 86400, limit=5000) for fleet in state['fleets']}
+        recent = {fleet['id']: self.recent_turns(fleet['id'], now - 86400) for fleet in state['fleets']}
         self.sends = self.recent_sends()
         with self.lock, self.app.progress.lock, closing(self.app.progress.connect()) as db, db:
             for fleet in state['fleets']:
                 settings = clean_health_settings(fleet.get('health'))
+                context = self.fleet_context(db, fleet['id'])
                 by_agent = {}
                 for turn in recent[fleet['id']]:
                     by_agent.setdefault(turn['agentId'], []).append(turn)
                 for agent in fleet['agents']:
                     session = monitor.get('sessions', {}).get(session_key(agent), {}) if agent.get('sessionId') else {}
                     turns = by_agent.get(agent['id'], [])
-                    work, blocked = self.open_work(db, fleet['id'], agent, turns)
+                    work, blocked = self.open_work(db, fleet['id'], agent, turns, context)
                     observed = bool(agent.get('sessionId')) and self.app.telemetry.covered(fleet['id'], agent)
                     health = assess(session, turns, now, settings, work, blocked,
                                     self.last_intervention(fleet['id'], agent['id']), observed)
@@ -440,6 +486,27 @@ class Health:
                                                   'previous': previous['state'] if previous else None,
                                                   'signals': health['signals']})
                     self.current[key] = health
+
+    def prune(self, db, fleet):
+        agents = {agent['id'] for agent in fleet['agents']}
+        for row in db.execute('SELECT agent FROM health_state WHERE fleet=?', (fleet['id'],)).fetchall():
+            if row['agent'] not in agents:
+                db.execute('DELETE FROM health_state WHERE fleet=? AND agent=?', (fleet['id'], row['agent']))
+        with self.lock:
+            for key in [key for key in self.current if key[0] == fleet['id'] and key[1] not in agents]:
+                del self.current[key]
+
+    def recent_turns(self, fleet_id, since):
+        """The last day's turns, reloading from the database only those that changed since the last tick."""
+        cache = self.turn_cache.setdefault(fleet_id, {})
+        index = {(session, turn_id): (agent, last, status) for session, turn_id, agent, last, status in self.app.telemetry.index(fleet_id, since)}
+        for key in set(cache) - set(index):
+            del cache[key]
+        stale = [key for key, marker in index.items() if key not in cache or cache[key][0] != marker]
+        for turn in self.app.telemetry.load_turns(stale, {key: cache[key][1] for key in stale if key in cache}):
+            key = (turn['session'], turn['id'])
+            cache[key] = (index[key], turn)
+        return [turn for _, turn in cache.values()]
 
     def snapshot(self, fleet_id):
         fleet = self.app.store.fleet(fleet_id)

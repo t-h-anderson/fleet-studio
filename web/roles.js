@@ -154,7 +154,7 @@ saveEditor=async function(event){
    const key={role:'roles',rolelink:'roleLinks',trigger:'triggers'}[action.type];f[key]??=[];
    if(action.id)f[key][f[key].findIndex(r=>r.id===item.id)]=item;else f[key].push(item);
    if(action.type==='role')f.agents.forEach(a=>{a.roleIds=(a.roleIds||[]).filter(id=>id!==item.id);if(assigned.includes(a.id))a.roleIds.push(item.id);});
-  }),action.type==='role'?'Role and assignments saved.':action.type==='trigger'?'Trigger saved.':'Workflow relationship saved.');
+  }),action.type==='role'?(current().workflow?'Role saved. Deploy the workflow and notify agents to update their briefs.':'Role and assignments saved.'):action.type==='trigger'?'Trigger saved.':'Workflow relationship saved.');
   $('editor').close();editing=null;
  }catch(e){toast(e.message,true);}finally{$('save-editor').disabled=false;}
 };

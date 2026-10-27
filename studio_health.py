@@ -217,7 +217,11 @@ def turn_waste(turn, settings):
     # Only repeats of non-work calls are waste; re-running a test after an edit is progress.
     signatures = Counter(call['sig'] for call in turn.get('calls', []) if call['cls'] != 'work' and not call.get('exempt'))
     repeated = sum(count - 1 for count in signatures.values() if count >= settings['loopRepeats'])
-    waste['loop'] = round(tokens * repeated / calls)
+    # Re-running the same failing command with nothing changed in between is also a loop.
+    streak = failing_streak(turn.get('calls', []))
+    if streak and streak[1] >= settings['loopRepeats']:
+        repeated += streak[1] - 1
+    waste['loop'] = round(tokens * min(repeated, calls) / calls)
     waste['admin'] = round(tokens * classes.get('admin', 0) / calls)
     waste['wait'] = round(tokens * classes.get('wait', 0) / calls)
     return waste

@@ -77,3 +77,4 @@ dialog{border:1px solid #dce5d8;padding:0;box-shadow:0 30px 100px #122b1c35;bord
 #content>h3,#content>p.field-hint,#content>.mix-bar,#content>.health-summary,#content>.throughput-metrics,#content>.throttle-form,#content>.escalations,#content>.backlog-notice{margin-left:22px;margin-right:22px}
 #content>h3{margin-top:26px}
 #content>.health-summary{margin-top:18px}
+@media(max-width:850px){.escalations .progress-attention{grid-template-columns:1fr}}

@@ -65,9 +65,13 @@ without a deployment. Each rule has these parts:
 - one fallback action once that limit is reached.
 
 **Add recommended** creates rules for loops, stalls, admin-heavy agents and
-token burn. **Backtest** replays recorded health history to show how often a
-rule would have acted. Each automatic action records its outcome: recovered,
-changed or no change.
+token burn, scoped to a role you choose. They start switched off, each with a
+**Backtest** that replays recorded health history to show how often it would
+have acted. Each rule card shows its last action and why it did or did not
+deliver. Each automatic action records its outcome: recovered (the agent did
+real work afterwards), changed or no change. A recipient that is not ready
+yet (mid-turn, open in a client, throttled) leaves the action waiting rather
+than failed, and a hand-off with nobody available escalates to you.
 
 **Throttles** set a maximum number of working agents and token budgets per
 hour, for the whole fleet and per role. They apply to every automatic send.

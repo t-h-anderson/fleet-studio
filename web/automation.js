@@ -1,7 +1,7 @@
 'use strict';
 // Health automations, throttles and the throughput view.
 const SIGNAL_LABELS={looping:'Looping',stalled:'Stalled','admin-heavy':'Admin-heavy',burning:'Burning tokens',waiting:'Waiting on a blocker','any-problem':'Any problem'};
-const ACTION_LABELS={reprompt:'Reprompt with evidence',handoff:'Hand off to a healthy agent','stop-turn':'Stop the Studio-started turn',pause:'Pause automatic deliveries',escalate:'Escalate to me',none:'Do nothing more'};
+const ACTION_LABELS={reprompt:'Reprompt with evidence',handoff:'Hand off to a healthy agent','stop-turn':'Stop the Studio-started turn (Claude Code)',pause:'Stop automatic messages to the agent',escalate:'Escalate to me',none:'Do nothing more'};
 const backtests=new Map();
 
 function roleLabel(id){return id?(current().roles.find(r=>r.id===id)?.name||'Missing role'):'All roles';}
@@ -17,7 +17,12 @@ function ruleCard(r){
  return '<article class="trigger-card automation-card"><div><h3>'+esc(r.name)+'</h3><span class="role-state '+(r.enabled?'':'draft')+'">'+(r.enabled?'Running':'Off')+'</span></div>'+
   '<p>'+esc(ruleSummary(r))+'</p>'+
   (test?'<p class="field-hint">Backtest: would have acted <strong>'+test.fires+'</strong> time(s) in the last '+test.hours+' h'+(test.fallbacks?', with '+test.fallbacks+' fallback(s)':'')+'.</p>':'')+
+  lastFireLine(automationData().lastFire?.[r.id])+
   '<div class="row-actions"><button class="button small" data-automation-toggle="'+r.id+'">'+(r.enabled?'Turn off':'Turn on')+'</button><button class="button small" data-automation-backtest="'+r.id+'">Backtest 24 h</button><button class="button small" data-automation-edit="'+r.id+'">Edit</button></div></article>';
+}
+function lastFireLine(f){
+ if(!f)return '<p class="field-hint">Has not acted yet.</p>';
+ return '<p class="field-hint">Last: '+esc(f.action)+' for '+esc(f.agentName)+' '+ago(f.at)+' · <strong>'+esc(f.status)+'</strong>'+(f.detail?' · '+esc(f.detail):'')+'</p>';
 }
 function fireRow(f){
  return '<tr><td>'+ago(f.at)+'</td><td>'+esc(f.agentName)+(f.recipientName?' → '+esc(f.recipientName):'')+'</td><td>'+esc(f.ruleName)+'<small>'+esc(f.evidence)+'</small></td><td>'+esc(f.action)+(f.fallback?' <span class="stage-tag">fallback</span>':'')+'</td><td>'+esc(f.status)+'<small>'+esc(f.detail||'')+'</small></td><td>'+esc(f.outcome||'—')+'</td></tr>';
@@ -28,7 +33,7 @@ function throttleForm(){
  return '<form class="throttle-form" id="throttle-form"><h3>Throttles and alerts</h3><div class="form-row">'+
   field('Max agents working at once','maxWorkingAgents',t.maxWorkingAgents??'','type="number" min="1" max="500" placeholder="No limit"')+
   field('Fleet tokens per hour','fleetTokensPerHour',t.fleetTokensPerHour??'','type="number" min="1000" placeholder="No limit"')+'</div>'+
-  '<div class="form-row">'+current().roles.filter(r=>r.kind!=='subagent').slice(0,6).map(r=>field(esc(r.name)+' tokens per hour','role-'+r.id,roleLimits[r.id]??'','type="number" min="1000" placeholder="No limit" data-role-limit="'+r.id+'"')).join('')+'</div>'+
+  '<div class="form-row">'+current().roles.filter(r=>r.kind!=='subagent').map(r=>field(esc(r.name)+' tokens per hour','role-'+r.id,roleLimits[r.id]??'','type="number" min="1000" placeholder="No limit" data-role-limit="'+r.id+'"')).join('')+'</div>'+
   field('Escalation webhook (Slack-compatible JSON)','webhookUrl',alerts.webhookUrl||'','type="url" placeholder="https://hooks.example/…"')+
   '<p class="field-hint">Automatic sends that would exceed a limit wait, and the waiting time is shown in Throughput.</p><button class="button primary small" type="submit">Save limits</button></form>';
 }
@@ -36,9 +41,10 @@ function renderAutomation(){
  const f=current(),rules=(f.automations||[]).filter(r=>(r.name+' '+r.when.signal).toLowerCase().includes(query.toLowerCase())),data=automationData();
  $('visible-count').textContent=rules.length;
  $('content').innerHTML=
-  (data.escalations.length?'<section class="escalations"><h3>Needs you</h3>'+data.escalations.map(e=>'<div class="progress-attention"><span class="stage-tag">'+esc(e.ruleName)+'</span><strong>'+esc(e.agentName)+'</strong><span>'+esc(e.message)+'</span><button class="button small" data-escalation-ack="'+e.id+'">Done</button></div>').join('')+'</section>':'')+
+  (data.workflowPaused?'<div class="backlog-notice">Workflow automation is paused, so these automations are paused too. Resume it from Progress or Workflow.</div>':'')+
+  (data.escalations.length?'<section class="escalations"><h3>Needs you</h3>'+data.escalations.map(e=>'<div class="progress-attention"><span class="stage-tag">'+esc(e.ruleName)+'</span><strong>'+esc(e.agentName)+'</strong><span>'+esc(e.message)+'</span><button class="button small" data-escalation-ack="'+e.id+'" aria-label="Dismiss escalation for '+esc(e.agentName)+'">Done</button></div>').join('')+'</section>':'')+
   '<div class="definition-toolbar"><div><strong>Automations act on health, not on a schedule.</strong><p>Changes apply on the next check; no deployment or acknowledgement is needed. Each rule limits itself, then falls back once.</p></div><div>'+
-  (data.presets?.length?'<button class="button small" id="automation-presets">Add recommended</button>':'')+'<button class="button small" id="automation-new">'+icon('plus')+'New automation</button></div></div>'+
+  (data.presets?.length?'<label class="checkbox-field">For <select id="automation-preset-role" aria-label="Role for recommended automations"><option value="">all roles</option>'+current().roles.filter(r=>r.kind!=='subagent').map(r=>'<option value="'+r.id+'">'+esc(r.name)+'</option>').join('')+'</select></label><button class="button small" id="automation-presets">Add recommended (off)</button>':'')+'<button class="button small" id="automation-new">'+icon('plus')+'New automation</button></div></div>'+
   (rules.length?'<div class="roles-grid">'+rules.map(ruleCard).join('')+'</div>':'<p class="field-hint">No automations yet. Add the recommended set to reprompt loops and stalls, refocus admin-heavy agents and pause token burn.</p>')+
   throttleForm()+
   '<h3>Recent actions</h3><div class="table-wrap"><table><thead><tr><th>WHEN</th><th>AGENT</th><th>RULE</th><th>ACTION</th><th>DELIVERY</th><th>OUTCOME</th></tr></thead><tbody>'+
@@ -58,14 +64,14 @@ function renderThroughput(){
  const sum=key=>rows.reduce((s,h)=>s+(h[key]||0),0);
  const waste={};rows.forEach(h=>Object.entries(h.waste24h||{}).forEach(([k,v])=>waste[k]=(waste[k]||0)+v));
  const tokens=sum('tokens24h'),wasted=sum('wasteTokens24h'),closed=progress&&!progress.error?progress.summary.completed24h:null;
- const fired=auto.fires.filter(f=>f.at>Date.now()/1000-86400),recovered=fired.filter(f=>f.outcome==='recovered').length;
+ const recovered=auto.outcomes?.recovered||0;
  const tiles=[
   ['Tickets closed · 24h',closed??'—'],
   ['Fresh tokens · 24h',tokenCount(tokens)],
   ['Estimated waste · 24h',tokenCount(wasted)+(tokens?' ('+Math.round(100*wasted/tokens)+'%)':'')],
   ['Tokens per closed ticket',closed?tokenCount(Math.round(tokens/closed)):'—'],
   ['Throttled time · 24h',Math.round((auto.throttledSeconds24h||0)/60)+' min'],
-  ['Automations that helped',fired.length?recovered+' of '+fired.length:'—'],
+  ['Automations that helped',auto.delivered?recovered+' of '+auto.delivered+' delivered':'—'],
  ];
  $('visible-count').textContent=current().roles.length;
  $('content').innerHTML='<div class="progress-metrics throughput-metrics">'+tiles.map(([l,v])=>'<div><span>'+l+'</span><strong>'+esc(v)+'</strong></div>').join('')+'</div>'+
@@ -92,11 +98,13 @@ openEditor=function(type,id=null,preSession=null){
  $('delete-item').classList.toggle('hidden',!id);$('delete-item').disabled=false;$('delete-item').textContent='Remove automation';
  const options=(labels,selected)=>Object.entries(labels).map(([k,v])=>'<option value="'+k+'"'+(k===selected?' selected':'')+'>'+v+'</option>').join('');
  const roles=(selected,empty)=>'<option value="">'+empty+'</option>'+f.roles.map(r=>'<option value="'+r.id+'"'+(r.id===selected?' selected':'')+'>'+esc(r.name)+'</option>').join('');
+ const canStop=f.agents.some(a=>(a.backend||'codex')==='claude-code'&&(a.hostId||'local')==='local');
+ const actions=Object.fromEntries(Object.entries(ACTION_LABELS).filter(([k])=>k!=='none'&&(k!=='stop-turn'||canStop||item.action==='stop-turn')));
  $('editor-fields').innerHTML=field('Name','name',item.name,'required maxlength="100"')+
   '<div class="form-row"><div class="field"><label for="f-auto-role">Watch agents in</label><select id="f-auto-role">'+roles(item.roleId,'All roles')+'</select></div>'+
   '<div class="field"><label for="f-auto-signal">When an agent is</label><select id="f-auto-signal">'+options(SIGNAL_LABELS,item.when.signal)+'</select></div>'+
   field('For at least (minutes)','auto-for',item.when.forMinutes,'type="number" min="0" max="10080"')+'</div>'+
-  '<div class="form-row"><div class="field"><label for="f-auto-action">Then</label><select id="f-auto-action">'+options(Object.fromEntries(Object.entries(ACTION_LABELS).filter(([k])=>k!=='none')),item.action)+'</select></div>'+
+  '<div class="form-row"><div class="field"><label for="f-auto-action">Then</label><select id="f-auto-action">'+options(actions,item.action)+'</select></div>'+
   '<div class="field"><label for="f-auto-handoff">Hand off to</label><select id="f-auto-handoff">'+roles(item.handoffRoleId,'Same role')+'</select></div></div>'+
   textarea('Message template (optional)','f-auto-message',item.message,4000)+
   '<p class="field-hint">Leave empty for a message tailored to the signal. Placeholders: {agent}, {goal}, {evidence}, {ticket}, {state}, {minutes}.</p>'+
@@ -138,9 +146,14 @@ async function automationClick(e){
  try{
   if(b.id==='automation-new')openEditor('automation');
   if(b.id==='automation-presets'){
-   const presets=automationData().presets.map(p=>({...clone(p),id:uid(),enabled:true,roleId:'',message:'',handoffRoleId:'',parkSource:true,windowHours:24,pauseMinutes:60}));
+   // Presets arrive switched off with a backtest, so the operator sees what they would do first.
+   const roleId=$('automation-preset-role')?.value||'',suffix=roleId?' · '+roleLabel(roleId):'';
+   const presets=automationData().presets.map(p=>({...clone(p),name:p.name+suffix,id:uid(),enabled:false,roleId,message:'',handoffRoleId:'',parkSource:true,windowHours:24,pauseMinutes:60}));
    const existing=new Set((current().automations||[]).map(r=>r.name));
-   await saveAutomations(list=>list.push(...presets.filter(p=>!existing.has(p.name))),'Recommended automations added.');
+   const added=presets.filter(p=>!existing.has(p.name));
+   await saveAutomations(list=>list.push(...added),'Recommended automations added, switched off. Check the backtests, then turn on the ones you want.');
+   for(const preset of added){const saved=current().automations.find(r=>r.id===preset.id);if(saved)backtests.set(saved.id,await api('/api/automation/backtest',{fleetId:activeId,rule:saved,hours:24}));}
+   renderAutomation();
   }
   if(b.dataset.automationEdit)openEditor('automation',b.dataset.automationEdit);
   if(b.dataset.automationToggle)await saveAutomations(list=>{const r=list.find(r=>r.id===b.dataset.automationToggle);r.enabled=!r.enabled;},'Automation updated.');
@@ -157,7 +170,7 @@ $('content').addEventListener('submit',async e=>{
  e.preventDefault();
  const value=id=>$(id).value.trim()===''?null:Number($(id).value);
  const roles={};document.querySelectorAll('[data-role-limit]').forEach(n=>{if(n.value.trim())roles[n.dataset.roleLimit]=Number(n.value);});
- const throttles={};
+ const throttles={...(current().throttles||{})};delete throttles.maxWorkingAgents;delete throttles.fleetTokensPerHour;delete throttles.roleTokensPerHour;
  if(value('f-maxWorkingAgents')!==null)throttles.maxWorkingAgents=value('f-maxWorkingAgents');
  if(value('f-fleetTokensPerHour')!==null)throttles.fleetTokensPerHour=value('f-fleetTokensPerHour');
  if(Object.keys(roles).length)throttles.roleTokensPerHour=roles;

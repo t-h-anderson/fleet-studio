@@ -100,12 +100,15 @@ class Deployments:
             matched = same_binding(binding, agent, ("directory", "sessionId", "roleIds", "notes"))
             acknowledgement = matched and any(a["agentId"] == agent["id"] for a in acks)
             receipt = next((t["status"] for c in reversed(notifications) for t in c["targets"] if t["agentId"] == agent["id"]), "not-notified")
+            # Acknowledgement is optional: a brief counts as delivered once it is installed, queued or started.
+            # An entry point edited or removed outside Studio means the agent may read the wrong text.
+            delivered = entry["status"] == "installed" if entry else bool(acknowledgement or receipt in ("queued", "started"))
             adoption.append({"agentId": agent["id"], "name": agent["name"], "required": bool(agent["enabled"] and agent["sessionId"] and agent["directory"]),
                              "entryPoint": entry["status"] if entry else "not-installed", "bindingMatches": matched,
-                             "notification": receipt, "acknowledged": bool(acknowledgement)})
+                             "notification": receipt, "acknowledged": bool(acknowledgement), "briefDelivered": matched and delivered})
         required = [a for a in adoption if a["required"]]
         return {"spec": spec, "digest": digest(spec), "entryPoints": entry_points,
-                "adoption": adoption, "migrationComplete": bool(active and required and all(a["bindingMatches"] and a["entryPoint"] == "installed" and a["acknowledged"] for a in required)),
+                "adoption": adoption, "migrationComplete": bool(active and required and all(a["briefDelivered"] for a in required)),
                 "active": ({k: active[k] for k in ("id", "digest", "createdAt", "version")} if active else None),
                 "draftChanged": bool(active and (active["digest"] != digest(spec) or self.binding_digest(fleet) != self.binding_digest(active["fleet"]))),
                 "paused": self.data["paused"].get(fleet["id"], False),

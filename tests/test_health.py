@@ -120,6 +120,15 @@ class FalsePositiveTests(unittest.TestCase):
         calls = [call('Bash', {'command': 'pytest tests/test_a.py'}, NOW - 300 + i, error=True) for i in range(4)]
         self.assertEqual(self.state(calls, since_intervention=NOW - 100)['state'], 'productive')
 
+    def test_repeated_failures_count_as_loop_waste_but_tdd_does_not(self):
+        failing = [call('Bash', {'command': 'pytest tests/test_a.py'}, NOW - 300 + i, error=True) for i in range(5)]
+        self.assertEqual(turn_waste(turn(failing, NOW), DEFAULTS)['loop'], 800)
+        tdd = []
+        for i in range(5):
+            tdd.append(call('Edit', {'file_path': '/a.py', 'new_string': str(i)}, NOW - 300 + i * 2))
+            tdd.append(call('Bash', {'command': 'pytest tests/test_a.py'}, NOW - 299 + i * 2, error=True))
+        self.assertEqual(turn_waste(turn(tdd, NOW), DEFAULTS)['loop'], 0)
+
     def test_long_running_command_gets_more_time(self):
         build = call('Bash', {'command': 'make all'}, NOW - 1500)
         build['open'] = True

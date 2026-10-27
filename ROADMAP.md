@@ -92,9 +92,7 @@ Observed, not changed:
   agent. Render a POSIX variant for agents on Linux/macOS hosts.
 - There is no CI configuration. Run the unit suite on Windows and Linux and the
   Chromium UI suite on Linux. The suite needs no network access.
-- `package-lock.json` resolves from a private registry, so `npm ci` fails
-  outside that network. Generate the lockfile against the public registry, or
-  document the registry requirement.
+- `package-lock.json` resolves from the public npm registry.
 
 ## 3. Suggestions
 

@@ -131,7 +131,7 @@ try{
  assert.match(await page.locator('#workflow-review-body').innerText(),/progress-reporting/);
  await page.locator('#workflow-apply').click();await page.locator('#workflow-review').waitFor({state:'hidden'});
  await page.locator('#nav-progress').click();await page.evaluate(()=>loadProgress(true));
- assert.match(await page.locator('.progress-release').innerText(),/0\/3 agents acknowledged/);
+ assert.match(await page.locator('.progress-release').innerText(),/0\/3 agents have their brief/);
  checks.push('Deployed graph links roles and contracts; reviewed deployment resets adoption');
  const current=await bootstrap();const inspect=await post('/api/workflow/inspect',{fleetId:fixture.fleetId});
  const recipient=current.state.fleets[0].agents.find(a=>a.id===fixture.integratorId);
@@ -244,6 +244,14 @@ try{
  await page.locator('[data-automation-backtest]').first().click();
  await until(async()=>(await page.locator('.automation-card').first().innerText()).includes('Backtest'),'Backtest result missing');
  assert.match(await page.locator('#content').innerText(),/recovered/);
+ await page.locator('#f-maxWorkingAgents').fill('3');
+ await sleep(6500);
+ assert.equal(await page.locator('#f-maxWorkingAgents').inputValue(),'3','Throttle form lost typed input on refresh');
+ assert.match(await page.locator('.automation-card').first().innerText(),/Has not acted yet|Last:/);
+ await post('/api/workflow/pause',{fleetId:fixture.fleetId,paused:true});
+ await page.locator('#nav-health').click();await page.locator('#nav-automation').click();
+ await until(async()=>(await page.locator('#content').innerText()).includes('these automations are paused too'),'Paused banner missing');
+ await post('/api/workflow/pause',{fleetId:fixture.fleetId,paused:false});
  await page.screenshot({path:path.join(root,'tests/automation.png'),fullPage:true});
  await page.locator('#nav-throughput').click();
  await until(async()=>(await page.locator('#content').innerText()).includes('Estimated waste'),'Throughput missing');

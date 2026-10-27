@@ -2,7 +2,8 @@
 // Agent health: where agents are stuck, what they spend tokens on, and quick tweaks.
 const healthCache=new Map(),automationCache=new Map(),turnCache=new Map();
 let healthExpanded='';
-const HEALTH_LABELS={looping:'Looping',burning:'Burning tokens',stalled:'Stalled','admin-heavy':'Admin-heavy',waiting:'Waiting',productive:'Productive',idle:'Idle',offline:'Offline'};
+const HEALTH_LABELS={looping:'Looping',burning:'Burning tokens',stalled:'Stalled','admin-heavy':'Admin-heavy',waiting:'Waiting',productive:'Productive',idle:'Idle',offline:'Offline','no-telemetry':'No telemetry',unknown:'Not observed yet'};
+let healthSignature='';
 const HEALTH_PROBLEMS=['looping','burning','stalled','admin-heavy'];
 const CALL_CLASSES=['work','explore','admin','wait','other'];
 
@@ -44,8 +45,12 @@ async function loadHealth(){
   healthCache.set(fid,health);automationCache.set(fid,automation);
   if(fid!==activeId)return;
   if(view==='throughput'&&typeof loadProgress==='function')loadProgress();
+  // Never redraw under someone typing, and redraw the board only when a health state changed.
+  if(typingInContent())return;
+  const signature=fid+JSON.stringify(health.agents.map(a=>[a.agentId,a.health?.state]));
   if(['health','automation','throughput'].includes(view))renderContent();
-  else if(view==='board'&&!drag&&!roleDrag)renderContent();
+  else if(view==='board'&&!drag&&!roleDrag&&signature!==healthSignature)renderContent();
+  healthSignature=signature;
  }catch(e){/* The status banner already reports a disconnected server. */}
 }
 async function loadTurns(agentId){
@@ -74,12 +79,12 @@ function healthRow(row){
  const expanded=healthExpanded===a.id;
  return '<tr class="health-row'+(h&&HEALTH_PROBLEMS.includes(h.state)?' is-stuck':'')+'"><td><button class="agent-name" data-health-expand="'+a.id+'" aria-expanded="'+expanded+'">'+esc(a.name)+'</button><div class="agent-folder">'+esc(role?.name||displayedRole(a))+' · '+esc(runtimeLabel(a))+'</div></td>'+
   '<td>'+healthBadge(h)+(h?'<small>'+sinceLabel(h.since)+'</small>':'')+(paused?'<small>Paused until '+new Date(paused.until*1000).toLocaleTimeString()+'</small>':'')+'</td>'+
-  '<td class="health-evidence">'+esc(signal?.message||(h?'—':'Waiting for the first observation'))+'</td>'+
+  '<td class="health-evidence">'+esc(signal?.message||h?.polling||(h?.state==='no-telemetry'?'Studio cannot read this agent\'s transcript (remote, or no linked session); only session status is shown.':h?'—':'Waiting for the first observation'))+'</td>'+
   '<td>'+tokenCount(h?.tokensLastHour)+'<small>'+tokenCount(h?.tokens24h)+' / 24h</small></td>'+
   '<td>'+mixBar(h?.classes24h)+'<small>'+(h?h.calls24h+' calls · '+h.errors24h+' failed':'')+'</small></td>'+
   '<td>'+(h?tokenCount(h.wasteTokens24h)+'<small>'+(h.tokens24h?Math.round(100*h.wasteTokens24h/h.tokens24h):0)+'% of 24h</small>':'—')+'</td>'+
   '<td><div class="row-actions">'+
-   '<button class="button small" data-health-nudge="'+a.id+'" title="Send a message now">Nudge</button>'+
+   '<button class="button small" data-health-nudge="'+a.id+'" title="Send a message now" aria-label="Nudge '+esc(a.name)+'">Nudge</button>'+
    (role?'<button class="button small" data-health-role="'+role.id+'" title="Edit the role goal and brief">Tweak role</button>':'')+
    (paused?'<button class="button small" data-health-resume="'+a.id+'">Resume</button>':'')+
    '<button class="icon-button" data-agent-activity="'+a.id+'" aria-label="Activity for '+esc(a.name)+'" title="Read agent activity">'+icon('activity')+'</button>'+
@@ -92,12 +97,12 @@ function renderHealth(){
  const needle=query.toLowerCase();
  const rows=data.agents.filter(r=>(r.name+' '+(r.health?.state||'')).toLowerCase().includes(needle))
   .sort((x,y)=>(HEALTH_PROBLEMS.includes(y.health?.state)-HEALTH_PROBLEMS.includes(x.health?.state))||x.name.localeCompare(y.name));
- const counts={};data.agents.forEach(r=>{const s=r.health?.state||'unknown';counts[s]=(counts[s]||0)+1;});
+ const counts={};data.agents.forEach(r=>{const s=r.health?.state||'no-telemetry';counts[s]=(counts[s]||0)+1;});
  const auto=automationData();
  $('visible-count').textContent=rows.length;
  $('content').innerHTML=
   (auto.escalations.length?'<div class="backlog-notice">'+auto.escalations.length+' escalation(s) need you. <button class="text-button" data-view-link="automation">Review</button></div>':'')+
-  '<div class="health-summary">'+['looping','stalled','admin-heavy','burning','waiting','productive','idle','offline'].map(s=>'<div class="health-tile health-'+s+'"><span>'+HEALTH_LABELS[s]+'</span><strong>'+(counts[s]||0)+'</strong></div>').join('')+'</div>'+
+  '<div class="health-summary">'+['looping','stalled','admin-heavy','burning','waiting','productive','idle','offline','no-telemetry'].map(s=>'<div class="health-tile health-'+s+'"><span>'+HEALTH_LABELS[s]+'</span><strong>'+(counts[s]||0)+'</strong></div>').join('')+'</div>'+
   '<div class="table-wrap"><table class="health-table"><thead><tr><th>AGENT</th><th>HEALTH</th><th>WHY</th><th>TOKENS / H</th><th>CALL MIX 24H</th><th>WASTE 24H</th><th></th></tr></thead><tbody>'+
   rows.map(healthRow).join('')+'</tbody></table></div>'+
   '<p class="field-hint">Call mix: <span class="legend mix-work"></span>work <span class="legend mix-explore"></span>explore <span class="legend mix-admin"></span>admin <span class="legend mix-wait"></span>waiting <span class="legend mix-other"></span>other. Fresh tokens exclude cache reads. Waste is estimated from repeated, admin, polling and aborted calls.</p>';
@@ -120,8 +125,11 @@ $('content').addEventListener('click',healthClick);
 setInterval(()=>{if(state&&!stopped)loadHealth();},5000);
 
 const healthOriginalRenderContent=renderContent;
+function typingInContent(){return !!document.activeElement?.closest('#content input,#content textarea,#content select');}
 renderContent=function(){
  if(!state||drag)return;
+ // The periodic refresh must not redraw a form someone is filling in.
+ if(['health','automation','throughput'].includes(view)&&typingInContent())return;
  if(view==='health')return renderHealth();
  if(view==='automation')return renderAutomation();
  if(view==='throughput')return renderThroughput();

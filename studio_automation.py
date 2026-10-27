@@ -43,8 +43,8 @@ PRESETS = [
      'cooldownMinutes': 20, 'maxFires': 2, 'thenAction': 'escalate'},
     {'name': 'Refocus admin-heavy agents', 'when': {'signal': 'admin-heavy', 'forMinutes': 5}, 'action': 'reprompt',
      'cooldownMinutes': 30, 'maxFires': 1, 'thenAction': 'escalate'},
-    {'name': 'Pause token burn', 'when': {'signal': 'burning', 'forMinutes': 0}, 'action': 'reprompt',
-     'cooldownMinutes': 30, 'maxFires': 1, 'thenAction': 'pause'},
+    {'name': 'Refocus token burn', 'when': {'signal': 'burning', 'forMinutes': 0}, 'action': 'reprompt',
+     'cooldownMinutes': 30, 'maxFires': 1, 'thenAction': 'escalate'},
 ]
 
 

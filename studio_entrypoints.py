@@ -11,6 +11,15 @@ from workflow_spec import digest
 from studio_trackers import tracker_label
 
 
+def project_rules(agents):
+    """Codex reads this override file instead of AGENTS.md in the same folder, so point back to it."""
+    folder = Path(agents[0]["directory"]).resolve() if agents and agents[0].get("directory") else None
+    if folder and (folder / "AGENTS.md").is_file():
+        return ("This file takes the place of the project's AGENTS.md here, so read ./AGENTS.md now and follow it: "
+                "its coding, testing and safety rules still apply. ")
+    return "Repository AGENTS.md files and engineering guides still apply. "
+
+
 class EntryPoints:
     def __init__(self, app):
         self.app = app
@@ -32,7 +41,7 @@ class EntryPoints:
                 "The brief gives your goal, what done looks like, your hand-offs and the three commands for done, blocked and hand-off. "
                 "Studio watches your session and tells you when the brief changes, so you do not need to re-read it, post progress updates or acknowledge messages. "
                 "If you are working in a different or nested checkout, ignore this file. "
-                "Repository AGENTS.md files and engineering guides still apply. " + tracker_label(fleet) + " remains the task record.\n")
+                + project_rules(agents) + tracker_label(fleet) + " remains the task record.\n")
 
     @staticmethod
     def target(directory):

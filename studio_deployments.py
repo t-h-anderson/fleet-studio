@@ -269,8 +269,11 @@ class Deployments:
         reserved = {t["agentId"] for c in self.app.controls.snapshot(full=True) if c.get("deploymentId") == rid and c.get("purpose") == "workflow-adoption"
                     for t in c["targets"] if t["status"] in ("waiting", "queued", "started", "unknown")}
         ids = [aid for aid in ids if aid not in acknowledged | reserved]
+        # Agents whose brief is word-for-word the same as in the previous release are not woken again.
+        if payload.get("changedOnly", True):
+            ids = [aid for aid in ids if self.brief_changed(fleet["id"], rid, aid)]
         if not ids:
-            raise ValueError("All selected agents have acknowledged or already have queued/unconfirmed notifications. Check their receipts before retrying.")
+            raise ValueError("No selected agent needs notifying: their briefs are unchanged, acknowledged or already queued.")
         with self.app.controls.lock:
             previews = list(self.app.controls.previews.values())
         for preview in previews:
@@ -289,6 +292,20 @@ class Deployments:
                 agent = bindings[target["agentId"]]
                 target["text"] = self.brief_notice(fleet["id"], rid, agent, client)
             return deepcopy(stored)
+
+    def brief_changed(self, fleet_id, release_id, agent_id):
+        previous = [r["id"] for r in self.data["history"] if r["fleetId"] == fleet_id and r["id"] != release_id]
+        if not previous:
+            return True
+        def text(rid):
+            try:
+                body = (self.root / rid / "agents" / (agent_id + ".md")).read_text(encoding="utf-8")
+            except OSError:
+                return None
+            # The footer names the release, which always differs.
+            return "\n".join(line for line in body.splitlines() if not line.startswith("Brief "))
+        old, new = text(previous[-1]), text(release_id)
+        return old is None or old != new
 
     def brief_notice(self, fleet_id, release_id, agent, client):
         """A short notice naming the brief sections that changed since the agent's previous release."""

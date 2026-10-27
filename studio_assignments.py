@@ -58,8 +58,7 @@ def project_assignments(agent, reports, handoffs, tasks, tracker, release_id, no
                         state='received' if handoff.get('receivedAt') else 'assigned' if handoff['status'] == 'queued' else 'waiting',
                         reason=handoff.get('detail') or ('Recipient has not reported receipt.' if not handoff.get('receivedAt') else ''),
                         owner=agent['name'] if handoff['status'] == 'queued' or handoff.get('receivedAt') else 'Workflow operator',
-                        nextAction='Read the task and report receipt.' if handoff['status'] == 'queued' and not handoff.get('receivedAt') else
-                        'Confirm current scope before starting.' if handoff.get('receivedAt') else 'Inspect delivery evidence before retrying.',
+                        nextAction='Work the ticket.' if handoff['status'] == 'queued' or handoff.get('receivedAt') else 'Inspect delivery evidence before retrying.',
                         stale=now - (handoff.get('receivedAt') or handoff['createdAt']) > quiet_seconds)
             if handoff['status'] in ('sending', 'needs-attention') and not handoff.get('receivedAt'):
                 item.update(state='unknown', reason='Delivery outcome needs reconciliation. ' + item['reason'])

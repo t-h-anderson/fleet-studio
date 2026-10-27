@@ -375,7 +375,8 @@ def brief_document(fleet, spec, agent, release_id, app_root):
         lines += ["--to accepts: " + ", ".join(targets) + ".", ""]
     role_ids = {r["id"] for r in mine}
     tagged = [p for p in spec.get("policies", []) if set(p["roles"]) & role_ids]
-    shared = [p for p in spec.get("policies", []) if not p["roles"]]
+    # The brief's Reporting section supersedes the older progress-reporting policy, whatever it says.
+    shared = [p for p in spec.get("policies", []) if not p["roles"] and p["id"] != "progress-reporting"]
     if tagged or shared:
         lines += ["## Policies", ""]
         for policy in tagged + [p for p in shared if len(p["text"].split()) <= 80]:

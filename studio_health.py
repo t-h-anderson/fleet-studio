@@ -21,6 +21,8 @@ DEFAULTS = {
     'loopRepeats': 4,
     'adminShare': 0.4,
     'burnTokensPerHour': 400000,
+    'noProgressFailures': 5,
+    'noProgressMinutes': 20,
 }
 LIMITS = {
     'stallMinutes': (1, 1440),
@@ -28,6 +30,8 @@ LIMITS = {
     'loopRepeats': (2, 50),
     'adminShare': (0.05, 1),
     'burnTokensPerHour': (1000, 100000000),
+    'noProgressFailures': (2, 100),
+    'noProgressMinutes': (1, 1440),
 }
 WINDOW_SECONDS = 3600
 WASTE_KINDS = ('loop', 'admin', 'wait', 'aborted', 'nudge')
@@ -89,6 +93,33 @@ def failing_streak(calls):
     return best
 
 
+def no_progress(calls, settings):
+    """The same test or build still failing after many attempts and edits, with no passing run in between.
+
+    Edit-and-test iteration is normal until it stops converging: this fires only when one
+    command has failed noProgressFailures times across at least noProgressMinutes.
+    """
+    runs = {}
+    for call in calls:
+        if call['cls'] != 'work' or call['tool'] not in ('Bash', 'shell', 'exec_command', 'shell_command', 'local_shell', 'container.exec'):
+            continue
+        failures = runs.setdefault(call['sig'], [])
+        if call.get('error'):
+            failures.append(call)
+        else:
+            failures.clear()  # It passed; the agent was converging.
+    for sig, failures in runs.items():
+        if len(failures) < settings['noProgressFailures']:
+            continue
+        span = (failures[-1].get('at') or 0) - (failures[0].get('at') or 0)
+        if span >= settings['noProgressMinutes'] * 60:
+            label = failures[-1]['label'] or failures[-1]['tool']
+            return {'kind': 'no-progress', 'label': label, 'count': len(failures),
+                    'message': '`' + label + '` has failed ' + str(len(failures)) + ' times over ' + str(int(span // 60))
+                    + ' min despite edits in between; the approach is not converging.'}
+    return None
+
+
 def repeats_without_work(calls):
     """Most repeated non-work call since the last work-class call."""
     since_work = []
@@ -116,6 +147,9 @@ def detect_loop(turns, now, settings, since=0):
         label = call['label'] or call['tool']
         return {'kind': 'failing-repeat', 'label': label, 'count': count,
                 'message': 'Ran `' + label + '` ' + str(count) + ' times without changing anything in between, failing each time.'}
+    stuck = no_progress(calls, settings)
+    if stuck:
+        return stuck
     steps = [c for c in calls if c['cls'] != 'wait']
     period = repeated_cycle(steps, repeats)
     if period:
@@ -190,6 +224,13 @@ def detect_stall(session, turns, now, settings, open_work):
     running = bool(current and current.get('calls') and current['calls'][-1].get('open'))
     # A long build or test writes nothing until it finishes, so allow it three times as long.
     limit = settings['silentMinutes'] * 60 * (3 if running else 1)
+    if status == 'attention' and open_work:
+        return {'kind': 'errored-turn', 'minutes': int(quiet // 60) if quiet else None,
+                'message': 'The last turn ended in an error (often a rate or usage limit, or a crash) and work is still open.'}
+    if status == 'closed' and open_work and session.get('backend', 'codex') == 'codex':
+        # A closed Codex session cannot receive Studio's messages; only a person can reopen it.
+        return {'kind': 'closed-session', 'minutes': int(quiet // 60) if quiet else None,
+                'message': 'The session is closed with open work; Studio cannot message it until it is reopened.'}
     if status == 'working' and quiet is not None and quiet >= limit:
         detail = ' waiting on `' + (current['calls'][-1]['label'] or current['calls'][-1]['tool']) + '`' if running else ' with no new tool calls or tokens'
         return {'kind': 'silent-turn', 'minutes': int(quiet // 60),
@@ -271,7 +312,8 @@ def assess(session, turns, now, settings, open_work=False, blocked=None, since_i
         'signals': signals,
         'sessionStatus': status,
         'lastActivityAt': max((turn.get('lastAt') or 0 for turn in turns), default=None) or None,
-        'lastWorkAt': max((call.get('at') or 0 for turn in turns for call in turn.get('calls', []) if call['cls'] == 'work'), default=None) or None,
+        # Only work that succeeded counts: a failing test run is not recovery.
+        'lastWorkAt': max((call.get('at') or 0 for turn in turns for call in turn.get('calls', []) if call['cls'] == 'work' and not call.get('error')), default=None) or None,
         'currentTurnStartedAt': current['startedAt'] if current else None,
         'tokensLastHour': sum(tokens_since(turn, hour_start) for turn in turns),
         'polling': polling_note(turns, now),

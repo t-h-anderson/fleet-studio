@@ -19,8 +19,8 @@ import uuid
 from studio_health import PROBLEM_STATES
 
 SIGNALS = PROBLEM_STATES + ('waiting', 'any-problem')
-ACTIONS = ('reprompt', 'handoff', 'stop-turn', 'pause', 'escalate')
-THEN_ACTIONS = ('escalate', 'handoff', 'pause', 'none')
+ACTIONS = ('reprompt', 'handoff', 'stop-turn', 'stop', 'pause', 'escalate')
+THEN_ACTIONS = ('escalate', 'handoff', 'stop', 'pause', 'none')
 OUTCOME_SECONDS = 1800
 MARKER = '[Fleet Studio]'
 
@@ -425,6 +425,13 @@ class Automation:
         minutes = fire.pop('parkMinutes', None)
         if minutes:
             self.data['paused'][fleet['id'] + ':' + fire['agentId']] = self.clock() + minutes * 60
+            # Stop the source's running turn too, so two agents do not work the same ticket.
+            source = next((a for a in fleet['agents'] if a['id'] == fire['agentId']), None)
+            if source:
+                try:
+                    self.stop_turn(source)
+                except Exception:
+                    pass  # Nothing running, or the backend cannot stop it; muting still applies.
             fire['detail'] = (fire['detail'] + ' ' if fire['detail'] else '') + fire['agentName'] + ' parked for ' + str(minutes) + ' min.'
 
     def consider(self, fleet, rule, agent, health, monitor, now):
@@ -438,6 +445,8 @@ class Automation:
         regular = [f for f in fires if not f.get('fallback') and f['status'] in ('sent', 'failed')]
         recent = [f for f in regular if f['at'] > now - rule['windowHours'] * 3600]
         action, fallback = rule['action'], False
+        if health['signals'] and health['signals'][0].get('kind') == 'closed-session' and action == 'reprompt':
+            action = 'escalate'  # A closed session cannot read a reprompt; a person has to reopen it.
         if rule['maxFires'] and len(recent) >= rule['maxFires']:
             if rule['thenAction'] == 'none' or any(f.get('fallback') and f['at'] > recent[-1]['at'] for f in fires):
                 return False
@@ -458,12 +467,13 @@ class Automation:
                 self.send(fleet, agent, self.compose(fleet, rule, agent, health), fire)
             elif action == 'handoff':
                 self.handoff(fleet, rule, agent, health, fire, monitor)
-            elif action == 'stop-turn':
-                backend = self.app.runtimes.for_agent(agent)
-                stop = getattr(backend, 'interrupt', None)
-                if not stop:
-                    raise RuntimeError(agent['name'] + "'s backend cannot stop a running turn.")
-                fire.update(status='sent', detail=stop(agent['sessionId']))
+            elif action in ('stop-turn', 'stop'):
+                detail = self.stop_turn(agent)
+                if action == 'stop':
+                    # Stop the turn and mute Studio's messages, so the agent stays still until someone looks.
+                    self.data['paused'][fleet['id'] + ':' + agent['id']] = self.clock() + rule['pauseMinutes'] * 60
+                    detail += ' Studio messages muted for ' + str(rule['pauseMinutes']) + ' min.'
+                fire.update(status='sent', detail=detail)
             elif action == 'pause':
                 self.data['paused'][fleet['id'] + ':' + agent['id']] = self.clock() + rule['pauseMinutes'] * 60
                 fire.update(status='sent', detail='Automatic messages to ' + agent['name'] + ' stopped for ' + str(rule['pauseMinutes']) + ' min.')
@@ -471,9 +481,16 @@ class Automation:
                 self.escalate(fleet, agent, rule, fire)
         except Exception as exc:
             fire.update(status='failed', detail=str(exc)[-600:])
-        if fire['status'] == 'failed' and (fire.get('fallback') or action == 'handoff'):
+        if fire['status'] == 'failed' and (fire.get('fallback') or action in ('handoff', 'stop-turn', 'stop')):
             # A fallback or hand-off that cannot run must not leave the agent stuck silently.
             self.escalate_failure(fleet, fire)
+
+    def stop_turn(self, agent):
+        backend = self.app.runtimes.for_agent(agent)
+        stop = getattr(backend, 'interrupt', None)
+        if not stop:
+            raise RuntimeError(agent['name'] + "'s backend cannot stop a running turn.")
+        return stop(agent['sessionId'])
 
     def escalate_failure(self, fleet, fire):
         agent = {'id': fire['agentId'], 'name': fire['agentName']}

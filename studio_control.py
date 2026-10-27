@@ -18,8 +18,8 @@ class AutomationHeld(ValueError):
     """A final availability check deferred delivery before any native effect."""
 
 
-def rename_session(codex, session_id, name):
-    """Set persisted metadata through app-server; never load/resume a thread."""
+def app_server(codex, method, params):
+    """Make one request through Codex's app-server; never load or write native state directly."""
     process = subprocess.Popen([codex, "app-server", "--stdio"], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                text=True, encoding="utf-8", creationflags=CREATE_NO_WINDOW)
@@ -42,19 +42,19 @@ def rename_session(codex, session_id, name):
         while time.monotonic() < deadline:
             value = responses.get(timeout=max(.1, deadline - time.monotonic()))
             if value is None:
-                raise RuntimeError("Codex app-server closed before acknowledging the rename.")
+                raise RuntimeError("Codex app-server closed before answering " + method + ".")
             if value.get("id") == request_id:
                 if "error" in value:
-                    raise RuntimeError(value["error"].get("message", "Codex rejected the rename."))
+                    raise RuntimeError(value["error"].get("message", "Codex rejected " + method + "."))
                 return value.get("result")
-        raise TimeoutError("Codex did not acknowledge the rename.")
+        raise TimeoutError("Codex did not answer " + method + ".")
     try:
         send({"id": 1, "method": "initialize", "params": {"clientInfo": {
             "name": "fleet_studio", "title": "Fleet Studio", "version": "2.0.0"}}})
         response(1)
         send({"method": "initialized", "params": {}})
-        send({"id": 2, "method": "thread/name/set", "params": {"threadId": session_id, "name": name}})
-        response(2)
+        send({"id": 2, "method": method, "params": params})
+        return response(2)
     finally:
         if process.stdin:
             process.stdin.close()
@@ -65,6 +65,11 @@ def rename_session(codex, session_id, name):
             process.wait(timeout=3)
         if process.stdout:
             process.stdout.close()
+
+
+def rename_session(codex, session_id, name):
+    """Set persisted metadata through app-server; never load/resume a thread."""
+    app_server(codex, "thread/name/set", {"threadId": session_id, "name": name})
 
 
 def assignment_text(fleet, agent):

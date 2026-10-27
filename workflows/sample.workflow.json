@@ -86,7 +86,7 @@
       "name": "Meaningful progress reports",
       "roles": [],
       "sources": [],
-      "text": "At task start, meaningful progress, blocker changes, handoff receipt and work completion, report a structured milestone with the canonical tracker evidence link. Tracker records remain authoritative. Reported completion is not technical acceptance. Do not produce repeated no-change updates."
+      "text": "Studio observes sessions; report only done, blocked, unblocked and hand-offs with workflow_client.py report. Do not post repeated or no-change updates."
     }
   ],
   "gaps": [],
@@ -225,7 +225,7 @@
       "event": "handoff-9e32e493",
       "condition": "turn-completed",
       "minutes": 30,
-      "message": "Workflow action: Assign scoped packet\nFrom: Coordinator\nTo: Writer\nWhen: An eligible, unclaimed packet is ready\nRequired artifact: Ticket with source, file scope and unit acceptance\nRequired condition: One writer per owned file\n\nRead the reported ticket and current handoff before acting. Confirm named custody, scope, evidence and explicit stops. A reported event is a notification, not proof of acceptance. Record work in the existing ticket/MR; do not invent missing assignments or transfer another agent's runtime.",
+      "message": "Pick up: Assign scoped packet. Take the next concrete step toward your goal.",
       "mode": "automatic",
       "handoff": "assign-scoped-packet",
       "contract": "7eabed42f262ef51632a1150ed85dfb44a7db6e8375bbf08ebf3652c0a838abc"
@@ -240,7 +240,7 @@
       "event": "handoff-8253bbf2",
       "condition": "turn-completed",
       "minutes": 30,
-      "message": "Workflow action: Submit reviewed packet\nFrom: Writer\nTo: Integrator\nWhen: Reviewed packet is AI Awaiting Merge\nRequired artifact: Exact head, unit/Analyzer evidence and usable drafts\nRequired condition: Integrator checks evidence and records bundle ownership\n\nRead the reported ticket and current handoff before acting. Confirm named custody, scope, evidence and explicit stops. A reported event is a notification, not proof of acceptance. Record work in the existing ticket/MR; do not invent missing assignments or transfer another agent's runtime.",
+      "message": "Pick up: Submit reviewed packet. Take the next concrete step toward your goal.",
       "mode": "automatic",
       "handoff": "submit-reviewed-packet",
       "contract": "5c685ecf3bd049743b605fe27568a4573f407d16bf9cf9eefc64709f20e0827c"
@@ -255,7 +255,7 @@
       "event": "handoff-4709c619",
       "condition": "turn-completed",
       "minutes": 30,
-      "message": "Workflow action: Escalate scope exception\nFrom: Integrator\nTo: Coordinator\nWhen: A cross-bundle or acceptance exception remains\nRequired artifact: Concrete conflict, evidence and requested decision\nRequired condition: Ordinary acceptance and merge remain with Integrator\n\nRead the reported ticket and current handoff before acting. Confirm named custody, scope, evidence and explicit stops. A reported event is a notification, not proof of acceptance. Record work in the existing ticket/MR; do not invent missing assignments or transfer another agent's runtime.",
+      "message": "Pick up: Escalate scope exception. Take the next concrete step toward your goal.",
       "mode": "automatic",
       "handoff": "escalate-scope-exception",
       "contract": "1a6dc5fb2d813165a3fb8a491123050eb9240c277046fc723d4201d1276d04d1"

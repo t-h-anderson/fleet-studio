@@ -110,6 +110,18 @@ class CodexBackend(AgentBackend):
     def transcript_path(self, session_id):
         return rollout_path(self.root, session_id)
 
+    def interrupt(self, session_id):
+        """Stop the running turn through Codex's own app-server interface."""
+        from studio_control import app_server
+        turn = self.observe([session_id])["sessions"].get(session_id, {})
+        if turn.get("turnStatus") != "inProgress" or not turn.get("turnId"):
+            raise RuntimeError("No Codex turn is running for this session.")
+        try:
+            app_server(self.executable, "turn/interrupt", {"threadId": session_id, "turnId": turn["turnId"]})
+        except (RuntimeError, TimeoutError, OSError) as exc:
+            raise RuntimeError("This Codex CLI could not stop the turn (" + str(exc)[:200] + ").") from None
+        return "Asked Codex to stop the running turn."
+
     def resume_command(self, session_id, directory):
         return [self.executable, "resume", session_id, "--cd", directory]
 

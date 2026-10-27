@@ -232,9 +232,17 @@ def validate_report(db, app, fleet, agent, data):
 
 
 def describe(contract):
-    return ('Assignment contract (verify scope and evidence; validity is not acceptance):\n'
-            + json.dumps(contract, indent=2, ensure_ascii=True)
-            + '\nReport contractId ' + contract['id'] + ' with milestones. Preserve explicit stops and project permissions.')
+    """A short summary of what the assignment asks for; the full contract stays in Studio."""
+    lines = ['Assignment ' + contract['id'] + ': ' + contract.get('deliverable', '')]
+    if contract.get('scope'):
+        lines.append('Scope: ' + ', '.join(contract['scope']))
+    requirements = [r.get('description', '') for r in contract.get('requirements', [])]
+    if requirements:
+        lines.append('Done means: ' + '; '.join(requirements))
+    if contract.get('evidence'):
+        lines.append('Show evidence of: ' + ', '.join(str(e) for e in contract['evidence']))
+    lines.append('When finished, report done with the ticket; Studio links it to this assignment.')
+    return '\n'.join(lines)
 
 
 def projection(contract, report):

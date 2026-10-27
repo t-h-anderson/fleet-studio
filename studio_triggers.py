@@ -184,7 +184,7 @@ class Triggers:
         marker = "[Fleet Studio · check] " if rule["kind"] in ("idle", "timer") else "[Fleet Studio] "
         text = marker + rule["name"] + " (" + cause + ")\n\n" + rule["message"]
         if event:
-            text += "\n\nReported handoff (verify against the current ticket):\nFrom: " + event["agent"]
+            text += "\n\nHand-off from " + event["agent"] + ":"
             for key in ("eventId", "ticket", "artifact", "context"):
                 if event.get(key):
                     text += "\n" + key + ": " + event[key]

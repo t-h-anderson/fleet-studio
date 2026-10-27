@@ -52,7 +52,7 @@ try{
  assert.equal(await page.evaluate(()=>window.injected),undefined);
  await page.locator('[data-current-context="'+fixture.writerId+'"]').click();
  await page.locator('.context-text').waitFor({state:'visible'});
- assert.match(await page.locator('#progress-detail-body').innerText(),/complete deployed instructions/);
+ assert.match(await page.locator('#progress-detail-body').innerText(),/Your brief has your goal/);
  assert.match(await page.locator('#progress-detail-body').innerText(),/Preserve explicit stops/);
  assert.equal(await page.evaluate(()=>window.injected),undefined);
  await page.locator('#close-progress-detail').click();
@@ -98,7 +98,7 @@ try{
  await page.locator('#reconcile-form button[type="submit"]').click();
  await page.locator('#apply-reconciliation').click();
  await page.locator('#progress-detail').waitFor({state:'hidden'});
- assert.match(await page.locator('#content').innerText(),/Receipt reconciled/);
+ await until(async()=>/Receipt reconciled/.test(await page.locator('#content').innerText()),'Reconciled receipt not shown');
  checks.push('External receipt reconciliation preserves the event and does not send instructions');
  assert.match(await page.locator('#content').innerText(),/No agent receipt/);
  await page.locator('[data-progress-handoff="synthetic-handoff"]').click();
@@ -233,7 +233,10 @@ try{
  await page.locator('#nav-health').click();await page.locator('.health-table').waitFor();
  await until(async()=>(await page.locator('.health-table').innerText()).includes('Looping'),'Writer is not shown as looping');
  assert.match(await page.locator('.health-table').innerText(),/pytest tests\/test_contract\.py/);
- assert.match(await page.locator('.health-table').innerText(),/Admin-heavy/);
+ // The integrator's session is closed with open work, which outranks its admin-heavy signal.
+ assert.match(await page.locator('.health-table').innerText(),/session is closed with open work/);
+ await page.locator('[data-health-expand="'+fixture.integratorId+'"]').click();
+ await until(async()=>/Admin-heavy/.test(await page.locator('.health-detail').innerText()),'Admin-heavy signal missing');
  await page.locator('[data-health-expand="'+fixture.writerId+'"]').click();
  await until(async()=>(await page.locator('.turn-timeline').count())>0,'Turn timeline missing');
  assert.match(await page.locator('.turn-timeline').innerText(),/pytest tests\/test_contract\.py/);

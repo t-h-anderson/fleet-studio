@@ -243,6 +243,29 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(len(app.automation.snapshot(fleet['id'])['escalations']), 1)
         self.assertEqual(app.automation.data['fires'][0]['status'], 'held')
 
+    def test_closed_session_escalates_instead_of_reprompting(self):
+        app, fleet = self.app()
+        fleet = self.configure(app, automations=[rule(when={'signal': 'stalled', 'forMinutes': 0})])
+        writer = fleet['agents'][0]
+        app.health.current[(fleet['id'], writer['id'])] = {'state': 'stalled', 'since': time.time() - 10,
+            'signals': [{'state': 'stalled', 'kind': 'closed-session', 'message': 'closed'}]}
+        with patch.object(app.controls, 'send') as send:
+            app.automation.tick(app.store.snapshot(), self.monitor(fleet))
+            send.assert_not_called()
+        self.assertEqual(app.automation.data['fires'][0]['action'], 'escalate')
+
+    def test_stop_action_stops_the_turn_and_mutes(self):
+        app, fleet = self.app()
+        fleet = self.configure(app, automations=[rule(action='stop')])
+        writer = fleet['agents'][0]
+        self.set_health(app, fleet, writer, 'looping', time.time() - 10)
+        with patch.object(type(app.runtimes.local['codex']), 'interrupt', return_value='Asked Codex to stop the running turn.'):
+            app.automation.tick(app.store.snapshot(), self.monitor(fleet))
+        [fire] = app.automation.data['fires']
+        self.assertEqual(fire['status'], 'sent')
+        self.assertIn('muted', fire['detail'])
+        self.assertIn('paused by automation', app.automation.paused_reason(fleet['id'], writer))
+
     def test_one_failing_monitor_step_does_not_stop_the_others(self):
         app, fleet = self.app()
         with patch.object(app.health, 'tick', side_effect=RuntimeError('boom')), patch.object(app.automation, 'tick') as automation, \

@@ -98,7 +98,7 @@ class ContextTests(unittest.TestCase):
         page = app.context.page({**payload, 'maxChars': 2000})
         self.assertLessEqual(len(page['text']), 2000)
         self.assertIn('paused', page['text'])
-        self.assertIn('complete deployed instructions', page['text'])
+        self.assertIn('Your brief has your goal', page['text'])
         self.assertTrue(page['nextCursor'])
         next_page = app.context.page({**payload, 'maxChars': 2000, 'cursor': page['nextCursor']})
         self.assertIn('paused', next_page['text'])

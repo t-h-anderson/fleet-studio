@@ -76,6 +76,20 @@ class BriefTests(unittest.TestCase):
                 role.pop(key, None)
         self.assertEqual(validate(sample)['schemaVersion'], 1)
 
+    def test_entry_point_points_back_to_project_agents_md(self):
+        app, fleet = self.app()
+        (self.root / 'AGENTS.md').write_text('Project rules', encoding='utf-8')
+        text = app.entrypoints.content(fleet, fleet['agents'])
+        self.assertIn('read ./AGENTS.md now and follow it', text)
+
+    def test_unchanged_briefs_are_not_notified_again(self):
+        app, fleet = self.app()
+        for _ in range(2):
+            preview = app.deployments.preview({'fleetId': fleet['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'})
+            app.deployments.apply(preview['id'])
+        with self.assertRaisesRegex(ValueError, 'briefs are unchanged'):
+            app.deployments.notification({'fleetId': fleet['id']})
+
     def test_brief_changes_name_sections(self):
         old = '# A\n\n## Goal\n\nOld\n\n## Reporting\n\nSame\n\nBrief 1 · release x'
         new = '# A\n\n## Goal\n\nNew\n\n## Reporting\n\nSame\n\nBrief 2 · release y'

@@ -157,5 +157,36 @@ class FalsePositiveTests(unittest.TestCase):
         self.assertNotEqual(assess({'status': 'working'}, [long], NOW, DEFAULTS)['state'], 'burning')
 
 
+class StuckTests(unittest.TestCase):
+    def cycle(self, failures, minutes, last_passes=False):
+        calls = []
+        for i in range(failures):
+            at = NOW - minutes * 60 + i * (minutes * 60 / max(1, failures - 1))
+            calls.append(call('Edit', {'file_path': '/a.py', 'new_string': str(i)}, at - 5))
+            calls.append(call('Bash', {'command': 'pytest tests/test_a.py'}, at, error=not (last_passes and i == failures - 1)))
+        return assess({'status': 'working'}, [turn(calls, NOW - 1, status='open')], NOW, DEFAULTS)
+
+    def test_edit_test_cycle_that_never_converges_is_no_progress(self):
+        health = self.cycle(6, 25)
+        self.assertEqual((health['state'], health['signals'][0]['kind']), ('looping', 'no-progress'))
+        self.assertIn('not converging', health['signals'][0]['message'])
+
+    def test_edit_test_cycle_that_passes_or_is_short_is_productive(self):
+        self.assertEqual(self.cycle(6, 25, last_passes=True)['state'], 'productive')
+        self.assertEqual(self.cycle(6, 10)['state'], 'productive')
+
+    def test_errored_turn_with_open_work_is_stalled(self):
+        health = assess({'status': 'attention'}, [turn([], NOW - 30)], NOW, DEFAULTS, open_work=True)
+        self.assertEqual(health['signals'][0]['kind'], 'errored-turn')
+
+    def test_closed_codex_session_with_work_is_flagged(self):
+        health = assess({'status': 'closed', 'backend': 'codex'}, [turn([], NOW - 30)], NOW, DEFAULTS, open_work=True)
+        self.assertEqual(health['signals'][0]['kind'], 'closed-session')
+
+    def test_failed_work_is_not_recovery(self):
+        failing = [call('Bash', {'command': 'make'}, NOW - 10, error=True)]
+        self.assertIsNone(assess({'status': 'working'}, [turn(failing, NOW - 5)], NOW, DEFAULTS)['lastWorkAt'])
+
+
 if __name__ == '__main__':
     unittest.main()

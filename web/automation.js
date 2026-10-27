@@ -1,7 +1,7 @@
 'use strict';
 // Health automations, throttles and the throughput view.
 const SIGNAL_LABELS={looping:'Looping',stalled:'Stalled','admin-heavy':'Admin-heavy',burning:'Burning tokens',waiting:'Waiting on a blocker','any-problem':'Any problem'};
-const ACTION_LABELS={reprompt:'Reprompt with evidence',handoff:'Hand off to a healthy agent','stop-turn':'Stop the Studio-started turn (Claude Code)',pause:'Stop automatic messages to the agent',escalate:'Escalate to me',none:'Do nothing more'};
+const ACTION_LABELS={reprompt:'Reprompt with evidence',handoff:'Reassign the work to a healthy agent','stop-turn':'Stop the running turn',stop:'Stop the turn and mute Studio messages',pause:'Mute Studio messages to the agent',escalate:'Escalate to me',none:'Do nothing more'};
 const backtests=new Map();
 
 function roleLabel(id){return id?(current().roles.find(r=>r.id===id)?.name||'Missing role'):'All roles';}
@@ -119,7 +119,7 @@ openEditor=function(type,id=null,preSession=null){
  $('delete-item').classList.toggle('hidden',!id);$('delete-item').disabled=false;$('delete-item').textContent='Remove automation';
  const options=(labels,selected)=>Object.entries(labels).map(([k,v])=>'<option value="'+k+'"'+(k===selected?' selected':'')+'>'+v+'</option>').join('');
  const roles=(selected,empty)=>'<option value="">'+empty+'</option>'+f.roles.map(r=>'<option value="'+r.id+'"'+(r.id===selected?' selected':'')+'>'+esc(r.name)+'</option>').join('');
- const canStop=f.agents.some(a=>(a.backend||'codex')==='claude-code'&&(a.hostId||'local')==='local');
+ const canStop=f.agents.some(a=>(a.hostId||'local')==='local');
  const actions=Object.fromEntries(Object.entries(ACTION_LABELS).filter(([k])=>k!=='none'&&(k!=='stop-turn'||canStop||item.action==='stop-turn')));
  $('editor-fields').innerHTML=field('Name','name',item.name,'required maxlength="100"')+
   '<div class="form-row"><div class="field"><label for="f-auto-role">Watch agents in</label><select id="f-auto-role">'+roles(item.roleId,'All roles')+'</select></div>'+
@@ -130,7 +130,7 @@ openEditor=function(type,id=null,preSession=null){
   textarea('Message template (optional)','f-auto-message',item.message,4000)+
   '<p class="field-hint">Leave empty for a message tailored to the signal. Placeholders: {agent}, {goal}, {evidence}, {ticket}, {state}, {minutes}.</p>'+
   '<div class="form-row">'+field('Cooldown (minutes)','auto-cooldown',item.cooldownMinutes,'type="number" min="1" max="10080"')+field('Max times per agent (0 = unlimited)','auto-max',item.maxFires,'type="number" min="0" max="1000"')+field('Within (hours)','auto-window',item.windowHours,'type="number" min="1" max="720"')+'</div>'+
-  '<div class="form-row"><div class="field"><label for="f-auto-then">After the limit</label><select id="f-auto-then">'+options({escalate:ACTION_LABELS.escalate,handoff:ACTION_LABELS.handoff,pause:ACTION_LABELS.pause,none:ACTION_LABELS.none},item.thenAction)+'</select></div>'+
+  '<div class="form-row"><div class="field"><label for="f-auto-then">After the limit</label><select id="f-auto-then">'+options({escalate:ACTION_LABELS.escalate,handoff:ACTION_LABELS.handoff,stop:ACTION_LABELS.stop,pause:ACTION_LABELS.pause,none:ACTION_LABELS.none},item.thenAction)+'</select></div>'+
   field('Pause length (minutes)','auto-pause',item.pauseMinutes,'type="number" min="1" max="10080"')+'</div>'+
   '<label class="checkbox-field"><input id="f-auto-park" type="checkbox" '+(item.parkSource?'checked':'')+'>Pause the stuck agent after handing off its work</label>'+
   '<label class="checkbox-field"><input id="f-auto-enabled" type="checkbox" '+(item.enabled?'checked':'')+'>Running</label>';

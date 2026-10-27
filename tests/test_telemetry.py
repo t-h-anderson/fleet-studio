@@ -18,7 +18,7 @@ def claude_rows():
         {'type': 'assistant', 'timestamp': '2026-10-27T10:00:05Z',
          'message': {'id': 'm1', 'model': 'x', 'stop_reason': 'tool_use',
                      'usage': {'input_tokens': 10, 'output_tokens': 5, 'cache_read_input_tokens': 100},
-                     'content': [{'type': 'text', 'text': 'Running the tests.'},
+                     'content': [{'type': 'text', 'text': 'Running the focused tests for the contract now.'},
                                  {'type': 'tool_use', 'id': 't1', 'name': 'Bash',
                                   'input': {'command': 'cd /repo && pytest tests/test_x.py -q'}}]}},
         # Streaming repeats the same message with larger usage.
@@ -36,7 +36,7 @@ def claude_rows():
                                   'input': {'file_path': '/repo/x.py', 'old_string': SECRET, 'new_string': SECRET}}]}},
         {'type': 'assistant', 'timestamp': '2026-10-27T10:00:20Z',
          'message': {'id': 'm3', 'stop_reason': 'end_turn', 'usage': {'input_tokens': 1, 'output_tokens': 1},
-                     'content': [{'type': 'text', 'text': 'Done.'}]}},
+                     'content': [{'type': 'text', 'text': 'Done: the contract test passes again.'}]}},
     ]
 
 
@@ -45,7 +45,7 @@ def codex_rows():
         {'timestamp': '2026-10-27T10:00:00Z', 'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 'turn-1'}},
         {'timestamp': '2026-10-27T10:00:01Z', 'type': 'response_item',
          'payload': {'type': 'function_call', 'name': 'shell', 'call_id': 'c1',
-                     'arguments': json.dumps({'command': ['bash', '-lc', 'python workflow_client.py instructions']})}},
+                     'arguments': json.dumps({'command': ['bash', '-lc', 'python workflow_client.py report blocked --note waiting']})}},
         {'timestamp': '2026-10-27T10:00:02Z', 'type': 'response_item',
          'payload': {'type': 'function_call_output', 'call_id': 'c1',
                      'output': json.dumps({'output': SECRET, 'metadata': {'exit_code': 0}})}},
@@ -146,6 +146,98 @@ class ParserTests(unittest.TestCase):
             [turn] = follower.read()
             self.assertEqual(turn['status'], 'completed')
             self.assertEqual(turn['tokens']['output'], 11)
+
+
+class AccuracyTests(unittest.TestCase):
+    def test_secrets_are_redacted_from_labels(self):
+        commands = {
+            'GITHUB_TOKEN=ghp_abcdefghijk123456 gh pr create -t "x"': 'ghp_',
+            'curl -H "Authorization: Bearer abc.def.ghi" https://api.example/a?token=zzz': 'abc.def',
+            'mysql -u root -pHUNTER2 db': 'HUNTER2',
+            'git commit -m "secret launch plan"': 'secret launch',
+            'export API_KEY=sk-live-abcdefghijkl && ./deploy': 'sk-live',
+            'deploy --token abc123secret': 'abc123secret',
+            'git clone https://user:pa55word@example.com/r.git': 'pa55word',
+        }
+        for command, secret in commands.items():
+            label = call_metadata('Bash', {'command': command})['label']
+            self.assertNotIn(secret, label, command)
+        grep = call_metadata('Grep', {'pattern': 'password=hunter2', 'path': 'src'})
+        self.assertNotIn('hunter2', grep['label'])
+        self.assertTrue(grep['label'].endswith(' in src'))
+
+    def test_signatures_distinguish_full_arguments(self):
+        sig = lambda tool, args: call_metadata(tool, args)['sig']
+        self.assertNotEqual(sig('Grep', {'pattern': 'a', 'path': 'src'}), sig('Grep', {'pattern': 'b', 'path': 'src'}))
+        self.assertNotEqual(sig('Read', {'file_path': 'f', 'offset': 0}), sig('Read', {'file_path': 'f', 'offset': 500}))
+        self.assertNotEqual(sig('Edit', {'file_path': 'f', 'new_string': 'x'}), sig('Edit', {'file_path': 'f', 'new_string': 'y'}))
+        first = sig('Bash', {'command': "apply_patch <<'P'\n*** Update File: a.py\n+one\nP"})
+        self.assertNotEqual(first, sig('Bash', {'command': "apply_patch <<'P'\n*** Update File: a.py\n+two\nP"}))
+        self.assertTrue(call_metadata('TodoWrite', {'todos': []}).get('exempt'))
+
+    def test_classification_of_reads_writes_and_polling(self):
+        cls = lambda command: call_metadata('Bash', {'command': command})['cls']
+        self.assertEqual(cls('gh pr view 12 --comments'), 'explore')
+        self.assertEqual(cls('gh pr create -t x'), 'work')
+        self.assertEqual(cls('python workflow_client.py instructions --fleet f --agent a'), 'explore')
+        self.assertEqual(cls('rg workflow_client report'), 'explore')
+        self.assertEqual(cls('echo data > out.txt'), 'work')
+        self.assertEqual(cls('ls 2>/dev/null'), 'explore')
+        self.assertEqual(cls('gh pr checks 12'), 'wait')
+        self.assertEqual(cls('until curl -s localhost:8000; do sleep 2; done'), 'wait')
+        self.assertEqual(call_metadata('Task', {'prompt': 'x'})['cls'], 'work')
+
+    def test_codex_rollout_without_task_events_splits_turns_per_prompt(self):
+        parser = TurnParser('s', 'codex')
+        def prompt(text, at):
+            return {'timestamp': at, 'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': text}]}}
+        for row in (prompt('<environment_context>x</environment_context>', '2026-10-27T10:00:00Z'), prompt('First task', '2026-10-27T10:00:01Z'),
+                    prompt('Second task', '2026-10-27T10:05:00Z')):
+            parser.feed(row)
+        turns = sorted(parser.drain(), key=lambda t: t['startedAt'])
+        self.assertEqual([t['status'] for t in turns], ['completed', 'open'])
+
+    def test_codex_token_total_reset_counts_the_last_call(self):
+        parser = TurnParser('s', 'codex')
+        def tokens(total, last, at):
+            return {'timestamp': at, 'type': 'event_msg', 'payload': {'type': 'token_count', 'info': {
+                'total_token_usage': {'input_tokens': total, 'output_tokens': 0}, 'last_token_usage': {'input_tokens': last, 'output_tokens': 0}}}}
+        parser.feed({'timestamp': '2026-10-27T10:00:00Z', 'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 't'}})
+        for row in (tokens(1000, 1000, '2026-10-27T10:00:01Z'), tokens(5000, 4000, '2026-10-27T10:00:02Z'), tokens(300, 300, '2026-10-27T10:00:03Z')):
+            parser.feed(row)
+        [turn] = parser.drain()
+        self.assertEqual(turn['tokens']['input'], 5300)
+        self.assertEqual(sum(turn['buckets'].values()), 5300)
+
+    def test_claude_command_rows_and_split_messages_do_not_open_turns(self):
+        parser = TurnParser('s', 'claude-code')
+        rows = claude_rows()
+        extra = [{'type': 'user', 'uuid': 'cmd', 'timestamp': '2026-10-27T10:00:30Z',
+                  'message': {'role': 'user', 'content': '<local-command-stdout>ok</local-command-stdout>'}},
+                 {'type': 'assistant', 'timestamp': '2026-10-27T10:00:31Z',
+                  'message': {'id': 'm3', 'stop_reason': 'end_turn', 'usage': {'input_tokens': 1, 'output_tokens': 4}, 'content': []}}]
+        for row in rows + extra:
+            parser.feed(row)
+        [turn] = parser.drain()
+        self.assertEqual(turn['id'], 'u1')
+        self.assertEqual(turn['tokens']['output'], 14)
+
+    def test_follower_resumes_from_saved_state_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 's.jsonl'
+            rows = claude_rows()
+            path.write_text('\n'.join(json.dumps(r) for r in rows[:3]) + '\n', encoding='utf-8')
+            first = TranscriptFollower(path, 's', 'claude-code')
+            [turn] = first.read()
+            saved = json.loads(json.dumps(first.state()))
+            with path.open('a', encoding='utf-8') as stream:
+                stream.write('\n'.join(json.dumps(r) for r in rows[3:]) + '\n')
+            resumed = TranscriptFollower(path, 's', 'claude-code', saved)
+            [after] = resumed.read()
+            self.assertEqual(after['id'], turn['id'])
+            self.assertEqual(after['status'], 'completed')
+            self.assertTrue(after['calls'][0]['error'])
+            self.assertEqual(after['tokens']['output'], 11)
 
 
 if __name__ == '__main__':

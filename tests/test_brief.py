@@ -106,15 +106,20 @@ class ReportTests(unittest.TestCase):
         app, fleet = self.app()
         integrator = fleet['agents'][1]
         created = time.time() - 60
-        handoff = {'id': 'h1', 'createdAt': created, 'status': 'queued', 'targetAgentId': integrator['id'], 'receivedAt': None}
+        handoff = {'id': 'h1', 'createdAt': created, 'status': 'queued', 'targetAgentId': integrator['id'], 'receivedAt': None,
+                   'targetSessionId': integrator['sessionId']}
         with closing(app.progress.connect()) as db, db:
             db.execute('INSERT INTO handoffs VALUES(?,?,?)', (fleet['id'], 'h1', json.dumps(handoff)))
         app.progress.observe_receipts([fleet])
         with closing(app.progress.connect()) as db:
             self.assertIsNone(json.loads(db.execute('SELECT data FROM handoffs').fetchone()['data'])['receivedAt'])
-        app.telemetry.store(fleet['id'], integrator['id'], [{
-            'id': 't1', 'session': integrator['sessionId'], 'startedAt': created + 5, 'lastAt': created + 20, 'status': 'completed',
-            'tokens': {}, 'calls': [], 'classes': {}}])
+        unrelated = {'id': 't0', 'session': integrator['sessionId'], 'startedAt': created + 2, 'lastAt': created + 3, 'status': 'completed',
+                     'tokens': {}, 'calls': [], 'classes': {}, 'fromStudio': False}
+        app.telemetry.store(fleet['id'], integrator['id'], [unrelated])
+        app.progress.observe_receipts([fleet])
+        with closing(app.progress.connect()) as db:
+            self.assertIsNone(json.loads(db.execute('SELECT data FROM handoffs').fetchone()['data'])['receivedAt'])
+        app.telemetry.store(fleet['id'], integrator['id'], [{**unrelated, 'id': 't1', 'startedAt': created + 5, 'lastAt': created + 20, 'fromStudio': True}])
         app.progress.observe_receipts([fleet])
         with closing(app.progress.connect()) as db:
             saved = json.loads(db.execute('SELECT data FROM handoffs').fetchone()['data'])

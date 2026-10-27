@@ -23,18 +23,41 @@ CALL_LIMIT = 400
 INITIAL_TAIL = 8_000_000
 STUDIO_MARKERS = ('[Fleet Studio]', 'Automated Fleet Studio')
 
+# Only writes to the tracker or Studio count as admin; reading a ticket is exploring.
 ADMIN_COMMAND = re.compile(
-    r'\b(workflow_client|fleet_progress|fleet_event|fleet_context|fleet report)\b'
-    r'|\b(glab|gh)\s+(issue|mr|pr)\s+(note|comment|edit|update|view|list)\b'
-    r'|\b(glab|gh)\s+(api)\b.*\b(notes|comments|labels)\b')
-WAIT_COMMAND = re.compile(r'(^|[;&|]\s*)(sleep|watch)\b|\b(gh|glab)\s+(run|ci)\s+(watch|status)\b')
+    r'\b(fleet_progress|fleet_event|fleet_context)(\.py)?\b'
+    r'|\bworkflow_client(\.py)?[\'"]?\s+(report|acknowledge)\b'
+    r'|\b(glab|gh)\s+(issue|mr|pr)\s+(note|comment|edit|update|close|reopen)\b'
+    r'|\b(glab|gh)\s+api\b.*(-X|--method)\s*(POST|PATCH|PUT)\b.*\b(notes|comments|labels)\b')
+WAIT_COMMAND = re.compile(
+    r'(^|[;&|]\s*)(sleep|watch)\b|\b(while|until)\b.*\bsleep\b'
+    r'|\b(gh|glab)\s+(run|ci)\s+(watch|status|view|list)\b|\bgh\s+pr\s+checks\b')
 EXPLORE_COMMAND = re.compile(
-    r'^(ls|cat|head|tail|less|grep|rg|ag|find|fd|tree|wc|pwd|which|file|stat|du|df|env|printenv|echo)\b'
-    r'|^sed\s+-n\b|^git\s+(status|log|diff|show|branch|blame|grep|ls-files|remote|rev-parse)\b')
-WORK_TOOLS = {'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'apply_patch'}
+    r'^(ls|cat|head|tail|less|grep|rg|ag|find|fd|tree|wc|pwd|which|file|stat|du|df|env|printenv|echo|curl|wget)\b'
+    r'|^sed\s+-n\b|^git\s+(status|log|diff|show|branch|blame|grep|ls-files|remote|rev-parse)\b'
+    r'|^kubectl\s+(get|describe|logs)\b|^(gh|glab)\s+(issue|pr|mr|repo)\s+(view|list|diff|status)\b'
+    r'|^(gh|glab)\s+api\b(?!.*(-X|--method)\s*(POST|PATCH|PUT|DELETE))'
+    r'|\bworkflow_client(\.py)?[\'"]?\s+instructions\b')
+# Redirecting into a file is writing, whatever the command.
+WRITE_REDIRECT = re.compile(r'(^|[^0-9&>])>{1,2}\s*(?!&|/dev/null)\S|\btee\b')
+WORK_TOOLS = {'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'apply_patch', 'Task', 'Agent'}
 EXPLORE_TOOLS = {'Read', 'Grep', 'Glob', 'LS', 'WebFetch', 'WebSearch', 'view_image'}
-WAIT_TOOLS = {'BashOutput', 'Monitor', 'wait'}
+WAIT_TOOLS = {'BashOutput', 'Monitor', 'wait', 'write_stdin'}
 SHELL_TOOLS = {'Bash', 'shell', 'exec_command', 'shell_command', 'local_shell', 'container.exec'}
+# Planning calls repeat by design and never indicate a loop.
+LOOP_EXEMPT = {'TodoWrite', 'update_plan'}
+SECRET_PATTERNS = (
+    (re.compile(r'^(?:\w+=\S+\s+)+'), ''),
+    (re.compile(r'\b(export\s+\w+)=\S+'), r'\1=…'),
+    (re.compile(r'(--?(?:password|passwd|token|secret|key|api-key|apikey|auth)[=\s]+)\S+', re.IGNORECASE), r'\1…'),
+    (re.compile(r'(\b(?:mysql|mariadb|mysqldump)\b.*?\s-p)\S+'), r'\1…'),
+    (re.compile(r'(authorization:?\s*)(bearer|basic|token)?\s*[^\s\'"]+', re.IGNORECASE), r'\1…'),
+    (re.compile(r'\bbearer\s+[^\s\'"]+', re.IGNORECASE), 'Bearer …'),
+    (re.compile(r'\b(ghp|gho|ghs|github_pat|glpat|xox[abp]|sk|AKIA)[-_][\w-]{8,}|\bAKIA[0-9A-Z]{16}\b'), '…'),
+    (re.compile(r'(https?://[^\s?\'"]+)\?[^\s\'"]*'), r'\1?…'),
+    (re.compile(r'(\s(?:-m|--message|--body|-b|--title|--notes?|-F)\s+)("[^"]*"|\'[^\']*\'|\S+)'), r'\1"…"'),
+    (re.compile(r'://[^/\s:@]+:[^/\s@]+@'), '://…@'),
+)
 EXIT_CODE = re.compile(r'(?:exit code|exited with code|exit_code)["\s:]*(-?\d+)', re.IGNORECASE)
 
 
@@ -57,8 +80,15 @@ def studio_prompt(text):
     return text.lstrip().startswith(STUDIO_MARKERS)
 
 
-def shell_label(command):
-    """First meaningful line of a shell command, without wrappers or directory changes."""
+def redact(text):
+    """Remove values that may be credentials or content before a label is stored."""
+    for pattern, replacement in SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def shell_script(command):
+    """The script a shell call runs, without wrappers or leading directory changes."""
     if isinstance(command, list):
         words = [str(part) for part in command]
         # Codex wraps commands as ["bash", "-lc", "<script>"].
@@ -68,11 +98,17 @@ def shell_label(command):
             command = ' '.join(words)
     if not isinstance(command, str):
         return ''
-    lines = [line.strip() for line in command.strip().splitlines() if line.strip() and not line.strip().startswith('#')]
+    # A leading "cd folder &&" says where, not what.
+    return re.sub(r'^\s*(cd\s+\S+\s*(&&|;)\s*)+', '', command.strip())
+
+
+def shell_label(command):
+    """First meaningful line of a shell command, redacted, for display."""
+    script = shell_script(command)
+    lines = [line.strip() for line in script.splitlines() if line.strip() and not line.strip().startswith('#')]
     text = ' '.join(lines[0].split()) if lines else ''
-    # A leading "cd folder &&" says where, not what, so it is dropped from the signature.
     text = re.sub(r'^(cd\s+\S+\s*(&&|;)\s*)+', '', text)
-    return text[:SIGNATURE_LIMIT]
+    return redact(text)[:SIGNATURE_LIMIT]
 
 
 def patch_files(text):
@@ -89,45 +125,68 @@ def classify(tool, label):
     if tool in WAIT_TOOLS:
         return 'wait'
     if tool in SHELL_TOOLS:
-        if ADMIN_COMMAND.search(label):
+        if not label:
+            return 'other'
+        if re.match(r'(apply_patch|cat\s*>|tee)\b', label) or WRITE_REDIRECT.search(label):
+            return 'work'
+        if ADMIN_COMMAND.search(label) and not re.match(r'(rg|grep|ag|cat|less|head|tail)\b', label):
             return 'admin'
         if WAIT_COMMAND.search(label):
             return 'wait'
         if EXPLORE_COMMAND.search(label):
             return 'explore'
-        return 'work' if label else 'other'
-    if tool in ('TodoWrite', 'update_plan', 'Task', 'Agent'):
-        return 'other'
+        return 'work'
     return 'other'
 
 
+def fingerprint(value):
+    """Stable hash input for arguments, bounded so huge payloads stay cheap."""
+    try:
+        text = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        text = str(value)
+    return text if len(text) <= 20000 else text[:10000] + digest(text, 32)
+
+
 def call_metadata(tool, arguments):
-    """Reduce a tool call to its name, class and a short signature."""
+    """Reduce a tool call to its name, class, a redacted label and a signature of its full arguments.
+
+    The signature distinguishes calls that differ anywhere in their arguments, so
+    editing a file twice or reading two ranges are different steps; only the
+    hash is kept, never the arguments themselves.
+    """
+    raw = arguments
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
         except ValueError:
             # Codex custom tools (apply_patch) pass raw text.
             files = patch_files(arguments)
-            arguments = {'files': files} if files else {}
+            arguments = {'files': files, 'input': raw} if files else {'input': raw}
     arguments = arguments if isinstance(arguments, dict) else {}
+    tool = str(tool)
     if tool in SHELL_TOOLS:
-        label = shell_label(arguments.get('command') or arguments.get('cmd') or '')
+        script = shell_script(arguments.get('command') or arguments.get('cmd') or '')
+        label, basis = shell_label(script), script
     elif tool == 'apply_patch':
         files = arguments.get('files') or patch_files(arguments.get('input') or arguments.get('patch') or '')
-        label = ', '.join(files)
+        label, basis = ', '.join(files), fingerprint(arguments)
+    elif tool in ('Grep', 'Glob', 'WebSearch') or arguments.get('pattern') or arguments.get('query'):
+        # Search text can be sensitive, so it is shown only as a short hash.
+        text = str(arguments.get('pattern') or arguments.get('query') or '')
+        where = str(arguments.get('path') or arguments.get('glob') or '')
+        label = ('#' + digest(text, 8) if text else '') + (' in ' + where if where else '')
+        basis = fingerprint(arguments)
     elif arguments.get('file_path') or arguments.get('notebook_path') or arguments.get('path'):
         label = str(arguments.get('file_path') or arguments.get('notebook_path') or arguments.get('path'))
-    elif arguments.get('pattern'):
-        label = str(arguments['pattern'])
+        basis = fingerprint(arguments)
     elif arguments.get('url'):
-        label = str(arguments['url']).split('?')[0]
-    elif arguments.get('query'):
-        label = str(arguments['query'])
+        label, basis = str(arguments['url']).split('?')[0], fingerprint(arguments)
     else:
-        label = ''
-    label = ' '.join(label.split())[:SIGNATURE_LIMIT]
-    return {'tool': str(tool)[:80], 'cls': classify(tool, label), 'label': label, 'sig': digest(str(tool) + '\0' + label)}
+        label, basis = '', fingerprint(arguments)
+    label = redact(' '.join(label.split()))[:SIGNATURE_LIMIT]
+    return {'tool': tool[:80], 'cls': classify(tool, label), 'label': label, 'sig': digest(tool + '\0' + basis),
+            **({'exempt': True} if tool in LOOP_EXEMPT else {})}
 
 
 def output_failed(output):
@@ -150,10 +209,30 @@ def output_failed(output):
     return bool(match and match.group(1) != '0')
 
 
+BUCKET_SECONDS = 300
+REPLY_MINIMUM = 20
+# Claude Code records these as user rows, but they are not prompts.
+NON_PROMPTS = ('<command-name>', '<command-message>', '<local-command-stdout>', '<local-command-stderr>',
+               '<user-memory-input>', 'Caveat: The messages below were generated')
+
+
 def new_turn(session, turn_id, at, from_studio=False):
     return {'id': turn_id, 'session': session, 'startedAt': at, 'endedAt': None, 'lastAt': at, 'status': 'open',
             'fromStudio': from_studio, 'tokens': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0},
-            'calls': [], 'callCount': 0, 'classes': {name: 0 for name in CLASSES}, 'errors': 0, 'replies': []}
+            'buckets': {}, 'calls': [], 'callCount': 0, 'classes': {name: 0 for name in CLASSES}, 'errors': 0,
+            'replies': []}
+
+
+def add_tokens(turn, delta, at):
+    """Add token counts to a turn and to its five-minute bucket, so long turns are spread over time."""
+    for key, value in delta.items():
+        turn['tokens'][key] += value
+    fresh = sum(value for key, value in delta.items() if key != 'cacheRead')
+    if fresh and at:
+        bucket = str(int(at // BUCKET_SECONDS * BUCKET_SECONDS))
+        turn['buckets'][bucket] = turn['buckets'].get(bucket, 0) + fresh
+        if len(turn['buckets']) > 600:
+            turn['buckets'].pop(min(turn['buckets'], key=int))
 
 
 class TurnParser:
@@ -165,17 +244,19 @@ class TurnParser:
         self.changed = {}
         self.pending_calls = {}
         self.usage_by_message = {}
+        self.message_turns = {}
         self.codex_total = None
+        self.task_events = False
 
     def touch(self, turn, at):
         if at:
             turn['lastAt'] = max(turn['lastAt'] or at, at)
         self.changed[turn['id']] = turn
 
-    def start(self, turn_id, at, from_studio=False):
+    def start(self, turn_id, at, from_studio=False, previous='aborted'):
         if self.current and self.current['status'] == 'open':
-            # A new prompt while the previous turn was still open means it was superseded.
-            self.finish('aborted', at)
+            # A new prompt while the previous turn was still open usually means it was superseded.
+            self.finish(previous, at)
         self.current = new_turn(self.session, turn_id, at, from_studio)
         self.pending_calls = {}
         self.touch(self.current, at)
@@ -200,13 +281,15 @@ class TurnParser:
         turn['callCount'] += 1
         turn['classes'][meta['cls']] += 1
         if len(turn['calls']) < CALL_LIMIT:
-            turn['calls'].append({**meta, 'seq': turn['callCount'], 'at': at, 'error': False})
+            turn['calls'].append({**meta, 'seq': turn['callCount'], 'at': at, 'error': False, 'open': True})
             if call_id:
                 self.pending_calls[call_id] = turn['calls'][-1]
         self.touch(turn, at)
 
     def mark_result(self, call_id, failed, at):
         call = self.pending_calls.pop(call_id, None)
+        if call is not None:
+            call['open'] = False
         if call is not None and failed and not call['error']:
             call['error'] = True
             self.current['errors'] += 1
@@ -215,7 +298,8 @@ class TurnParser:
 
     def add_reply(self, text, at):
         normalized = ' '.join(text.lower().split())
-        if not normalized:
+        # Short stock replies ("Done.") repeat legitimately and say nothing about loops.
+        if len(normalized) < REPLY_MINIMUM:
             return
         turn = self.ensure(at)
         turn['replies'] = (turn['replies'] + [digest(normalized)])[-10:]
@@ -244,21 +328,31 @@ class TurnParser:
             texts = [b.get('text') for b in blocks if isinstance(b, dict) and b.get('type') == 'text' and isinstance(b.get('text'), str)]
             if texts and not results:
                 prompt = '\n'.join(texts).lstrip()
+                if prompt.startswith(NON_PROMPTS) or row.get('isCompactSummary'):
+                    return
                 self.start(row.get('uuid') or digest(self.session + str(at) + prompt), at, studio_prompt(prompt))
             return
-        turn = self.ensure(at)
         usage = message.get('usage') if isinstance(message.get('usage'), dict) else {}
         mid = message.get('id') or row.get('requestId') or row.get('uuid')
+        # Later rows of a message that already ended its turn belong to that turn, not a new one.
+        turn = self.message_turns.get(mid) if mid else None
+        if turn is None or turn is not self.current and self.current and self.current['status'] == 'open':
+            turn = self.ensure(at)
+        if mid:
+            self.message_turns[mid] = turn
+            if len(self.message_turns) > 50:
+                self.message_turns.pop(next(iter(self.message_turns)))
         fields = (('input_tokens', 'input'), ('output_tokens', 'output'),
                   ('cache_read_input_tokens', 'cacheRead'), ('cache_creation_input_tokens', 'cacheWrite'))
         # Streaming repeats a message's usage; only increases are counted.
         old = self.usage_by_message.get(mid, {})
-        new = {}
+        new, delta = {}, {}
         for source, target in fields:
             value = usage.get(source)
             if type(value) is int and value >= 0:
                 new[target] = max(value, old.get(target, 0))
-                turn['tokens'][target] += new[target] - old.get(target, 0)
+                delta[target] = new[target] - old.get(target, 0)
+        add_tokens(turn, delta, at)
         if mid:
             self.usage_by_message[mid] = {**old, **new}
             if len(self.usage_by_message) > 2000:
@@ -272,10 +366,10 @@ class TurnParser:
                 self.add_call(call_metadata(block.get('name') or 'tool', block.get('input')), block.get('id'), at)
                 if block.get('id') and turn['calls']:
                     turn['calls'][-1]['callId'] = block['id']
-            elif block.get('type') == 'text' and isinstance(block.get('text'), str):
+            elif block.get('type') == 'text' and isinstance(block.get('text'), str) and turn is self.current:
                 self.add_reply(block['text'], at)
         self.touch(turn, at)
-        if message.get('stop_reason') == 'end_turn':
+        if message.get('stop_reason') == 'end_turn' and turn is self.current:
             self.finish('completed', at)
 
     def feed_codex(self, row):
@@ -284,6 +378,7 @@ class TurnParser:
         kind, item = row.get('type'), payload.get('type')
         if kind == 'event_msg':
             if item == 'task_started':
+                self.task_events = True
                 self.start(payload.get('turn_id') or digest(self.session + str(at)), at)
             elif item == 'task_complete':
                 self.finish('completed', at)
@@ -309,12 +404,12 @@ class TurnParser:
             parts = payload.get('content') if isinstance(payload.get('content'), list) else []
             text = '\n'.join(c.get('text', '') for c in parts if isinstance(c, dict) and isinstance(c.get('text'), str))
             self.add_reply(text, at)
-        elif item == 'message' and payload.get('role') == 'user' and (not self.current or self.current['status'] != 'open'):
+        elif item == 'message' and payload.get('role') == 'user' and not self.task_events:
             parts = payload.get('content') if isinstance(payload.get('content'), list) else []
             text = '\n'.join(c.get('text', '') for c in parts if isinstance(c, dict) and isinstance(c.get('text'), str)).lstrip()
-            # Older rollouts have no task events; a user prompt opens the turn.
-            if text and not text.startswith('<environment_context>'):
-                self.start(digest(self.session + str(at) + text[:200]), at, studio_prompt(text))
+            # Older rollouts have no task events; each user prompt closes the previous turn and opens the next.
+            if text and not text.startswith(('<environment_context>', '<user_instructions>')):
+                self.start(digest(self.session + str(at) + text[:200]), at, studio_prompt(text), previous='completed')
 
     def codex_tokens(self, info, at):
         info = info if isinstance(info, dict) else {}
@@ -327,8 +422,9 @@ class TurnParser:
             'output': int(total.get('output_tokens') or 0),
         }
         previous, self.codex_total = self.codex_total, values
-        if previous is None:
-            # The first total after a tail seek includes earlier turns; count only the last call.
+        if previous is None or any(values[key] < previous[key] for key in values):
+            # The first total after a tail seek includes earlier turns, and a total that went
+            # down means the session restarted; either way count only the last call.
             last = info.get('last_token_usage') if isinstance(info.get('last_token_usage'), dict) else {}
             delta = {
                 'input': max(0, int(last.get('input_tokens') or 0) - int(last.get('cached_input_tokens') or 0)),
@@ -340,9 +436,24 @@ class TurnParser:
         if not any(delta.values()):
             return
         turn = self.ensure(at)
-        for key, value in delta.items():
-            turn['tokens'][key] += value
+        add_tokens(turn, delta, at)
         self.touch(turn, at)
+
+    def state(self):
+        """Serializable parser state so a restart resumes instead of re-reading the tail."""
+        current = deepcopy(self.current)
+        return {'current': current, 'pending': [c['seq'] for c in (self.current or {}).get('calls', []) if c.get('open')],
+                'pendingIds': {key: call['seq'] for key, call in self.pending_calls.items()},
+                'usage': dict(list(self.usage_by_message.items())[-200:]), 'codexTotal': self.codex_total,
+                'taskEvents': self.task_events}
+
+    def restore(self, saved):
+        self.current = saved.get('current')
+        self.usage_by_message = saved.get('usage') or {}
+        self.codex_total = saved.get('codexTotal')
+        self.task_events = saved.get('taskEvents', False)
+        calls = {c['seq']: c for c in (self.current or {}).get('calls', [])}
+        self.pending_calls = {key: calls[seq] for key, seq in (saved.get('pendingIds') or {}).items() if seq in calls}
 
     def drain(self):
         changed = [deepcopy(turn) for turn in self.changed.values()]
@@ -360,9 +471,15 @@ def total_tokens(turn):
 class TranscriptFollower:
     """Follows one transcript file, reading only appended complete records."""
 
-    def __init__(self, path, session, backend):
+    def __init__(self, path, session, backend, saved=None):
         self.path, self.offset = Path(path), None
         self.parser = TurnParser(session, backend)
+        if saved and saved.get('path') == str(path):
+            self.offset = saved['offset']
+            self.parser.restore(saved['parser'])
+
+    def state(self):
+        return {'path': str(self.path), 'offset': self.offset, 'parser': self.parser.state()}
 
     def read(self):
         size = self.path.stat().st_size
@@ -405,6 +522,7 @@ class Telemetry:
                     started REAL, last REAL, status TEXT, data TEXT NOT NULL,
                     PRIMARY KEY(session, id));
                 CREATE INDEX IF NOT EXISTS turns_agent ON turns(fleet, agent, last);
+                CREATE TABLE IF NOT EXISTS telemetry_offsets (follower TEXT PRIMARY KEY, data TEXT NOT NULL);
             ''')
 
     def connect(self):
@@ -432,22 +550,37 @@ class Telemetry:
                         continue
                     follower = self.followers.get(key)
                     if follower is None or follower.path != Path(path):
-                        follower = self.followers[key] = TranscriptFollower(path, key[2], agent.get('backend', 'codex'))
-                    self.store(fleet['id'], agent['id'], follower.read())
+                        follower = self.followers[key] = TranscriptFollower(path, key[2], agent.get('backend', 'codex'), self.saved(key))
+                    before = follower.offset
+                    turns = follower.read()
+                    self.store(fleet['id'], agent['id'], turns, key if follower.offset != before else None, follower)
                     self.errors.pop(key, None)
                 except (OSError, sqlite3.Error) as exc:
                     self.errors[key] = str(exc)
         for key in set(self.followers) - seen:
             self.followers.pop(key)
 
-    def store(self, fleet_id, agent_id, turns):
-        if not turns:
+    def saved(self, key):
+        with self.lock, closing(self.connect()) as db:
+            row = db.execute('SELECT data FROM telemetry_offsets WHERE follower=?', (json.dumps(key),)).fetchone()
+        return json.loads(row['data']) if row else None
+
+    def covered(self, fleet_id, agent):
+        """Whether Studio is reading this agent's transcript."""
+        return (fleet_id, agent['id'], session_key(agent)) in self.followers
+
+    def store(self, fleet_id, agent_id, turns, key=None, follower=None):
+        if not turns and key is None:
             return
         with self.lock, closing(self.connect()) as db, db:
             for turn in turns:
                 db.execute('INSERT OR REPLACE INTO turns VALUES(?,?,?,?,?,?,?,?)',
                            (turn['session'], turn['id'], fleet_id, agent_id, turn['startedAt'], turn['lastAt'],
                             turn['status'], json.dumps(turn, separators=(',', ':'))))
+            # Turns and the read position commit together, so a restart neither skips nor repeats records.
+            if key is not None:
+                db.execute('INSERT OR REPLACE INTO telemetry_offsets VALUES(?,?)',
+                           (json.dumps(key), json.dumps(follower.state(), separators=(',', ':'))))
 
     def turns(self, fleet_id, agent_id=None, since=0, limit=200):
         query = 'SELECT agent, data FROM turns WHERE fleet=? AND last>=?'

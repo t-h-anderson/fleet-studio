@@ -367,7 +367,10 @@ class Progress:
                     if handoff.get('receivedAt') or handoff.get('status') != 'queued' or not handoff.get('targetAgentId'):
                         continue
                     turns = telemetry.turns(fleet['id'], handoff['targetAgentId'], since=handoff['createdAt'], limit=20)
-                    started = min((t['startedAt'] for t in turns if (t.get('startedAt') or 0) >= handoff['createdAt']), default=None)
+                    # Only a Studio-delivered prompt on the recipient's own session shows the hand-off was read.
+                    session = session_key({'sessionId': handoff.get('targetSessionId', ''), **(handoff.get('targetRuntime') or {})})
+                    started = min((t['startedAt'] for t in turns if (t.get('startedAt') or 0) >= handoff['createdAt']
+                                   and t.get('fromStudio') and not t.get('partial') and t.get('session') == session), default=None)
                     if started is None:
                         continue
                     handoff.update(receivedAt=started, receiptSource='observed-turn')

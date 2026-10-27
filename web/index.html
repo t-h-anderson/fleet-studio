@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Fleet Studio</title><link rel="icon" href="/icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/app.css"><script src="/layout.js" defer></script><script src="/app.js" defer></script><script src="/roles.js" defer></script><script src="/backlog.js" defer></script><script src="/activity.js" defer></script><script src="/workflow.js" defer></script><script src="/metrics.js" defer></script><script src="/progress.js" defer></script><script src="/reconciliation.js" defer></script><script src="/goals.js" defer></script>
+<link rel="stylesheet" href="/app.css"><script src="/layout.js" defer></script><script src="/app.js" defer></script><script src="/roles.js" defer></script><script src="/backlog.js" defer></script><script src="/activity.js" defer></script><script src="/workflow.js" defer></script><script src="/metrics.js" defer></script><script src="/progress.js" defer></script><script src="/reconciliation.js" defer></script><script src="/goals.js" defer></script><script src="/health.js" defer></script><script src="/automation.js" defer></script>
 </head>
 <body>
 <div class="app-shell">
@@ -11,12 +11,17 @@
   <a class="brand" href="/" aria-label="Fleet Studio home"><img src="/icon.svg" alt=""><span>fleet<span class="brand-light">studio</span></span></a>
   <div class="sidebar-label">WORKSPACE <span class="local-mini">LOCAL</span></div>
   <nav class="primary-nav" aria-label="Views">
+    <button class="nav-item" data-view="health" id="nav-health"><span data-icon="agents"></span>Agent health</button>
+    <button class="nav-item" data-view="automation" id="nav-automation"><span data-icon="refresh"></span>Automations</button>
+    <button class="nav-item" data-view="throughput" id="nav-throughput"><span data-icon="activity"></span>Throughput</button>
     <button class="nav-item" data-view="progress" id="nav-progress"><span data-icon="activity"></span>Progress</button>
-    <button class="nav-item active" data-view="roster" id="nav-roster"><span data-icon="grid"></span>Fleet overview</button>
+    <div class="nav-group">DESIGN</div>
     <button class="nav-item" data-view="board" id="nav-board"><span data-icon="nodes"></span>Design board</button>
-    <button class="nav-item" data-view="workflow" id="nav-workflow"><span data-icon="nodes"></span>Workflow</button>
     <button class="nav-item" data-view="roles" id="nav-roles"><span data-icon="agents"></span>Roles</button>
+    <button class="nav-item" data-view="workflow" id="nav-workflow"><span data-icon="nodes"></span>Workflow</button>
     <button class="nav-item" data-view="triggers" id="nav-triggers"><span data-icon="activity"></span>Triggers &amp; actions</button>
+    <div class="nav-group">SETUP</div>
+    <button class="nav-item active" data-view="roster" id="nav-roster"><span data-icon="grid"></span>Fleet overview</button>
     <button class="nav-item" data-view="backlog" id="nav-backlog"><span data-icon="folder"></span>Backlog</button>
     <button class="nav-item" data-view="activity" id="nav-activity"><span data-icon="activity"></span>Agent activity</button>
     <button class="nav-item" data-view="sessions" id="nav-sessions"><span data-icon="terminal"></span>Session library</button>

@@ -13,8 +13,8 @@ function uid(){return crypto.randomUUID();}
 function clone(value){return structuredClone(value);}
 const labels={working:'Working',idle:'Open & idle',closed:'Closed',attention:'Needs attention',unknown:'Unknown',draft:'Not linked'};
 let state=null,token='',monitor={sessions:{},events:[],jobs:[]},catalogue=[];
-let activeId=localStorage.getItem('fleet-active')||'',view=localStorage.getItem('fleet-view')||'progress';
-if(!['roster','board','sessions','roles','triggers','backlog','activity','workflow','progress'].includes(view))view='progress';
+let activeId=localStorage.getItem('fleet-active')||'',view=localStorage.getItem('fleet-view')||'health';
+if(!['roster','board','sessions','roles','triggers','backlog','activity','workflow','progress','health','automation','throughput'].includes(view))view='health';
 let query='',filter='all',selected=new Set(),editing=null,zoom=1,drag=null,pendingJob=null,stopped=false,saveQueue=Promise.resolve();
 function current(){return state.fleets.find((f)=>f.id===activeId)||state.fleets[0];}
 function sessionKey(a){const sid=a.sessionId??a.id??'',host=a.hostId||'local',backend=a.backend||'codex';return host==='local'&&backend==='codex'?sid:[host,backend,sid].join(':');}

@@ -7,6 +7,94 @@ receipts. Monitor Codex CLI or Claude Code sessions on this computer or remote
 machines running a fleet node. Managed workflow deployment currently supports
 local agents; remote assignment delivery is still pending.
 
+Studio is built around three ideas:
+
+- **Agents pursue goals, not process.** Each role has a goal, success criteria
+  and a done condition. Each agent gets a brief of about 300 words with only
+  its own goal, scope and hand-offs. Agents report only *done*, *blocked* and
+  *hand-off*.
+- **Studio observes instead of asking.** Turn telemetry shows what each agent
+  is doing, and health detectors flag agents that are looping, stalled,
+  admin-heavy or burning tokens.
+- **Recovery is automatic and self-limiting.** Automations reprompt with
+  evidence, hand work to a healthy agent, pause or escalate, then stop after a
+  limit. Throttles cap concurrency and token spend.
+
+## Agent health, automations and throughput
+
+**Agent health** is the default view. Each agent shows:
+
+- its state, how long it has been in that state, and why;
+- fresh tokens per hour;
+- its call mix (work, explore, admin, waiting);
+- estimated waste.
+
+Expand a row to see the recent turns and their tool calls. **Nudge** sends a
+message now. **Tweak role** opens the role's goal and brief.
+
+| State | Detected when (defaults, per fleet `health` settings) |
+| --- | --- |
+| Looping | Any one of: the same failing command runs 4+ times within an hour; a 1–4 step cycle repeats; the same reply is given in 3 of the last 6 turns; or 3 Studio prompts in a row produced no work |
+| Stalled | Idle for 20+ minutes with assigned open work, or a working turn with no new calls or tokens for 10+ minutes |
+| Admin-heavy | 40%+ of recent tool calls are reporting, polling or tracker admin |
+| Burning | 400k+ fresh tokens in an hour without any edit, build or test |
+| Waiting | A blocked report or tracker blocker is in force (it stays until cleared) |
+
+**Telemetry.** Studio parses every turn in local Codex rollouts and Claude Code
+transcripts. For each tool call it keeps:
+
+- the tool name;
+- a short signature: the first line of the command, or a file path or
+  pattern, up to 160 characters;
+- a class;
+- an error flag.
+
+It also keeps token components and hashes of replies. Tool outputs, file
+contents, reasoning and message text are **not** stored. Remote agents keep
+their transcripts on their node, so they show session status only.
+
+**Automations** act on health signals, and changes apply on the next check
+without a deployment. Each rule has these parts:
+
+- the role to watch;
+- the signal and how long it must last;
+- an action: reprompt with evidence, hand off to a healthy agent, stop a
+  Studio-started turn, pause, or escalate;
+- a cooldown;
+- a limit on how often it may fire per agent in a rolling window;
+- one fallback action once that limit is reached.
+
+**Add recommended** creates rules for loops, stalls, admin-heavy agents and
+token burn. **Backtest** replays recorded health history to show how often a
+rule would have acted. Each automatic action records its outcome: recovered,
+changed or no change.
+
+**Throttles** set a maximum number of working agents and token budgets per
+hour, for the whole fleet and per role. They apply to every automatic send.
+Throttled time is recorded. Escalations appear in Progress and can be posted
+to a Slack-compatible webhook.
+
+**Throughput** shows:
+
+- tickets closed;
+- fresh tokens;
+- estimated waste by cause (repeated steps, admin, polling, abandoned turns,
+  unproductive reprompts);
+- tokens per closed ticket;
+- throttled time;
+- which automations helped;
+- a per-role table of stuck agents, queues, tokens and call mix.
+
+The **Design board** marks roles with stuck agents and colours each agent chip
+by health.
+
+Automatic delivery no longer waits for adoption acknowledgements.
+
+- **Codex:** messages are queued while the session is open.
+- **Claude Code:** a closed session receives an automatic headless turn. Studio
+  still never starts a turn while one is running or while a native client
+  holds the session.
+
 ## Start
 
 Requires Python 3.11+ and the CLI for each agent backend you use (Codex CLI,
@@ -71,8 +159,8 @@ and macOS can monitor transcripts, but Studio refuses headless sends and termina
 launches when ownership cannot be established. Unknown ownership is never treated
 as idle, and old unfinished turns are not inferred to have completed.
 
-Claude assignments must be loaded explicitly with `workflow_client.py instructions`
-at safe task boundaries and acknowledged by the agent. Automatic entry-point
+Claude agents read their brief with `workflow_client.py instructions` once per
+session; Studio tells them when it changes. Automatic entry-point
 installation currently creates Codex's `AGENTS.override.md` and rejects Claude
 bindings; Claude does not automatically consume that file.
 
@@ -325,27 +413,28 @@ source restrictions, task ownership and explicit stops remain applicable.
 
 ## Agent reports
 
-Record substantive evidence in the tracker, then report meaningful boundaries:
+Agents report only what Studio cannot observe:
 
-```powershell
-python fleet_progress.py --fleet <fleet-id> --agent <agent-id> --release <release-id> --id ticket-123-start --kind task-started --task https://gitlab.example/team/project/-/issues/123 --evidence https://gitlab.example/team/project/-/issues/123#note_456 --summary "Started the assigned change"
+```shell
+python workflow_client.py report done --fleet <fleet-id> --agent <agent-id> --ticket <ticket-url> --note "What changed and where"
+python workflow_client.py report blocked --fleet <fleet-id> --agent <agent-id> --note "What I need, and from whom"
+python workflow_client.py report handoff --fleet <fleet-id> --agent <agent-id> --to Integrator --note "What to pick up"
 ```
 
-Supported kinds: `task-started`, `progress-updated`, `blocked`, `unblocked`,
-`handoff-received`, `work-finished`. Blocked reports require `--reason` and
-`--next-action`. A receipt requires `--handoff <delivery-action-id>` and must
-match the original recipient and task. `--depends-on` adds an explicit dependency
-link. Use `--data-root` when Studio stores its runtime elsewhere.
+Studio fills in the agent's identity, release, current ticket and event IDs.
 
-Reuse the same event ID and identical details when retrying. Reports are
-idempotent across restarts and history retention. A work-finished report does
-not close the tracker task. Receipt does not grant technical acceptance.
-If Studio is unavailable, maintain the tracker record and retry at the next
-safe boundary; reporting does not require an agent polling loop.
+- **Blocked** stays in force until the agent reports done or hand-off, so it is
+  never repeated.
+- **Hand-off** first looks for an enabled event trigger from the agent's role.
+  Otherwise it goes directly to the healthiest agent in the named role, or to
+  the named agent.
+- **Receipts** are observed: a hand-off counts as received when the recipient
+  starts its next turn.
+- **Done and blocked** reports are also recorded as tracker-linked milestones
+  when a release and ticket exist.
 
-Formal handoff dispatch continues through `fleet_event.py`. Progress reporting
-never dispatches instructions. Newly deployed policies with ID
-`progress-reporting` include reporting guidance in generated agent instructions.
+`fleet_progress.py` and `fleet_event.py` remain available for existing scripts
+and typed assignment contracts.
 
 ## Local API and storage
 
@@ -436,12 +525,12 @@ availability checks. It neither creates a receipt nor repeats technical review.
 python -B -m unittest discover -s tests -p 'test_*.py'
 npm ci --ignore-scripts
 npm run test:layout
-npm run test:ui
+FLEET_PYTHON=python3 npm run test:ui
 python -B workflow_spec.py workflows/sample.workflow.json --output workflows/SAMPLE_WORKFLOW.md --check
 ```
 
-Browser tests use Playwright with installed Microsoft Edge (remove the
-`channel` option to use bundled Chromium elsewhere) and create synthetic
+Browser tests use Playwright's Chromium; set `FLEET_BROWSER_CHANNEL=msedge` to
+use installed Microsoft Edge. They create synthetic
 fleets in temporary directories. Real agent launches/controls and live tracker
 reads are disabled. Backend tests mock native sends. Screenshots and generated
 test results are local artifacts and are not committed.

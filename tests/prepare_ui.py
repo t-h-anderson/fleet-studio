@@ -51,3 +51,31 @@ issues=[{'iid':101,'title':'Confirm the input contract','state':'opened','labels
         {'iid':102,'title':'Deliver reviewed helper','state':'closed','labels':[],'updated_at':'2026-10-13T12:00:00Z','assignees':[]}]
 (root/'issues.json').write_text(json.dumps(issues),encoding='utf-8')
 (root/'fixture.json').write_text(json.dumps({'fleetId':f['id'],'writerId':writer['id'],'integratorId':integrator['id'],'payload':payload}),encoding='utf-8')
+# Synthetic turn telemetry: the writer repeats a failing test, the integrator mostly reports.
+from studio_automation import PRESETS
+from studio_telemetry import call_metadata
+def turn(agent, at, calls, tokens, started=None):
+    classes = {k: 0 for k in ('work', 'explore', 'admin', 'wait', 'other')}
+    for c in calls:
+        classes[c['cls']] += 1
+    return {'id': agent['id'][:8] + str(int(at)), 'session': agent['sessionId'], 'startedAt': started or at - 120, 'lastAt': at, 'status': 'completed',
+            'fromStudio': False, 'tokens': {'input': tokens, 'output': tokens // 10, 'cacheRead': tokens * 4, 'cacheWrite': 0},
+            'calls': calls, 'callCount': len(calls), 'classes': classes, 'errors': sum(c['error'] for c in calls), 'replies': []}
+def call(tool, arguments, at, error=False):
+    return {**call_metadata(tool, arguments), 'at': at, 'error': error, 'seq': 0}
+coordinator = f['agents'][0]
+looping = [call('Bash', {'command': 'pytest tests/test_contract.py'}, now - 900 + i * 60, error=True) for i in range(6)]
+app.telemetry.store(f['id'], writer['id'], [turn(writer, now - 600, [call('Read', {'file_path': 'src/contract.py'}, now - 1000)] + looping, 42000)])
+admin = [call('Bash', {'command': 'python fleet_progress.py --kind progress-updated --id x' + str(i)}, now - 1500 + i * 30) for i in range(7)]
+admin += [call('Bash', {'command': 'glab issue note 101 -m "still checking"'}, now - 1200), call('Edit', {'file_path': 'docs/merge.md'}, now - 1100)]
+# This turn began before the synthetic handoff, so it is not an observed receipt.
+app.telemetry.store(f['id'], integrator['id'], [turn(integrator, now - 900, admin, 18000, started=now - 5000)])
+work = [call('Edit', {'file_path': 'plan/q4.md'}, now - 200), call('Bash', {'command': 'git commit -m "Plan"'}, now - 150)]
+app.telemetry.store(f['id'], coordinator['id'], [turn(coordinator, now - 120, work, 9000)])
+state = app.store.snapshot()
+state['fleets'][0]['automations'] = [{**p, 'id': str(uuid.uuid4()), 'enabled': False} for p in PRESETS]
+app.store.save(state)
+app.automation.data['fires'].append({'id': 'synthetic-fire', 'fleetId': f['id'], 'ruleId': 'synthetic', 'ruleName': 'Break loops',
+    'agentId': writer['id'], 'agentName': writer['name'], 'action': 'reprompt', 'fallback': False, 'at': now - 3000, 'episode': now - 3100,
+    'healthState': 'looping', 'evidence': 'Ran `pytest` 4 times, failing each time.', 'status': 'sent', 'detail': 'Queued.', 'outcome': 'recovered'})
+app.automation.persist()

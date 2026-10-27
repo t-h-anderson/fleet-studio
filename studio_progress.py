@@ -488,9 +488,10 @@ class Progress:
         for e in self.app.automation.snapshot(fleet_id)['escalations']:
             attention.append({'kind': 'escalation', 'agentId': e['agentId'], 'at': e['at'], 'escalationId': e['id'],
                               'message': e['agentName'] + ' · ' + e['ruleName'] + ': ' + e['message']})
+        # Acknowledgements are optional, so only a binding that no longer matches the release needs attention.
         for a in deployment['adoption']:
-            if a['required'] and (not a['acknowledged'] or not a['bindingMatches'] or a['entryPoint'] != 'installed'):
-                attention.append({'kind':'adoption','agentId':a['agentId'],'at':None,'message':'Workflow adoption needs attention: ' + a['name']})
+            if a['required'] and not a['bindingMatches']:
+                attention.append({'kind':'adoption','agentId':a['agentId'],'at':None,'message':'Agent binding differs from the deployed workflow: ' + a['name']})
         completed = [(r['at'], json.loads(r['data'])) for r in changes]
         completed = [(at,d) for at,d in completed if d.get('closed') and d.get('sourceKey') == source]
         roles = []

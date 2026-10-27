@@ -1,5 +1,32 @@
 # Review and roadmap
 
+## 2026-10 overhaul: goal-first agents, observed health, automatic recovery
+
+Agents were burning tokens on process. Each one received 2–3.5k tokens of
+rules, and up to three reports, receipts and acknowledgements were needed per
+milestone. Agents were told to re-read their instructions at every boundary,
+and blocked reports had to be renewed every 180 seconds. Meanwhile nothing
+detected loops or stalls, and stuck agents were never reprompted. This
+overhaul changes that:
+
+- **Telemetry and health.** See *Agent health, automations and throughput* in
+  the README.
+- **Self-limiting automations and throttles**, which run from the draft.
+- **Workflow schema v2.** Roles have a goal, success criteria and a done
+  condition. Each agent's brief is about 300 words. There is a single `report`
+  command, and receipts are observed. v1 specs and releases still validate,
+  with unchanged digests.
+- **Adoption acknowledgements no longer gate automation.**
+
+Next steps:
+
+- Per-turn ticket attribution, so tokens per ticket can be measured rather
+  than estimated.
+- Remote telemetry from fleet nodes.
+- Cycle-time p50/p90 by role from tracker history.
+- An optional LLM summary of a stuck agent's last turns to include in
+  hand-offs.
+
 A review of Fleet Studio against six goals: multiple agent backends, local and
 remote agents, GitHub and GitLab, workflow specification, review, and monitoring.
 Part 1 records what this change generalised. Part 2 lists the defects found. Part 3

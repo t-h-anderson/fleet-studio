@@ -3,7 +3,12 @@
 const healthCache=new Map(),automationCache=new Map(),turnCache=new Map(),rulesCache=new Map();
 let healthExpanded='';
 const HEALTH_LABELS={looping:'Looping',burning:'Burning tokens',stalled:'Stalled','admin-heavy':'Admin-heavy',waiting:'Waiting',productive:'Productive',idle:'Idle',offline:'Offline','no-telemetry':'No telemetry',unknown:'Not observed yet'};
-let healthSignature='';
+let healthSignature='',healthSort='problems';
+// Thresholds behind each kind of signal, so the operator can see why it fired and tune it.
+const THRESHOLD_HINTS={'silent-turn':s=>'threshold '+s.silentMinutes+' min','idle-with-work':s=>'threshold '+s.stallMinutes+' min',
+ 'failing-repeat':s=>'threshold '+s.loopRepeats+' runs',repeat:s=>'threshold '+(s.loopRepeats+2)+' runs',cycle:s=>'threshold '+s.loopRepeats+' cycles',
+ 'no-progress':s=>'threshold '+s.noProgressFailures+' failures over '+s.noProgressMinutes+' min',admin:s=>'threshold '+Math.round(s.adminShare*100)+'%',
+ burn:s=>'threshold '+tokenCount(s.burnTokensPerHour)+'/h'};
 const HEALTH_PROBLEMS=['looping','burning','stalled','admin-heavy'];
 const CALL_CLASSES=['work','explore','admin','wait','other'];
 
@@ -47,7 +52,7 @@ async function loadHealth(){
   if(fid!==activeId)return;
   if(view==='throughput'&&typeof loadProgress==='function')loadProgress();
   // Never redraw under someone typing, and redraw the board only when a health state changed.
-  if(typingInContent())return;
+  if(editingContent())return;
   const signature=fid+JSON.stringify(health.agents.map(a=>[a.agentId,a.health?.state]));
   if(['health','automation','throughput'].includes(view))renderContent();
   else if(view==='board'&&!drag&&!roleDrag&&signature!==healthSignature)renderContent();
@@ -75,38 +80,66 @@ function turnTimeline(agentId){
 function healthRow(row){
  const a=current().agents.find(x=>x.id===row.agentId),h=row.health,paused=automationData().paused.find(p=>p.agentId===row.agentId);
  if(!a)return '';
- const role=current().roles.find(r=>(a.roleIds||[]).includes(r.id));
- const signal=h?.signals?.[0];
+ const roles=current().roles.filter(r=>(a.roleIds||[]).includes(r.id)),role=roles[0];
+ const signal=h?.signals?.[0],settings=healthCache.get(activeId)?.settings,hint=signal&&settings&&THRESHOLD_HINTS[signal.kind]?' ('+THRESHOLD_HINTS[signal.kind](settings)+')':'';
  const expanded=healthExpanded===a.id;
- return '<tr class="health-row'+(h&&HEALTH_PROBLEMS.includes(h.state)?' is-stuck':'')+'"><td><button class="agent-name" data-health-expand="'+a.id+'" aria-expanded="'+expanded+'">'+esc(a.name)+'</button><div class="agent-folder">'+esc(role?.name||displayedRole(a))+' · '+esc(runtimeLabel(a))+'</div></td>'+
+ return '<tr class="health-row'+(h&&HEALTH_PROBLEMS.includes(h.state)?' is-stuck':'')+'"><td><button class="agent-name" data-health-expand="'+a.id+'" aria-expanded="'+expanded+'">'+esc(a.name)+'</button><div class="agent-folder">'+esc(role?.name||displayedRole(a))+' · '+esc(runtimeLabel(a))+'</div>'+(row.briefStale?'<span class="stage-tag" title="This agent\'s role, scope or session changed since the last deploy">Brief out of date</span>':'')+'</td>'+
   '<td>'+healthBadge(h)+(h?'<small>'+sinceLabel(h.since)+'</small>':'')+(paused?'<small>Paused until '+new Date(paused.until*1000).toLocaleTimeString()+'</small>':'')+'</td>'+
-  '<td class="health-evidence">'+esc(signal?.message||h?.polling||(h?.state==='no-telemetry'?'Studio cannot read this agent\'s transcript (remote, or no linked session); only session status is shown.':h?'—':'Waiting for the first observation'))+'</td>'+
+  '<td class="health-evidence">'+esc((signal?.message?signal.message+hint:'')||h?.polling||(h?.state==='no-telemetry'?'Studio cannot read this agent\'s transcript (remote, or no linked session); only session status is shown.':h?'—':'Waiting for the first observation'))+'</td>'+
   '<td>'+tokenCount(h?.tokensLastHour)+'<small>'+tokenCount(h?.tokens24h)+' / 24h</small></td>'+
   '<td>'+mixBar(h?.classes24h)+'<small>'+(h?h.calls24h+' calls · '+h.errors24h+' failed':'')+'</small></td>'+
   '<td>'+(h?tokenCount(h.wasteTokens24h)+'<small>'+(h.tokens24h?Math.round(100*h.wasteTokens24h/h.tokens24h):0)+'% of 24h</small>':'—')+'</td>'+
   '<td><div class="row-actions">'+
    '<button class="button small" data-health-nudge="'+a.id+'" title="Send a message now" aria-label="Nudge '+esc(a.name)+'">Nudge</button>'+
-   (role?'<button class="button small" data-health-role="'+role.id+'" title="Edit the role goal and brief">Tweak role</button>':'')+
+   '<button class="button small" data-health-agent="'+a.id+'" title="Edit this agent\'s scope notes and roles">Edit scope</button>'+
+   roles.map(r=>'<button class="button small" data-health-role="'+r.id+'" title="Edit the '+esc(r.name)+' goal and brief">Tweak '+esc(roles.length>1?r.name:'role')+'</button>').join('')+
    (paused?'<button class="button small" data-health-resume="'+a.id+'">Resume</button>':'')+
    '<button class="icon-button" data-agent-activity="'+a.id+'" aria-label="Activity for '+esc(a.name)+'" title="Read agent activity">'+icon('activity')+'</button>'+
   '</div></td></tr>'+
   (expanded?'<tr class="health-detail"><td colspan="7">'+(h?.signals?.length>1?'<ul>'+h.signals.map(s=>'<li><strong>'+esc(HEALTH_LABELS[s.state]||s.state)+'</strong> '+esc(s.message)+'</li>').join('')+'</ul>':'')+turnTimeline(a.id)+'</td></tr>':'');
 }
+function setupChecklist(data){
+ const f=current(),status=data.deployment||{};
+ const steps=[
+  ['Add agents and link their sessions',f.agents.some(a=>a.sessionId),'roster'],
+  ['Give each role a goal',f.roles.length&&f.roles.every(r=>r.kind==='subagent'||r.goal),'roles'],
+  ['Deploy the workflow so agents get their brief',status.active&&!status.draftChanged,'workflow'],
+  ['Connect your tracker so dispatch can hand out tickets',!!f.backlog?.projectUrl,'backlog'],
+  ['Turn on recovery rules',(f.automations||[]).some(r=>r.enabled),'automation'],
+ ];
+ if(steps.every(s=>s[1]))return '';
+ return '<section class="setup-checklist"><h3>Get your fleet working</h3><ol>'+steps.map(([label,done,target])=>'<li class="'+(done?'done':'')+'">'+(done?'✓ ':'')+esc(label)+(done?'':' <button class="text-button" data-view-link="'+target+'">Open</button>')+'</li>').join('')+'</ol></section>';
+}
+function thresholdPanel(data){
+ const s=data.settings,p={quietMinutes:60,handoffMinutes:30,...(data.progressSettings||{})};
+ const fields=[['stallMinutes','Idle with open work, minutes'],['silentMinutes','Working turn with no activity, minutes'],['loopRepeats','Repeats that count as a loop'],
+  ['noProgressFailures','Failures before work counts as not converging'],['noProgressMinutes','…over at least, minutes'],['adminShare','Admin share of calls (0–1)'],
+  ['burnTokensPerHour','Tokens per hour without work']];
+ return '<details class="threshold-panel"><summary>Detection thresholds</summary><form id="threshold-form"><div class="form-row">'+
+  fields.map(([k,l])=>field(l,'h-'+k,s[k],'type="number" step="any" data-health-key="'+k+'"')).join('')+'</div>'+
+  '<p class="field-hint">Progress uses two older measures too: no report for '+field('Quiet after, minutes','p-quietMinutes',p.quietMinutes,'type="number"')+field('Hand-off overdue after, minutes','p-handoffMinutes',p.handoffMinutes,'type="number"')+'</p>'+
+  '<button class="button primary small" type="submit">Save thresholds</button></form></details>';
+}
 function renderHealth(){
  const data=healthCache.get(activeId);
  if(!data){$('content').innerHTML='<div class="empty-state"><span class="loading-ring"></span><h3>Reading agent health</h3><p>Combining session status with turn and tool-call telemetry.</p></div>';loadHealth();return;}
+ if(!current().agents.length){$('content').innerHTML=setupChecklist(data)+empty('No agents yet','Add an agent and link its Codex or Claude Code session; its health appears here as soon as it works.',true);return;}
  const needle=query.toLowerCase();
- const rows=data.agents.filter(r=>(r.name+' '+(r.health?.state||'')).toLowerCase().includes(needle))
-  .sort((x,y)=>(HEALTH_PROBLEMS.includes(y.health?.state)-HEALTH_PROBLEMS.includes(x.health?.state))||x.name.localeCompare(y.name));
+ const byProblem=(x,y)=>(HEALTH_PROBLEMS.includes(y.health?.state)-HEALTH_PROBLEMS.includes(x.health?.state))||x.name.localeCompare(y.name);
+ const byWaste=(x,y)=>(y.health?.wasteTokens24h||0)-(x.health?.wasteTokens24h||0);
+ const rows=data.agents.filter(r=>(r.name+' '+(r.health?.state||'')+' '+current().roles.filter(x=>r.roleIds.includes(x.id)).map(x=>x.name).join(' ')).toLowerCase().includes(needle))
+  .sort(healthSort==='waste'?byWaste:byProblem);
  const counts={};data.agents.forEach(r=>{const s=r.health?.state||'no-telemetry';counts[s]=(counts[s]||0)+1;});
  const auto=automationData();
  $('visible-count').textContent=rows.length;
  $('content').innerHTML=
+  setupChecklist(data)+
   (auto.escalations.length?'<div class="backlog-notice">'+auto.escalations.length+' escalation(s) need you. <button class="text-button" data-view-link="automation">Review</button></div>':'')+
   '<div class="health-summary">'+['looping','stalled','admin-heavy','burning','waiting','productive','idle','offline','no-telemetry'].map(s=>'<div class="health-tile health-'+s+'"><span>'+HEALTH_LABELS[s]+'</span><strong>'+(counts[s]||0)+'</strong></div>').join('')+'</div>'+
   '<div class="table-wrap"><table class="health-table"><thead><tr><th>AGENT</th><th>HEALTH</th><th>WHY</th><th>TOKENS / H</th><th>CALL MIX 24H</th><th>WASTE 24H</th><th></th></tr></thead><tbody>'+
   rows.map(healthRow).join('')+'</tbody></table></div>'+
-  '<p class="field-hint">Call mix: <span class="legend mix-work"></span>work <span class="legend mix-explore"></span>explore <span class="legend mix-admin"></span>admin <span class="legend mix-wait"></span>waiting <span class="legend mix-other"></span>other. Fresh tokens exclude cache reads. Waste is estimated from repeated, admin, polling and aborted calls.</p>';
+  thresholdPanel(data)+
+  '<p class="field-hint">'+(healthSort==='waste'?'Sorted by waste. <button class="text-button" id="health-sort-problems">Sort by problems</button> ':'')+'Call mix: <span class="legend mix-work"></span>work <span class="legend mix-explore"></span>explore <span class="legend mix-admin"></span>admin <span class="legend mix-wait"></span>waiting <span class="legend mix-other"></span>other. Fresh tokens exclude cache reads. Waste is estimated from repeated, admin, polling and aborted calls.</p>';
 }
 async function healthClick(e){
  if(!['health','automation','throughput'].includes(view))return;
@@ -118,20 +151,30 @@ async function healthClick(e){
    const h=agentHealth(b.dataset.healthNudge),evidence=h?.signals?.[0]?.message;
    await showControl('message',[b.dataset.healthNudge],'[Fleet Studio] '+(evidence?evidence+'\n\n':'')+'Step back, state the next concrete action toward your goal, and take it.');
   }
-  if(b.dataset.healthRole){setView('roles');openEditor('role',b.dataset.healthRole);}
+  // Tweaks open in place so the operator keeps the health context.
+  if(b.dataset.healthRole)openEditor('role',b.dataset.healthRole);
+  if(b.dataset.healthAgent)openEditor('agent',b.dataset.healthAgent);
+  if(b.id==='health-sort-problems'){healthSort='problems';renderHealth();}
   if(b.dataset.healthResume){await api('/api/automation/resume',{fleetId:activeId,agentId:b.dataset.healthResume});await loadHealth();toast('Automatic deliveries resumed.');}
  }catch(error){toast(error.message,true);}
 }
 $('content').addEventListener('click',healthClick);
+$('content').addEventListener('submit',async e=>{
+ if(e.target.id!=='threshold-form')return;
+ e.preventDefault();
+ const health={};document.querySelectorAll('[data-health-key]').forEach(n=>{health[n.dataset.healthKey]=Number(n.value);});
+ const quiet=Number($('f-p-quietMinutes').value),handoff=Number($('f-p-handoffMinutes').value);
+ try{await mutate(next=>updateFleet(next,f=>{f.health=health;f.progress={...(f.progress||{}),quietMinutes:quiet,handoffMinutes:handoff};}),'Thresholds saved; they apply from the next check.');await loadHealth();}
+ catch(error){toast(error.message,true);}
+});
 setInterval(()=>{if(state&&!stopped)loadHealth();},5000);
 
 const healthOriginalRenderContent=renderContent;
-function typingInContent(){return !!document.activeElement?.closest('#content input,#content textarea,#content select');}
 let renderForced=false;
 renderContent=function(){
  if(!state||drag)return;
  // Background refreshes must not redraw a form someone is typing in; navigation and saves (renderAll) still do.
- if(!renderForced&&['health','automation','throughput'].includes(view)&&typingInContent())return;
+ if(!renderForced&&['health','automation','throughput'].includes(view)&&editingContent())return;
  if(view==='health')return renderHealth();
  if(view==='automation')return renderAutomation();
  if(view==='throughput')return renderThroughput();

@@ -55,7 +55,7 @@ def number(value, name, low, high, default):
     return value
 
 
-def clean_automations(raw, role_ids):
+def clean_automations(raw, role_ids, agent_ids=None):
     raw = [] if raw is None else raw
     if not isinstance(raw, list) or len(raw) > 100:
         raise ValueError('A fleet can have at most 100 automations.')
@@ -77,6 +77,9 @@ def clean_automations(raw, role_ids):
         role = row.get('roleId', '')
         if role and role not in role_ids:
             raise ValueError('Automation roles must belong to this fleet.')
+        agent_id = row.get('agentId', '')
+        if agent_id and agent_ids is not None and agent_id not in agent_ids:
+            raise ValueError('An automation can only watch an agent in this fleet.')
         action, then = row.get('action'), row.get('thenAction', 'escalate')
         if action not in ACTIONS or then not in THEN_ACTIONS:
             raise ValueError('Choose a supported automation action.')
@@ -90,6 +93,7 @@ def clean_automations(raw, role_ids):
             raise ValueError('Invalid automation switches.')
         output.append({
             'id': rule_id, 'name': name.strip(), 'enabled': row.get('enabled', True), 'roleId': role,
+            **({'agentId': agent_id} if agent_id else {}),
             'when': {'signal': signal, 'forMinutes': number(when.get('forMinutes'), 'forMinutes', 0, 10080, 0)},
             'action': action, 'thenAction': then, 'message': message.strip(), 'handoffRoleId': handoff_role,
             'parkSource': row.get('parkSource', True),
@@ -281,6 +285,8 @@ class Automation:
                         if not agent['enabled'] or not agent.get('sessionId'):
                             continue
                         if rule['roleId'] and rule['roleId'] not in agent.get('roleIds', []):
+                            continue
+                        if rule.get('agentId') and rule['agentId'] != agent['id']:
                             continue
                         health = self.app.health.get(fleet['id'], agent['id'])
                         if not matches(rule, health) or now - health['since'] < rule['when']['forMinutes'] * 60:
@@ -654,6 +660,8 @@ class Automation:
         now = self.clock()
         with self.lock, self.hold_lock:
             fires = [f for f in self.data['fires'] if f['fleetId'] == fleet_id][-200:]
+            # Outcome figures cover the last day of delivered prompts and reassignments only.
+            judged = [f for f in fires if f['at'] >= now - 86400 and f['status'] == 'sent' and f['action'] in ('reprompt', 'handoff') and f['outcome']]
             throttled = [{'agentId': key.split(':', 1)[1], 'since': since} for key, since in self.data['throttled'].items() if key.startswith(fleet_id + ':')]
             day = [t for t in self.data['throttleLog'] if t['fleetId'] == fleet_id and t['end'] >= now - 86400]
             last = {}
@@ -667,8 +675,8 @@ class Automation:
                            if key.startswith(fleet_id + ':') and until > now],
                 'throttled': throttled,
                 'throttledSeconds24h': round(throttled_seconds),
-                'outcomes': {name: sum(f['outcome'] == name for f in fires) for name in ('recovered', 'changed', 'no-change')},
-                'delivered': sum(f['status'] == 'sent' and f['action'] in ('reprompt', 'handoff') for f in fires),
+                'outcomes': {name: sum(f['outcome'] == name for f in judged) for name in ('recovered', 'changed', 'no-change')},
+                'delivered': len(judged),
                 'lastFire': last,
                 'workflowPaused': self.app.deployments.data['paused'].get(fleet_id, False),
                 'presets': PRESETS,

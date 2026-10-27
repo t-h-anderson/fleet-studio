@@ -157,7 +157,7 @@ def validate_fleets(value, host_ids=()):
             backlog = clean_config(raw.get("backlog"), agent_ids, design.get("roleSource"))
             health = clean_health_settings(raw.get("health"))
             role_ids = {r["id"] for r in design["roles"]}
-            automations = clean_automations(raw.get("automations"), role_ids)
+            automations = clean_automations(raw.get("automations"), role_ids, agent_ids)
             throttles = clean_throttles(raw.get("throttles"), role_ids)
             alerts = clean_alerts(raw.get("alerts"))
             dispatch = clean_dispatch(raw.get("dispatch"), [s["id"] for s in (raw.get("workflow") or {}).get("states", [])])
@@ -578,6 +578,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/health/agents":
                 fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
                 return self.json(200, app.health.snapshot(fleet_id))
+            if path == "/api/flow":
+                fleet = app.store.fleet(parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0])
+                from studio_rules import flow
+                return self.json(200, flow(app, fleet))
             if path == "/api/rules":
                 fleet = app.store.fleet(parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0])
                 from studio_rules import list_rules, timeline
@@ -591,7 +595,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, app.backlog.snapshot(fleet_id))
             if path == "/api/sessions":
                 return self.json(200, {"sessions": app.catalogue()})
-            if path in ("/", "/app.js", "/roles.js", "/layout.js", "/backlog.js", "/activity.js", "/workflow.js", "/progress.js", "/metrics.js", "/reconciliation.js", "/goals.js", "/health.js", "/automation.js", "/app.css", "/icon.svg"):
+            if path in ("/", "/app.js", "/roles.js", "/layout.js", "/backlog.js", "/activity.js", "/workflow.js", "/progress.js", "/metrics.js", "/reconciliation.js", "/goals.js", "/health.js", "/automation.js", "/flow.js", "/app.css", "/icon.svg"):
                 name = "index.html" if path == "/" else path[1:]
                 mime = {".html": "text/html", ".js": "application/javascript",
                         ".css": "text/css", ".svg": "image/svg+xml"}[Path(name).suffix]

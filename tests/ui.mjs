@@ -269,6 +269,26 @@ try{
  await page.locator('#cancel-editor').click();
  assert.deepEqual(errors,[]);assert.equal((await bootstrap()).status.controls.length,0,'Tests must never send to agents');
  checks.push('Agent health shows loops and admin share with turn timelines; automations list, backtest and outcomes; throughput waste; stuck roles on the board; role goals editable');
+ // The session-picker check above left a synthetic host in client state; start from saved state.
+ await page.reload();await page.locator('#nav-health').click();await page.locator('.health-table').waitFor();
+ await page.locator('.threshold-panel summary').click();
+ await page.locator('#f-h-stallMinutes').fill('45');
+ await page.locator('#threshold-form button[type="submit"]').click();
+ await until(async()=>(await bootstrap()).state.fleets[0].health?.stallMinutes===45,'Thresholds were not saved');
+ await until(async()=>!(await page.locator('#deploy-banner').isHidden())&&(await page.locator('#deploy-banner').innerText()).includes('Undeployed changes'),'Undeployed banner missing');
+ assert.ok(await page.locator('#nav-workflow.has-badge').count(),'Workflow nav has no undeployed badge');
+ await page.locator('#nav-board').click();
+ await until(async()=>(await page.locator('[data-role-node] .live-stats').count())>0,'Live counts missing on the board');
+ assert.match(await page.locator('[data-role-node] .live-stats').first().innerText(),/waiting/);
+ assert.match(await page.locator('#live-edges').innerText(),/Hand-offs in flight/);
+ await page.locator('#nav-automation').click();
+ await until(async()=>/Routing[\s\S]*Dispatch[\s\S]*Timeline/.test(await page.locator('#content').innerText()),'Rules sections missing');
+ await until(async()=>!(await page.locator('#content').innerText()).includes('Loading…'),'Timeline did not load');
+ await page.locator('#nav-health').click();
+ await until(async()=>(await page.locator('.setup-checklist').count())>0,'Setup checklist missing');
+ assert.match(await page.locator('.setup-checklist').innerText(),/Deploy the workflow/);
+ assert.deepEqual(errors,[]);assert.equal((await bootstrap()).status.controls.length,0,'Tests must never send to agents');
+ checks.push('Thresholds save from Agent health; undeployed banner and badge; live counts on the board; Rules shows routing, dispatch and timeline; setup checklist');
  console.log(JSON.stringify({passed:true,checks},null,2));
 }finally{
  if(browser)await browser.close();

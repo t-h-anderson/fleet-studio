@@ -53,3 +53,48 @@ def timeline(app, fleet_id, limit=100):
                      'action': fire['action'], 'status': fire['status'], 'detail': fire.get('detail', ''),
                      'cause': fire.get('evidence', ''), 'outcome': fire.get('outcome')})
     return sorted(rows, key=lambda row: row['at'], reverse=True)[:limit]
+
+
+def flow(app, fleet):
+    """Live numbers for the design board: per role and per hand-off between roles."""
+    from studio_dispatch import clean_dispatch
+    from studio_health import PROBLEM_STATES
+    now = app.dispatch.clock()
+    roles = {r['id']: {'waiting': 0, 'stuck': 0, 'working': 0, 'claimed': 0} for r in fleet.get('roles', [])}
+    agents = {a['id']: a for a in fleet['agents']}
+    for agent in fleet['agents']:
+        health = app.health.get(fleet['id'], agent['id']) or {}
+        for role_id in agent.get('roleIds', []):
+            if role_id in roles:
+                roles[role_id]['stuck'] += health.get('state') in PROBLEM_STATES
+                roles[role_id]['working'] += health.get('state') == 'productive'
+    try:
+        waiting = app.dispatch.tickets_by_role(fleet, clean_dispatch(fleet.get('dispatch')))
+    except Exception:
+        waiting = []
+    for _, role_ids in waiting:
+        for role_id in role_ids:
+            if role_id in roles:
+                roles[role_id]['waiting'] += 1
+    for row in app.dispatch.claims(fleet['id']).values():
+        if row['status'] != 'done' and row['agent'] in agents:
+            for role_id in agents[row['agent']].get('roleIds', []):
+                if role_id in roles:
+                    roles[role_id]['claimed'] += 1
+    edges = {}
+    def add(source_agent, target_agent, at):
+        source, target = agents.get(source_agent), agents.get(target_agent)
+        if not source or not target:
+            return
+        for s in source.get('roleIds', []):
+            for t in target.get('roleIds', []):
+                edge = edges.setdefault(s + '>' + t, {'pending': 0, 'oldestAt': None})
+                edge['pending'] += 1
+                edge['oldestAt'] = min(edge['oldestAt'] or at, at)
+    for fire in app.automation.snapshot(fleet['id'])['fires']:
+        if fire['status'] in ('pending', 'sending', 'held') and fire.get('recipientId'):
+            add(fire['agentId'], fire['recipientId'], fire['at'])
+    for action in app.triggers.snapshot()['actions']:
+        if action.get('fleetId') == fleet['id'] and action['status'] in ('pending', 'held', 'sending', 'needs-attention') and action.get('sourceAgentId'):
+            add(action['sourceAgentId'], action.get('targetAgentId'), action['createdAt'])
+    return {'roles': roles, 'edges': edges, 'observedAt': now}

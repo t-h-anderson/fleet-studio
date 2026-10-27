@@ -116,6 +116,21 @@ class Deployments:
                 "acks": acks, "notifications": notifications,
                 "enabledTriggers": sum(t["enabled"] for t in self.runtime_fleet(fleet).get("triggers", []))}
 
+    def draft_status(self, fleet):
+        """Cheap check of whether the draft differs from what agents are working from."""
+        rid = self.data["active"].get(fleet["id"])
+        if not rid:
+            return {"active": False, "draftChanged": bool(fleet.get("roles")), "paused": False, "staleAgents": []}
+        release = self.release(rid)
+        try:
+            changed = release["digest"] != digest(export_spec(fleet)) or self.binding_digest(fleet) != self.binding_digest(release["fleet"])
+        except ValueError:
+            changed = True
+        deployed = {a["id"]: a for a in release["fleet"]["agents"]}
+        stale = [a["id"] for a in fleet["agents"] if a["id"] not in deployed
+                 or not same_binding(deployed[a["id"]], a, ("directory", "sessionId", "roleIds", "notes"))]
+        return {"active": True, "draftChanged": changed, "paused": self.data["paused"].get(fleet["id"], False), "staleAgents": stale}
+
     @staticmethod
     def binding_digest(fleet):
         # Runtime defaults keep digests of releases made before backend bindings unchanged.

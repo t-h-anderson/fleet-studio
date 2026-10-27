@@ -6,7 +6,8 @@ const backtests=new Map();
 
 function roleLabel(id){return id?(current().roles.find(r=>r.id===id)?.name||'Missing role'):'All roles';}
 function ruleSummary(r){
- return 'When '+roleLabel(r.roleId).toLowerCase()+' '+(r.roleId?'agents are ':'are ')+SIGNAL_LABELS[r.when.signal].toLowerCase()+
+ const agent=r.agentId&&current().agents.find(a=>a.id===r.agentId);
+ return 'When '+(agent?esc(agent.name)+' is ':roleLabel(r.roleId).toLowerCase()+' '+(r.roleId?'agents are ':'are '))+SIGNAL_LABELS[r.when.signal].toLowerCase()+
   (r.when.forMinutes?' for '+r.when.forMinutes+' min':'')+': '+ACTION_LABELS[r.action].toLowerCase()+
   (r.action==='handoff'?' in '+roleLabel(r.handoffRoleId||r.roleId):'')+
   '. At most '+(r.maxFires||'unlimited')+(r.maxFires?' time(s)':'')+' per agent in '+(r.windowHours||24)+' h, '+(r.cooldownMinutes||15)+' min apart'+
@@ -87,25 +88,26 @@ function renderThroughput(){
  const tokens=sum('tokens24h'),wasted=sum('wasteTokens24h'),closed=progress&&!progress.error?progress.summary.completed24h:null;
  const recovered=auto.outcomes?.recovered||0;
  const tiles=[
-  ['Tickets closed · 24h',closed??'—'],
+  ['Tickets closed · 24h',progress&&!progress.error&&!progress.tracker?.url?'Connect tracker':closed??'—'],
   ['Fresh tokens · 24h',tokenCount(tokens)],
   ['Estimated waste · 24h',tokenCount(wasted)+(tokens?' ('+Math.round(100*wasted/tokens)+'%)':'')],
   ['Tokens per closed ticket',closed?tokenCount(Math.round(tokens/closed)):'—'],
-  ['Throttled time · 24h',Math.round((auto.throttledSeconds24h||0)/60)+' min'],
-  ['Automations that helped',auto.delivered?recovered+' of '+auto.delivered+' delivered':'—'],
+  ['Throttled · 24h',Math.round((auto.throttledSeconds24h||0)/60)+' agent-min'],
+  ['Recovery that helped · 24h',auto.delivered?recovered+' of '+auto.delivered+' judged':'—'],
  ];
  $('visible-count').textContent=current().roles.length;
  $('content').innerHTML='<div class="progress-metrics throughput-metrics">'+tiles.map(([l,v])=>'<div><span>'+l+'</span><strong>'+esc(v)+'</strong></div>').join('')+'</div>'+
-  '<h3>Where tokens are wasted</h3>'+wasteBar(waste)+
+  '<h3>Where tokens are wasted</h3>'+wasteBar(waste)+(wasted?'<p><button class="text-button" data-waste-agents>See which agents waste the most</button></p>':'')+
   '<h3>By role</h3><div class="table-wrap"><table><thead><tr><th>ROLE</th><th>AGENTS</th><th>STUCK NOW</th><th>OPEN QUEUE</th><th>FRESH TOKENS 24H</th><th>WASTE</th><th>CALL MIX</th></tr></thead><tbody>'+
   current().roles.filter(r=>r.kind!=='subagent').map(role=>{
    const agents=current().agents.filter(a=>(a.roleIds||[]).includes(role.id)),hs=agents.map(a=>agentHealth(a.id)).filter(Boolean);
    const t=hs.reduce((s,h)=>s+h.tokens24h,0),w=hs.reduce((s,h)=>s+h.wasteTokens24h,0),mix={};
    hs.forEach(h=>CALL_CLASSES.forEach(k=>mix[k]=(mix[k]||0)+(h.classes24h?.[k]||0)));
    const queue=progress&&!progress.error?progress.roles.find(r=>r.id===role.id)?.queueCount:null;
-   return '<tr><td>'+esc(role.name)+'</td><td>'+agents.length+'</td><td>'+(stuckCount(agents)?'<span class="health-badge health-stalled">'+stuckCount(agents)+'</span>':'0')+'</td><td>'+(queue??'—')+'</td><td>'+tokenCount(t)+'</td><td>'+(t?Math.round(100*w/t)+'%':'—')+'</td><td>'+mixBar(mix)+'</td></tr>';
+   return '<tr><td><button class="text-button" data-role-health="'+esc(role.name)+'" title="Show these agents in Agent health">'+esc(role.name)+'</button></td><td>'+agents.length+'</td><td>'+(stuckCount(agents)?'<span class="health-badge health-stalled">'+stuckCount(agents)+'</span>':'0')+'</td><td>'+(queue??'—')+'</td><td>'+tokenCount(t)+'</td><td>'+(t?Math.round(100*w/t)+'%':'—')+'</td><td>'+mixBar(mix)+'</td></tr>';
   }).join('')+'</tbody></table></div>'+
-  '<p class="field-hint">Closures come from the tracker; tokens and waste from local session telemetry. Tokens per ticket divides all fresh tokens by closures, so it is an indicator, not a cost attribution.</p>';
+  (current().roles.length?'':'<p class="field-hint">Define roles to see flow by role.</p>')+
+  '<p class="field-hint">Closures come from the tracker; tokens and waste from local session telemetry. Fresh tokens are input, output and cache writes, excluding cache reads, the same measure as Agent health. Tokens per ticket divides all fresh tokens by closures, so it is an indicator, not a cost attribution.</p>';
 }
 
 // Automation rule editor, sharing the existing editor dialog.
@@ -123,6 +125,7 @@ openEditor=function(type,id=null,preSession=null){
  const actions=Object.fromEntries(Object.entries(ACTION_LABELS).filter(([k])=>k!=='none'&&(k!=='stop-turn'||canStop||item.action==='stop-turn')));
  $('editor-fields').innerHTML=field('Name','name',item.name,'required maxlength="100"')+
   '<div class="form-row"><div class="field"><label for="f-auto-role">Watch agents in</label><select id="f-auto-role">'+roles(item.roleId,'All roles')+'</select></div>'+
+  '<div class="field"><label for="f-auto-agent">Only this agent (optional)</label><select id="f-auto-agent"><option value="">Every agent in the role</option>'+f.agents.map(a=>'<option value="'+a.id+'"'+(a.id===item.agentId?' selected':'')+'>'+esc(a.name)+'</option>').join('')+'</select></div>'+
   '<div class="field"><label for="f-auto-signal">When an agent is</label><select id="f-auto-signal">'+options(SIGNAL_LABELS,item.when.signal)+'</select></div>'+
   field('For at least (minutes)','auto-for',item.when.forMinutes,'type="number" min="0" max="10080"')+'</div>'+
   '<div class="form-row"><div class="field"><label for="f-auto-action">Then</label><select id="f-auto-action">'+options(actions,item.action)+'</select></div>'+
@@ -141,6 +144,7 @@ saveEditor=async function(event){
  if(!editing||editing.type!=='automation')return automationOriginalSaveEditor(event);
  event.preventDefault();
  const item=clone(editing.item),number=id=>Number($(id).value);
+ const agentId=$('f-auto-agent').value;if(agentId)item.agentId=agentId;else delete item.agentId;
  Object.assign(item,{name:$('f-name').value.trim(),roleId:$('f-auto-role').value,action:$('f-auto-action').value,handoffRoleId:$('f-auto-handoff').value,
   message:$('f-auto-message').value.trim(),thenAction:$('f-auto-then').value,parkSource:$('f-auto-park').checked,enabled:$('f-auto-enabled').checked,
   cooldownMinutes:number('f-auto-cooldown'),maxFires:number('f-auto-max'),windowHours:number('f-auto-window'),pauseMinutes:number('f-auto-pause'),
@@ -154,6 +158,7 @@ saveEditor=async function(event){
 const automationOriginalDeleteItem=deleteItem;
 deleteItem=async function(){
  if(!editing||editing.type!=='automation')return automationOriginalDeleteItem();
+ if(!window.confirm('Remove this recovery rule? Its history stays in the timeline.'))return;
  const id=editing.id;
  try{await saveAutomations(list=>list.splice(list.findIndex(r=>r.id===id),1),'Automation removed.');$('editor').close();editing=null;}
  catch(e){toast(e.message,true);}
@@ -162,7 +167,7 @@ function saveAutomations(change,message){
  return mutate(next=>updateFleet(next,f=>{f.automations??=[];change(f.automations);}),message);
 }
 async function automationClick(e){
- if(view!=='automation')return;
+ if(!['automation','throughput'].includes(view))return;
  const b=e.target.closest('button');if(!b)return;
  try{
   if(b.id==='automation-new')openEditor('automation');
@@ -185,6 +190,8 @@ async function automationClick(e){
    const rule=current().automations.find(r=>r.id===b.dataset.automationBacktest);
    backtests.set(rule.id,await api('/api/automation/backtest',{fleetId:activeId,rule,hours:24}));renderAutomation();
   }
+  if(b.hasAttribute('data-waste-agents')){healthSort='waste';setView('health');}
+  if(b.dataset.roleHealth){setView('health');query=b.dataset.roleHealth;$('search').value=query;renderContent();}
   if(b.dataset.routingEdit)openEditor('trigger',b.dataset.routingEdit);
   if(b.id==='routing-new')openEditor('trigger');
   if(b.id==='routing-populate'){const data=await api('/api/workflow/populate',{fleetId:activeId,revision:state.revision});state=data.state;await loadHealth();renderAll();toast(data.report.created.length+' routing rule(s) created from hand-offs, switched off. Review and turn on the ones you want.');}

@@ -450,8 +450,11 @@ class Health:
                 rows.append({'agentId': agent['id'], 'name': agent['name'], 'roleIds': agent.get('roleIds', []),
                              'backend': agent.get('backend', 'codex'), 'hostId': agent.get('hostId', 'local'),
                              'health': health})
-        return {'fleetId': fleet_id, 'observedAt': self.clock(), 'agents': rows,
-                'settings': clean_health_settings(fleet.get('health'))}
+        status = self.app.deployments.draft_status(fleet)
+        for row in rows:
+            row['briefStale'] = row['agentId'] in status['staleAgents']
+        return {'fleetId': fleet_id, 'observedAt': self.clock(), 'agents': rows, 'deployment': status,
+                'settings': clean_health_settings(fleet.get('health')), 'progressSettings': fleet.get('progress') or {}}
 
     def get(self, fleet_id, agent_id):
         with self.lock:

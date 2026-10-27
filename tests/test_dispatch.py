@@ -2,6 +2,7 @@
 from pathlib import Path
 import sys
 import time
+import uuid
 import unittest
 from unittest.mock import patch
 
@@ -137,6 +138,48 @@ class RulesTests(unittest.TestCase):
                              'ticket': 'https://gitlab.example/p/-/issues/1', 'artifact': 'a', 'context': 'c'})
         sources = {row['source'] for row in timeline(app, fleet['id'])}
         self.assertEqual(sources, {'routing', 'dispatch'})
+
+    def deploy(self, app, fleet):
+        preview = app.deployments.preview({'fleetId': fleet['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'})
+        app.deployments.apply(preview['id'])
+        return app.store.fleet(fleet['id'])
+
+    def test_draft_status_reports_undeployed_changes_and_stale_briefs(self):
+        app, fleet = self.app()
+        self.assertEqual(app.deployments.draft_status(fleet)['active'], False)
+        fleet = self.deploy(app, fleet)
+        status = app.deployments.draft_status(fleet)
+        self.assertEqual((status['draftChanged'], status['staleAgents']), (False, []))
+        state = app.store.snapshot()
+        state['fleets'][0]['agents'][0]['notes'] = 'Focus on the parser'
+        app.store.save(state)
+        status = app.deployments.draft_status(app.store.fleet(fleet['id']))
+        self.assertTrue(status['draftChanged'])
+        self.assertEqual(status['staleAgents'], [fleet['agents'][0]['id']])
+
+    def test_flow_counts_waiting_hand_offs_between_roles(self):
+        from studio_rules import flow
+        app, fleet = self.app()
+        source, target = fleet['agents'][0], fleet['agents'][1]
+        app.health.current[(fleet['id'], source['id'])] = {'state': 'looping', 'since': 0, 'signals': []}
+        app.automation.data['fires'].append({'id': 'h', 'fleetId': fleet['id'], 'ruleId': 'agent-handoff', 'ruleName': 'Hand-off',
+            'agentId': source['id'], 'agentName': source['name'], 'recipientId': target['id'], 'action': 'handoff',
+            'at': 100.0, 'status': 'held', 'detail': '', 'evidence': '', 'outcome': None})
+        data = flow(app, fleet)
+        self.assertEqual(data['roles'][source['roleIds'][0]]['stuck'], 1)
+        edge = data['edges'][source['roleIds'][0] + '>' + target['roleIds'][0]]
+        self.assertEqual((edge['pending'], edge['oldestAt']), (1, 100.0))
+
+    def test_recovery_rule_can_watch_one_agent(self):
+        from studio_automation import clean_automations
+        app, fleet = self.app()
+        roles = {r['id'] for r in fleet['roles']}
+        agents = {a['id'] for a in fleet['agents']}
+        row = {'id': str(uuid.uuid4()), 'name': 'Watch writer', 'when': {'signal': 'stalled'}, 'action': 'reprompt',
+               'agentId': fleet['agents'][0]['id']}
+        self.assertEqual(clean_automations([row], roles, agents)[0]['agentId'], fleet['agents'][0]['id'])
+        with self.assertRaises(ValueError):
+            clean_automations([{**row, 'agentId': 'elsewhere'}], roles, agents)
 
     def test_idle_trigger_never_wakes_an_agent_without_work(self):
         app, fleet = self.app()

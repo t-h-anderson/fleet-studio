@@ -233,6 +233,10 @@ class Health:
             work = True
             if report.get('blockedSince'):
                 blocked = report
+        if not work and hasattr(self.app, 'automation'):
+            work = any(f.get('recipientId') == agent['id'] and f['fleetId'] == fleet_id and f['status'] == 'sent'
+                       and f.get('ticket') and task_key(f['ticket']) not in closed and f['at'] >= self.clock() - 86400
+                       for f in self.app.automation.data['fires'])
         if not work:
             cutoff = self.clock() - 86400
             for row in db.execute('SELECT data FROM handoffs WHERE fleet=?', (fleet_id,)):

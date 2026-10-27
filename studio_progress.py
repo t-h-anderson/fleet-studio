@@ -440,7 +440,7 @@ class Progress:
                 reason = 'Goal is ' + observed['goalStatus'] + '. ' + (blocked_report['reason'] if blocked_report else 'No current structured blocker reason; inspect activity and task evidence. Preserve the stop.')
                 attention.append({'kind':'goal-stop','agentId':agent['id'],'at':None,'message':agent['name'] + ': ' + reason})
             else:
-                reason = ('Workflow automation is paused.' if deployment['paused'] else '') or self.app.triggers.hold_reason([agent], monitor, idle_only=True) or self.app.deployments.adoption_hold(fleet_id,[agent['id']])
+                reason = ('Workflow automation is paused.' if deployment['paused'] else '') or self.app.triggers.hold_reason([agent], monitor, idle_only=True)
             availability = {'state':'held' if stopped else 'busy' if observed.get('status') == 'working' else 'held' if reason else 'eligible',
                             'reason':reason or 'Eligible for an idle workflow check; task scope still applies.'}
             if observed['stale']:
@@ -465,6 +465,9 @@ class Progress:
             t['blockerCategory'] = blocker_category(t, t['url'] in execution)
             if t['blockerCategory'] == 'execution' and t['url'] not in execution:
                 attention.append({'kind':'tracker-blocked','taskUrl':t['url'],'at':t.get('stageObservedAt'),'message':'Claimed work is blocked in the tracker; inspect the current blocker reason.'})
+        for e in self.app.automation.snapshot(fleet_id)['escalations']:
+            attention.append({'kind': 'escalation', 'agentId': e['agentId'], 'at': e['at'], 'escalationId': e['id'],
+                              'message': e['agentName'] + ' · ' + e['ruleName'] + ': ' + e['message']})
         for a in deployment['adoption']:
             if a['required'] and (not a['acknowledged'] or not a['bindingMatches'] or a['entryPoint'] != 'installed'):
                 attention.append({'kind':'adoption','agentId':a['agentId'],'at':None,'message':'Workflow adoption needs attention: ' + a['name']})

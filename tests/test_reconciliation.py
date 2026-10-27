@@ -100,8 +100,7 @@ class ReconciliationTests(unittest.TestCase):
             p = app.reconciliation.preview(request)
             app.reconciliation.apply(p['id'])
             app.triggers.tick(app.store.snapshot(), fixtures.DesignTests.monitor(self, f))
-            send.assert_not_called()  # Adoption is still required, despite a successful revalidation.
-        self.assertEqual(a['status'], 'held')
+            send.assert_called_once()  # Revalidation makes the unsent handoff deliverable again.
         for key in ('id', 'eventKey', 'eventId', 'message', 'targetSessionId', 'targetDirectory', 'sourceAgentId'):
             self.assertEqual(a[key], before[key])
         self.assertEqual(app.triggers.data['seenEvents'], seen)

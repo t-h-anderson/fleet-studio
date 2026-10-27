@@ -32,6 +32,7 @@ from studio_activity import activity
 from studio_progress import Progress, clean_settings
 from studio_telemetry import Telemetry
 from studio_health import Health, clean_health_settings
+from studio_automation import Automation, backtest, clean_alerts, clean_automations, clean_throttles
 from studio_reconciliation import Reconciliation
 from studio_goals import Goals
 from studio_agents import Runtimes, clean_binding, clean_hosts, tmux_launch, LOCAL_HOST
@@ -153,11 +154,15 @@ def validate_fleets(value, host_ids=()):
             triggers = validate_triggers(raw.get("triggers", []), {r["id"] for r in design["roles"]}, agent_ids)
             backlog = clean_config(raw.get("backlog"), agent_ids, design.get("roleSource"))
             health = clean_health_settings(raw.get("health"))
+            role_ids = {r["id"] for r in design["roles"]}
+            automations = clean_automations(raw.get("automations"), role_ids)
+            throttles = clean_throttles(raw.get("throttles"), role_ids)
+            alerts = clean_alerts(raw.get("alerts"))
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise ValidationError(str(exc)) from None
         candidate = {
             **design, "triggers": triggers, "backlog": backlog, "progress": clean_settings(raw.get("progress")),
-            "health": health,
+            "health": health, "automations": automations, "throttles": throttles, "alerts": alerts,
             "id": fid, "name": text(raw.get("name"), "Fleet name", 80),
             "description": text(raw.get("description", ""), "Description", 600, required=False),
             "windowName": window_name, "agents": agents, "links": links,
@@ -318,6 +323,7 @@ class Application:
         self.progress = Progress(self)
         self.telemetry = Telemetry(self)
         self.health = Health(self)
+        self.automation = Automation(self)
         self.goals = Goals(self)
         self.reconciliation = Reconciliation(self)
         from studio_context import CurrentContext
@@ -350,6 +356,7 @@ class Application:
                     self.monitor = latest
                 self.telemetry.tick(state)
                 self.health.tick(state, latest)
+                self.automation.tick(state, latest)
                 self.triggers.tick(state, self.status())
                 self.progress.tick(state, self.status())
                 for fleet in state["fleets"]:
@@ -550,6 +557,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/health/agents":
                 fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
                 return self.json(200, app.health.snapshot(fleet_id))
+            if path == "/api/automation":
+                fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
+                app.store.fleet(fleet_id)
+                return self.json(200, app.automation.snapshot(fleet_id))
             if path == "/api/backlog":
                 fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
                 return self.json(200, app.backlog.snapshot(fleet_id))
@@ -594,6 +605,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, app.context.preview_retirement(payload))
             if path == '/api/context/retire/apply':
                 return self.json(200, app.context.retire(payload.get('previewId')))
+            if path == "/api/automation/acknowledge":
+                return self.json(200, app.automation.acknowledge(payload.get("fleetId"), payload.get("escalationId")))
+            if path == "/api/automation/resume":
+                fleet = app.store.fleet(payload.get("fleetId"))
+                app.automation.resume(fleet["id"], payload.get("agentId"))
+                return self.json(200, app.automation.snapshot(fleet["id"]))
+            if path == "/api/automation/backtest":
+                fleet = app.store.fleet(payload.get("fleetId"))
+                role_ids = {r["id"] for r in fleet.get("roles", [])}
+                try:
+                    [rule] = clean_automations([payload.get("rule")], role_ids)
+                except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                    raise ValidationError(str(exc)) from None
+                hours = payload.get("hours", 24)
+                if type(hours) is not int or not 1 <= hours <= 720:
+                    raise ValidationError("Backtest window must be 1 to 720 hours.")
+                agents = [a["id"] for a in fleet["agents"] if not rule["roleId"] or rule["roleId"] in a.get("roleIds", [])]
+                history = [h for h in app.health.history(fleet["id"], time.time() - hours * 3600 - 86400) if h["agentId"] in agents]
+                return self.json(200, backtest(rule, history, time.time(), hours))
             if path == "/api/progress/report":
                 app.progress.observe_handoffs(app.triggers.snapshot().get("actions", []))
                 return self.json(200, app.progress.report(payload))

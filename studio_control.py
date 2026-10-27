@@ -179,7 +179,8 @@ class Controls:
                             "effect": 'Starts a headless Claude turn after the session is closed; this is execution, not queued delivery.' if agent.get('backend') == 'claude-code' else 'Queues a message for the existing Codex session.'})
         preview = {"id": uuid.uuid4().hex, "fleetId": fleet["id"], "action": action,
                    "revision": state["revision"], "createdAt": time.time(), "targets": targets,
-                   **({"deploymentId": payload["deploymentId"], "automation": payload.get("automation", False), "sourceAgentId": payload.get("sourceAgentId"), "idleOnly": payload.get("idleOnly", False), "purpose": payload.get("purpose", "")} if payload.get("deploymentId") else {})}
+                   **({"deploymentId": payload["deploymentId"], "automation": payload.get("automation", False), "sourceAgentId": payload.get("sourceAgentId"), "idleOnly": payload.get("idleOnly", False), "purpose": payload.get("purpose", "")} if payload.get("deploymentId") else
+                      {"automation": True, "purpose": payload.get("purpose", "")} if payload.get("automation") is True else {})}
         if 'assignmentContract' in payload:
             from studio_contracts import validate, delivery_hold
             contract = validate(payload['assignmentContract'], self.app, fleet, check_base=True, revalidated=True)
@@ -289,8 +290,9 @@ class Controls:
         # are needed here, and our own waiting receipt is excluded.
         with self.app.lock:
             monitor = deepcopy(self.app.monitor)
-        ids = [a["id"] for a in agents] + ([preview["sourceAgentId"]] if preview.get("sourceAgentId") else [])
-        return self.app.deployments.adoption_hold(fleet["id"], ids) or self.app.triggers.hold_reason(agents, monitor, preview.get("idleOnly", False), preview["id"])
+        # Adoption acknowledgements no longer gate automation: agents read their brief when it changes.
+        return (self.app.triggers.hold_reason(agents, monitor, preview.get("idleOnly", False), preview["id"])
+                or self.app.automation.hold(fleet["id"], agents, monitor))
 
     def _dispatch(self, preview):
         for index, target in enumerate(preview["targets"]):

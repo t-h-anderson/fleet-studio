@@ -144,6 +144,17 @@ class Triggers:
                 return agent["name"] + " has stale session observations."
             if not agent["enabled"]:
                 return agent["name"] + " is excluded from automatic delivery."
+            if agent.get("backend", "codex") == "claude-code":
+                # Claude Code has no queue: Studio resumes a closed session for one headless turn.
+                if item.get("status") == "working":
+                    return agent["name"] + " is mid-turn; waiting for it to finish."
+                if item.get("status") == "idle" or item.get("pids"):
+                    return agent["name"] + " is open in a Claude Code client; Studio cannot start a turn alongside it."
+                if item.get("status") != "closed" or not item.get("livenessKnown"):
+                    return agent["name"] + " has unknown process ownership on this host."
+                if idle_only and item.get("status") not in ("idle", "closed"):
+                    return agent["name"] + " is working; waiting for idle."
+                continue
             if item.get("status") not in ("idle", "working") or not item.get("pids"):
                 return agent["name"] + " is closed or needs attention; open/review the session first."
             if agent.get("backend", "codex") != "codex":
@@ -272,7 +283,7 @@ class Triggers:
         if rule["kind"] == "event" and not source_ids and rule.get("deploymentId"):
             action.update(status="needs-attention", detail="Legacy handoff has no source identity. Reconcile existing recipient evidence or repair the original unsent event before considering delivery.")
             return
-        reason = contract_problem(fleet, rule) or self.app.deployments.adoption_hold(fleet["id"], source_ids + [a["id"] for a in agents]) or self.hold_reason(agents, monitor, rule["kind"] == "idle")
+        reason = contract_problem(fleet, rule) or self.hold_reason(agents, monitor, rule["kind"] == "idle")
         if reason:
             action.update(status="held", detail=reason)
             return
@@ -340,7 +351,7 @@ class Triggers:
                         agents = [a for a in fleet["agents"] if rule["targetRoleId"] in a.get("roleIds", [])]
                         for agent in agents:
                             schedule = current.setdefault("agents", {}).setdefault(agent["id"], {"nextDue": now})
-                            schedule["detail"] = self.app.deployments.adoption_hold(fleet["id"], [agent["id"]]) or self.hold_reason([agent], monitor, idle_only=True)
+                            schedule["detail"] = self.hold_reason([agent], monitor, idle_only=True)
                             idle_key = (rule["id"], agent["id"])
                             if schedule["detail"]:
                                 self.idle_since.pop(idle_key, None)

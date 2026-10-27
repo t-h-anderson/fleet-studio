@@ -21,22 +21,16 @@ class TriggerTests(unittest.TestCase):
     monitor = fixtures.DesignTests.monitor
     wait_controls = fixtures.DesignTests.wait_controls
 
-    def test_deployed_handoff_waits_for_both_source_and_target_adoption(self):
+    def test_deployed_handoff_sends_without_adoption_acknowledgement(self):
+        # Adoption acknowledgements no longer gate automation; agents read their brief when it changes.
         app, f = self.app()
         f = self.save_rules(app, f, [self.rule(f, 'event')])
         preview = app.deployments.preview({'fleetId': f['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'})
         app.deployments.apply(preview['id'])
-        rid = app.deployments.data['active'][f['id']]
         monitor = self.monitor(f)
         app.monitor.update(monitor)
         with patch.object(app.controls, 'send') as send:
             app.triggers.report(self.payload(f))
-            send.assert_not_called()
-            app.deployments.acknowledge({'fleetId': f['id'], 'agentId': f['agents'][1]['id'], 'releaseId': rid})
-            app.triggers.tick(app.store.snapshot(), monitor)
-            send.assert_not_called()
-            app.deployments.acknowledge({'fleetId': f['id'], 'agentId': f['agents'][0]['id'], 'releaseId': rid})
-            app.triggers.tick(app.store.snapshot(), monitor)
             send.assert_called_once()
 
     def payload(self, fleet, event_id="ticket-one-head"):

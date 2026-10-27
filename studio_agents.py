@@ -359,6 +359,19 @@ class ClaudeCodeBackend(AgentBackend):
     def transcript_path(self, session_id):
         return self.transcripts().get(session_id)
 
+    def interrupt(self, session_id):
+        """Stop a Studio-started headless turn. Native clients are never signalled."""
+        with self.send_lock:
+            process = self.processes.get(session_id)
+            if process is None or process.poll() is not None:
+                raise RuntimeError('No Studio-started Claude turn is running for this session.')
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        return 'Stopped the Studio-started Claude turn.'
+
     def activity(self, session_id, fixture=None):
         path = self.transcripts().get(session_id)
         if not path:

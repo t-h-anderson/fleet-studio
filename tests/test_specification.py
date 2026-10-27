@@ -112,6 +112,8 @@ class SpecificationTests(unittest.TestCase):
         f["triggers"][0].update(enabled=True,kind="timer",mode="review",minutes=1)
         # A timer linked to a handoff keeps the same source role by design.
         app.store.save(state);first=self.deploy(app)
+        for a in f["agents"]:
+            app.health.current[(f["id"],a["id"])]={"state":"idle","since":0,"signals":[],"openWork":True}
         app.triggers.tick(app.store.snapshot(),{},now=100)
         app.triggers.tick(app.store.snapshot(),{},now=161)
         action=app.triggers.snapshot()["actions"][0]

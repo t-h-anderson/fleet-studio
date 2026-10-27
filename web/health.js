@@ -1,6 +1,6 @@
 'use strict';
 // Agent health: where agents are stuck, what they spend tokens on, and quick tweaks.
-const healthCache=new Map(),automationCache=new Map(),turnCache=new Map();
+const healthCache=new Map(),automationCache=new Map(),turnCache=new Map(),rulesCache=new Map();
 let healthExpanded='';
 const HEALTH_LABELS={looping:'Looping',burning:'Burning tokens',stalled:'Stalled','admin-heavy':'Admin-heavy',waiting:'Waiting',productive:'Productive',idle:'Idle',offline:'Offline','no-telemetry':'No telemetry',unknown:'Not observed yet'};
 let healthSignature='';
@@ -39,10 +39,11 @@ async function loadHealth(){
  if(!state||stopped)return;
  const fid=activeId;
  try{
-  const [health,automation]=await Promise.all([
+  const [health,automation,rules]=await Promise.all([
    api('/api/health/agents?fleetId='+encodeURIComponent(fid)),
-   api('/api/automation?fleetId='+encodeURIComponent(fid))]);
-  healthCache.set(fid,health);automationCache.set(fid,automation);
+   api('/api/automation?fleetId='+encodeURIComponent(fid)),
+   view==='automation'?api('/api/rules?fleetId='+encodeURIComponent(fid)):Promise.resolve(null)]);
+  healthCache.set(fid,health);automationCache.set(fid,automation);if(rules)rulesCache.set(fid,rules);
   if(fid!==activeId)return;
   if(view==='throughput'&&typeof loadProgress==='function')loadProgress();
   // Never redraw under someone typing, and redraw the board only when a health state changed.
@@ -126,8 +127,11 @@ setInterval(()=>{if(state&&!stopped)loadHealth();},5000);
 
 const healthOriginalRenderContent=renderContent;
 function typingInContent(){return !!document.activeElement?.closest('#content input,#content textarea,#content select');}
+let renderForced=false;
 renderContent=function(){
  if(!state||drag)return;
+ // Background refreshes must not redraw a form someone is typing in; navigation and saves (renderAll) still do.
+ if(!renderForced&&['health','automation','throughput'].includes(view)&&typingInContent())return;
  if(view==='health')return renderHealth();
  if(view==='automation')return renderAutomation();
  if(view==='throughput')return renderThroughput();
@@ -135,10 +139,12 @@ renderContent=function(){
 };
 const healthOriginalRenderAll=renderAll;
 renderAll=function(){
- healthOriginalRenderAll();if(!state)return;
+ renderForced=true;
+ try{healthOriginalRenderAll();}finally{renderForced=false;}
+ if(!state)return;
  const views={
   health:['Agent health','Where agents are stuck, what they spend tokens on, and quick tweaks.','Agents'],
-  automation:['Automations','Recover stuck agents automatically: reprompt, hand off, pause or escalate.','Automation rules'],
+  automation:['Rules','Everything that messages an agent: routing work between roles, recovering stuck agents, and dispatching tickets.','Rules'],
   throughput:['Throughput','Work delivered, tokens spent, waste and throttling.','Flow and waste'],
  };
  if(!views[view])return;
@@ -149,6 +155,6 @@ renderAll=function(){
  $('workspace-layout').classList.add('board-layout');$('status-filter').classList.add('hidden');$('board-toolbar').classList.add('hidden');
  $('search').placeholder=view==='health'?'Find an agent or state…':'Find a rule…';
  $('panel-footer-text').textContent='Health refreshes every 5 seconds from session telemetry.';
- if(!healthCache.has(activeId))loadHealth();
+ if(!healthCache.has(activeId)||view==='automation'&&!rulesCache.has(activeId))loadHealth();
  if(view==='throughput'&&typeof loadProgress==='function'&&!progressCache.has(activeId))loadProgress();
 };

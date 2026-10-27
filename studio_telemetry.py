@@ -21,7 +21,8 @@ CLASSES = ('work', 'explore', 'admin', 'wait', 'other')
 SIGNATURE_LIMIT = 160
 CALL_LIMIT = 400
 INITIAL_TAIL = 8_000_000
-STUDIO_MARKERS = ('[Fleet Studio]', 'Automated Fleet Studio')
+STUDIO_MARKERS = ('[Fleet Studio]', '[Fleet Studio · check]', 'Automated Fleet Studio')
+CHECK_MARKER = '[Fleet Studio · check]'
 
 # Only writes to the tracker or Studio count as admin; reading a ticket is exploring.
 ADMIN_COMMAND = re.compile(
@@ -341,6 +342,8 @@ class TurnParser:
                 if prompt.startswith(NON_PROMPTS) or row.get('isCompactSummary'):
                     return
                 self.start(row.get('uuid') or digest(self.session + str(at) + prompt), at, studio_prompt(prompt))
+                if prompt.startswith(CHECK_MARKER):
+                    self.current['studioCheck'] = True
             return
         usage = message.get('usage') if isinstance(message.get('usage'), dict) else {}
         mid = message.get('id') or row.get('requestId') or row.get('uuid')
@@ -401,6 +404,8 @@ class TurnParser:
             elif item == 'user_message' and isinstance(payload.get('message'), str):
                 turn = self.ensure(at)
                 turn['fromStudio'] = turn['fromStudio'] or studio_prompt(payload['message'])
+                if payload['message'].lstrip().startswith(CHECK_MARKER):
+                    turn['studioCheck'] = True
             return
         if kind != 'response_item':
             return

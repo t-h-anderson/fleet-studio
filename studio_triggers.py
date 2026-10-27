@@ -126,6 +126,10 @@ class Triggers:
             raise ValueError("No agents are assigned to the target role.")
         return agents
 
+    def has_open_work(self, fleet, agent):
+        health = self.app.health.get(fleet["id"], agent["id"]) if hasattr(self.app, "health") else None
+        return bool(health and health.get("openWork"))
+
     def hold_reason(self, agents, monitor, idle_only=False, ignore_control_id=None):
         if not agents:
             return "No agents are assigned to the target role."
@@ -176,7 +180,9 @@ class Triggers:
 
     @staticmethod
     def message(rule, cause, event=None):
-        text = "[Fleet Studio] " + rule["name"] + " (" + cause + ")\n\n" + rule["message"]
+        # Periodic checks carry their own marker so their replies never count as an agent looping.
+        marker = "[Fleet Studio · check] " if rule["kind"] in ("idle", "timer") else "[Fleet Studio] "
+        text = marker + rule["name"] + " (" + cause + ")\n\n" + rule["message"]
         if event:
             text += "\n\nReported handoff (verify against the current ticket):\nFrom: " + event["agent"]
             for key in ("eventId", "ticket", "artifact", "context"):
@@ -353,7 +359,8 @@ class Triggers:
                         agents = [a for a in fleet["agents"] if rule["targetRoleId"] in a.get("roleIds", [])]
                         for agent in agents:
                             schedule = current.setdefault("agents", {}).setdefault(agent["id"], {"nextDue": now})
-                            schedule["detail"] = self.hold_reason([agent], monitor, idle_only=True)
+                            schedule["detail"] = self.hold_reason([agent], monitor, idle_only=True) or (
+                                "" if self.has_open_work(fleet, agent) else agent["name"] + " has no open work; dispatch offers new tickets instead.")
                             idle_key = (rule["id"], agent["id"])
                             if schedule["detail"]:
                                 self.idle_since.pop(idle_key, None)
@@ -367,7 +374,9 @@ class Triggers:
                     elif rule["kind"] == "timer" and now >= current["nextDue"]:
                         current["nextDue"] = now + rule["minutes"] * 60
                         self.persist()
-                        self.fire(fleet, rule, "timer elapsed", monitor)
+                        # A timer only reaches a role that has something to do; dispatch hands out new work.
+                        if any(self.has_open_work(fleet, a) for a in fleet["agents"] if rule["targetRoleId"] in a.get("roleIds", [])):
+                            self.fire(fleet, rule, "timer elapsed", monitor)
                     elif rule["kind"] == "condition":
                         if not monitor.get("observedAt") or time.time() - monitor["observedAt"] > 20:
                             self.observed.pop(rule["id"], None)

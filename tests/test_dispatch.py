@@ -112,3 +112,62 @@ class DispatchTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RulesTests(unittest.TestCase):
+    setUp = fixtures.DesignTests.setUp
+    tearDown = fixtures.DesignTests.tearDown
+    app = fixtures.DesignTests.app
+    monitor = fixtures.DesignTests.monitor
+    rule = fixtures.DesignTests.rule
+    save_rules = fixtures.DesignTests.save_rules
+
+    def test_rules_listing_and_timeline_cover_every_source(self):
+        from studio_rules import list_rules, timeline
+        app, fleet = self.app()
+        fleet = self.save_rules(app, fleet, [self.rule(fleet, 'event'), self.rule(fleet, 'idle')])
+        listing = list_rules(app, fleet)
+        self.assertEqual([r['kind'] for r in listing['routing']], ['event', 'idle'])
+        self.assertTrue(listing['routing'][1]['periodic'])
+        self.assertIn('only for agents with open work', listing['routing'][1]['when'])
+        app.automation.data['fires'].append({'id': 'f', 'fleetId': fleet['id'], 'ruleId': 'dispatch', 'ruleName': 'Next ticket',
+            'agentId': 'a', 'agentName': 'A', 'action': 'dispatch', 'at': time.time(), 'status': 'sent', 'detail': '',
+            'evidence': 'Ticket 3', 'outcome': None})
+        app.triggers.report({'fleetId': fleet['id'], 'agentId': fleet['agents'][0]['id'], 'eventName': 'packet-ready', 'eventId': 'e1',
+                             'ticket': 'https://gitlab.example/p/-/issues/1', 'artifact': 'a', 'context': 'c'})
+        sources = {row['source'] for row in timeline(app, fleet['id'])}
+        self.assertEqual(sources, {'routing', 'dispatch'})
+
+    def test_idle_trigger_never_wakes_an_agent_without_work(self):
+        app, fleet = self.app()
+        fleet = self.save_rules(app, fleet, [self.rule(fleet, 'idle')])
+        monitor = self.monitor(fleet)
+        with patch.object(app.controls, 'send') as send:
+            now = time.time()
+            for step in range(4):
+                app.triggers.tick(app.store.snapshot(), monitor, now + step * 120)
+        send.assert_not_called()
+
+    def test_recovery_sends_are_not_throttled_but_new_work_is(self):
+        app, fleet = self.app()
+        state = app.store.snapshot()
+        state['fleets'][0]['throttles'] = {'maxWorkingAgents': 1}
+        app.store.save(state)
+        fleet = app.store.fleet(fleet['id'])
+        monitor = self.monitor(fleet)
+        monitor['sessions'][fleet['agents'][1]['sessionId']]['status'] = 'working'
+        writer = fleet['agents'][0]
+        self.assertEqual(app.automation.hold(fleet['id'], [writer], monitor, throttle=False), '')
+        self.assertIn('Throttled', app.automation.hold(fleet['id'], [writer], monitor, throttle=True))
+
+    def test_token_budget_escalates_once_an_hour(self):
+        app, fleet = self.app()
+        state = app.store.snapshot()
+        state['fleets'][0]['throttles'] = {'fleetTokensPerHour': 1000}
+        app.store.save(state)
+        fleet = app.store.fleet(fleet['id'])
+        app.health.current[(fleet['id'], fleet['agents'][0]['id'])] = {'state': 'burning', 'since': 0, 'signals': [], 'tokensLastHour': 5000}
+        now = time.time()
+        app.automation.alert_caps(fleet, now)
+        app.automation.alert_caps(fleet, now + 60)
+        self.assertEqual(len(app.automation.snapshot(fleet['id'])['escalations']), 1)

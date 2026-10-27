@@ -272,8 +272,10 @@ class Controls:
         with self.app.lock:
             monitor = deepcopy(self.app.monitor)
         # Adoption acknowledgements no longer gate automation: agents read their brief when it changes.
+        # Workflow deliveries and new-work automation sends are throttled; recovery sends are not.
+        new_work = preview.get("purpose") == "automation-new-work" or bool(preview.get("deploymentId")) and not preview.get("purpose")
         return (self.app.triggers.hold_reason(agents, monitor, preview.get("idleOnly", False), preview["id"])
-                or self.app.automation.hold(fleet["id"], agents, monitor))
+                or self.app.automation.hold(fleet["id"], agents, monitor, throttle=new_work))
 
     def _dispatch(self, preview):
         for index, target in enumerate(preview["targets"]):

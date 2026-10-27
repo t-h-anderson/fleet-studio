@@ -128,7 +128,8 @@ def detect_loop(turns, now, settings, since=0):
         label = call['label'] or call['tool']
         return {'kind': 'repeat', 'label': label, 'count': count,
                 'message': 'Ran `' + label + '` ' + str(count) + ' times without an edit or test in between.'}
-    recent = [turn for turn in turns if (turn.get('lastAt') or 0) >= start]
+    # Replies to periodic checks repeat by design and are not the agent looping.
+    recent = [turn for turn in turns if (turn.get('lastAt') or 0) >= start and not turn.get('studioCheck')]
     replies = Counter(reply for turn in recent[:6] for reply in set(turn.get('replies', [])))
     for reply, count in replies.most_common(1):
         if count >= 3:
@@ -292,6 +293,7 @@ class Health:
         self.app, self.clock = app, clock
         self.lock = threading.RLock()
         self.current = {}
+        self.sends = {}
         with closing(app.progress.connect()) as db, db:
             db.execute('CREATE TABLE IF NOT EXISTS health_state (fleet TEXT, agent TEXT, state TEXT, since REAL, PRIMARY KEY(fleet, agent))')
 
@@ -302,13 +304,21 @@ class Health:
         return {'state': row['state'], 'since': row['since']} if row else None
 
     def last_intervention(self, fleet_id, agent_id):
-        """When Studio last prompted this agent; repetition before that has already been acted on."""
-        automation = getattr(self.app, 'automation', None)
-        if not automation:
-            return 0
-        fires = [f['at'] for f in automation.data['fires'] if f['fleetId'] == fleet_id and f['agentId'] == agent_id
-                 and f['action'] in ('reprompt', 'handoff') and f['status'] in ('sent', 'sending')]
-        return max(fires, default=0)
+        """When Studio last messaged this agent by any route; repetition before that has been acted on."""
+        return self.sends.get(agent_id, 0)
+
+    def recent_sends(self):
+        """Latest Studio delivery per agent across triggers, automations and dispatch, computed once a tick."""
+        latest = {}
+        controls = getattr(self.app, 'controls', None)
+        if not controls:
+            return latest
+        with controls.lock:
+            for receipt in controls.receipts.values():
+                for target in receipt.get('targets', []):
+                    if target.get('status') in ('queued', 'started'):
+                        latest[target['agentId']] = max(latest.get(target['agentId'], 0), receipt.get('createdAt', 0))
+        return latest
 
     def open_work(self, db, fleet_id, agent, turns=()):
         """Assigned, unfinished work for this agent, and its current blocker if any.
@@ -361,6 +371,7 @@ class Health:
     def tick(self, state, monitor):
         now = self.clock()
         recent = {fleet['id']: self.app.telemetry.turns(fleet['id'], since=now - 86400, limit=5000) for fleet in state['fleets']}
+        self.sends = self.recent_sends()
         with self.lock, self.app.progress.lock, closing(self.app.progress.connect()) as db, db:
             for fleet in state['fleets']:
                 settings = clean_health_settings(fleet.get('health'))

@@ -578,6 +578,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/health/agents":
                 fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
                 return self.json(200, app.health.snapshot(fleet_id))
+            if path == "/api/rules":
+                fleet = app.store.fleet(parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0])
+                from studio_rules import list_rules, timeline
+                return self.json(200, {**list_rules(app, fleet), "timeline": timeline(app, fleet["id"])})
             if path == "/api/automation":
                 fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
                 app.store.fleet(fleet_id)

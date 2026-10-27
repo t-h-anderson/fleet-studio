@@ -239,14 +239,18 @@ class Automation:
                 return 'Throttled: ' + role + ' used ' + format(spent, ',') + ' tokens in the last hour (limit ' + format(limit, ',') + ').'
         return ''
 
-    def hold(self, fleet_id, agents, monitor):
-        """Pause and throttle checks for an automatic delivery; records throttled time."""
+    def hold(self, fleet_id, agents, monitor, throttle=True):
+        """Pause and throttle checks for an automatic delivery; records throttled time.
+
+        Throttles apply only to sends that start new work. A reprompt or stop that would
+        fix a burning agent must never wait behind the limit it is trying to bring down.
+        """
         fleet = self.app.store.fleet(fleet_id)
         for agent in agents:
             reason = self.paused_reason(fleet_id, agent)
             if reason:
                 return reason
-        reason = self.throttle_reason(fleet, agents, monitor)
+        reason = self.throttle_reason(fleet, agents, monitor) if throttle else ''
         now = self.clock()
         with self.hold_lock:
             for agent in agents:
@@ -267,6 +271,7 @@ class Automation:
             changed = self.expire(state, monitor, now)
             for fleet in state['fleets']:
                 changed = self.resolve(fleet, monitor, now) or changed
+                changed = self.alert_caps(fleet, now) or changed
                 if self.app.deployments.data['paused'].get(fleet['id']):
                     continue
                 for rule in fleet.get('automations', []):
@@ -303,6 +308,30 @@ class Automation:
                     if started is not None:
                         self.data['throttleLog'].append({'fleetId': fleet_id, 'agentId': agent_id, 'start': started, 'end': now})
                 changed = True
+        return changed
+
+    def alert_caps(self, fleet, now):
+        """Escalate once an hour when a fleet or role is over its token budget; throttles alone only slow new work."""
+        limits = fleet.get('throttles') or {}
+        alerts = self.data.setdefault('capAlerts', {})
+        health = {a['id']: self.app.health.get(fleet['id'], a['id']) or {} for a in fleet['agents']}
+        checks = []
+        if limits.get('fleetTokensPerHour'):
+            checks.append(('fleet', 'The fleet', sum(h.get('tokensLastHour', 0) for h in health.values()), limits['fleetTokensPerHour']))
+        for role_id, limit in (limits.get('roleTokensPerHour') or {}).items():
+            role = next((r['name'] for r in fleet.get('roles', []) if r['id'] == role_id), role_id)
+            spent = sum(health[a['id']].get('tokensLastHour', 0) for a in fleet['agents'] if role_id in a.get('roleIds', []))
+            checks.append((role_id, role, spent, limit))
+        changed = False
+        for key, name, spent, limit in checks:
+            mark = fleet['id'] + ':' + key
+            if spent < limit or now - alerts.get(mark, 0) < 3600:
+                continue
+            alerts[mark] = now
+            record = {'id': uuid.uuid4().hex, 'evidence': name + ' used ' + format(spent, ',') + ' tokens in the last hour (budget '
+                      + format(limit, ',') + '). New work is held; check Agent health for who is burning.', 'detail': ''}
+            self.escalate(fleet, {'id': '', 'name': name}, {'name': 'Token budget'}, record)
+            changed = True
         return changed
 
     def resolve(self, fleet, monitor, now):
@@ -498,9 +527,11 @@ class Automation:
     def send(self, fleet, agent, message, fire):
         """Start delivery. A recipient that is not ready yet leaves the fire held, not failed."""
         from studio_control import AutomationHeld
+        new_work = fire['action'] in ('handoff', 'dispatch') or fire['ruleId'] in ('agent-handoff', 'dispatch')
         try:
             preview = self.app.controls.preview({'fleetId': fleet['id'], 'agentIds': [agent['id']], 'action': 'message',
-                                                 'message': message, 'automation': True, 'purpose': 'health-automation'})
+                                                 'message': message, 'automation': True,
+                                                 'purpose': 'automation-new-work' if new_work else 'automation-recovery'})
             receipt = self.app.controls.send(preview['id'])
         except AutomationHeld as exc:
             fire.update(status='held', detail=str(exc))

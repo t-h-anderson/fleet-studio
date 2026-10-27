@@ -40,6 +40,11 @@ class DesignTests(unittest.TestCase):
         app.store.save(state)
         return app, app.store.fleet(fleet["id"])
 
+    def busy(self, app, fleet):
+        """Give every agent open work: periodic triggers only reach agents with something to do."""
+        for agent in fleet["agents"]:
+            app.health.current[(fleet["id"], agent["id"])] = {"state": "idle", "since": 0, "signals": [], "openWork": True}
+
     def rule(self, fleet, kind="timer", mode="automatic"):
         return {"id": str(uuid.uuid4()), "name": "Deliver packet", "kind": kind,
                 "sourceRoleId": fleet["agents"][0]["roleIds"][0], "targetRoleId": fleet["agents"][1]["roleIds"][0],
@@ -133,6 +138,7 @@ class DesignTests(unittest.TestCase):
     def test_timers_reserve_target_and_do_not_repeat(self):
         app, fleet = self.app()
         fleet = self.save_rules(app, fleet, [self.rule(fleet), self.rule(fleet)])
+        self.busy(app, fleet)
         monitor = self.monitor(fleet); started = time.time()
         with patch("studio_control.subprocess.run", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")) as run:
             app.triggers.tick(app.store.snapshot(), monitor, started)

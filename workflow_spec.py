@@ -321,7 +321,12 @@ def brief_document(fleet, spec, agent, release_id, app_root):
     spec_roles = {r["id"]: r for r in spec["roles"]}
     mine = [spec_roles[by_id[rid]] for rid in agent.get("roleIds", []) if by_id.get(rid) in spec_roles]
     names = {r["id"]: r["name"] for r in fleet["roles"]}
-    client = "'" + str(Path(app_root) / "workflow_client.py") + "'"
+    import os, shlex, subprocess
+    # Quote for the shell the agents on this host use; notes with quotes are better sent with --note -.
+    windows = os.name == "nt"
+    quote = (lambda text: subprocess.list2cmdline([text])) if windows else shlex.quote
+    client = quote(str(Path(app_root) / "workflow_client.py"))
+    sample = (lambda text: '"' + text + '"') if windows else (lambda text: "'" + text + "'")
     identity = " --fleet " + fleet["id"] + " --agent " + agent["id"]
     lines = ["# " + agent["name"] + " — " + (", ".join(r["name"] for r in mine) or "unassigned"), ""]
     for role in mine:
@@ -354,10 +359,10 @@ def brief_document(fleet, spec, agent, release_id, app_root):
               "and do not poll, sleep-loop or re-read this brief. Studio wakes you when there is work and tells you when this brief changes. "
               "Keep technical evidence where it normally goes (commits, the ticket or MR). Run one command only when:", "",
               "```",
-              "python " + client + " report done" + identity + " --note '<what changed and where>'",
-              "python " + client + " report blocked" + identity + " --note '<what you need, and from whom>'",
-              "python " + client + " report unblocked" + identity + " --note '<what changed>'",
-              "python " + client + " report handoff" + identity + " --to '<who>' --note '<what to pick up>'",
+              "python " + client + " report done" + identity + " --note " + sample("<what changed and where>"),
+              "python " + client + " report blocked" + identity + " --note " + sample("<what you need, and from whom>"),
+              "python " + client + " report unblocked" + identity + " --note " + sample("<what changed>"),
+              "python " + client + " report handoff" + identity + " --to " + sample("<who>") + " --note " + sample("<what to pick up>"),
               "```", "",
               "Studio infers your current ticket; add --ticket <URL> to name a different one. "
               "For long notes use --note-file <path>, or --note - to read standard input. "

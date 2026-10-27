@@ -113,7 +113,8 @@ async function refresh(full=false){
  try{
   monitor=await api('/api/status');if(full||!catalogue.length||view==='sessions')catalogue=(await api('/api/sessions')).sessions;
   if(pendingJob){const j=(monitor.jobs||[]).find((j)=>j.id===pendingJob);if(j&&j.status!=='running'){pendingJob=null;toast(j.message,j.status==='failed');}}
-  renderMetrics();renderContent();renderInsights();
+  // A timed refresh must not redraw a form someone is filling in; saves and navigation still do.
+  renderMetrics();if(!(['health','automation','throughput'].includes(view)&&document.activeElement?.closest('#content input,#content textarea,#content select')))renderContent();renderInsights();
  }catch(error){$('live-pill').innerHTML='<span class="status-dot attention"></span><span>Disconnected</span>';$('monitor-banner').textContent='The local app is not responding. Use the Fleet Studio shortcut to reopen it.';$('monitor-banner').classList.remove('hidden');}
 }
 async function launch(ids){

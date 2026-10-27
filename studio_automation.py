@@ -325,8 +325,14 @@ class Automation:
                     changed = True
                     continue
                 before = fire['detail']
-                self.send(fleet, recipient, fire['message'], fire)
+                try:
+                    self.send(fleet, recipient, fire['message'], fire)
+                except Exception as exc:
+                    # One undeliverable hand-off must never stop the other rules from running.
+                    fire.update(status='failed', detail=str(exc)[-600:])
+                    self.escalate_failure(fleet, fire)
                 changed = changed or fire['status'] != 'held' or fire['detail'] != before
+                changed = self.escalate_long_hold(fleet, fire, now, 15) or changed
                 continue
             rule = next((r for r in fleet.get('automations', []) if r['id'] == fire['ruleId']), None)
             agent = next((a for a in fleet['agents'] if a['id'] == fire['agentId']), None)
@@ -338,10 +344,25 @@ class Automation:
             before = (fire['status'], fire['detail'])
             self.execute(fleet, rule, agent, health, fire, monitor)
             changed = changed or before != (fire['status'], fire['detail'])
+            changed = self.escalate_long_hold(fleet, fire, now, rule['cooldownMinutes']) or changed
         return changed
+
+    def escalate_long_hold(self, fleet, fire, now, minutes):
+        """Tell the operator once when a delivery has waited longer than its cooldown; it keeps retrying."""
+        if fire['status'] != 'held' or fire.get('heldEscalated') or now - fire['at'] < minutes * 60:
+            return False
+        fire['heldEscalated'] = True
+        record = dict(fire, evidence=fire['evidence'] + ' (waiting ' + str(int((now - fire['at']) // 60)) + ' min to deliver: ' + fire['detail'] + ')')
+        # The escalation gets a copy, so this fire stays held and keeps retrying.
+        self.escalate(fleet, {'id': fire['agentId'], 'name': fire['agentName']}, {'name': fire['ruleName']}, record)
+        return True
 
     def settle(self, fleet, fire):
         receipt = next((c for c in self.app.controls.snapshot(full=True) if c['id'] == fire.get('controlId')), None)
+        if not receipt and self.clock() - fire.get('sentAt', fire['at']) > 600:
+            # The receipt was lost (for example a damaged controls file); nothing can confirm delivery.
+            fire.update(status='failed', detail='No delivery receipt was recorded; check the session.')
+            return True
         if not receipt or receipt['status'] == 'sending':
             return False
         targets = receipt['targets']
@@ -464,7 +485,7 @@ class Automation:
         except AutomationHeld as exc:
             fire.update(status='held', detail=str(exc))
             return
-        fire.update(status='sending', controlId=receipt['id'], detail='Delivery started.')
+        fire.update(status='sending', controlId=receipt['id'], detail='Delivery started.', sentAt=self.clock())
 
     def candidates(self, fleet, role_ids, exclude, monitor):
         """Agents in the roles who can take work now: healthy, not paused and deliverable."""
@@ -484,8 +505,12 @@ class Automation:
     def handoff(self, fleet, rule, agent, health, fire, monitor):
         role_id = rule['handoffRoleId'] or (rule['roleId'] or next(iter(agent.get('roleIds', [])), ''))
         found, reasons = self.candidates(fleet, [role_id], agent['id'], monitor)
-        # A retry keeps the recipient chosen first, so the work is not sprayed across agents.
-        recipient = next((a for a in found if a['id'] == fire.get('recipientId')), None) or (found[0] if found else None)
+        # A retry keeps the recipient chosen first while it is merely not ready, so the work is
+        # not sprayed across agents and a short wait does not become a failure.
+        chosen = next((a for a in fleet['agents'] if a['id'] == fire.get('recipientId') and a['enabled']), None)
+        if chosen and ((self.app.health.get(fleet['id'], chosen['id']) or {}).get('state') in PROBLEM_STATES or self.paused_reason(fleet['id'], chosen)):
+            chosen = None
+        recipient = chosen or (found[0] if found else None)
         if not recipient:
             raise RuntimeError('No agent in the hand-off role can take over now' + (' (' + '; '.join(reasons) + ')' if reasons else '') + '.')
         ticket = self.ticket(fleet, agent)

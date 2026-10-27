@@ -366,6 +366,8 @@ class Progress:
                     handoff = json.loads(row['data'])
                     if handoff.get('receivedAt') or handoff.get('status') != 'queued' or not handoff.get('targetAgentId'):
                         continue
+                    if self.clock() - handoff.get('createdAt', 0) > 86400:
+                        continue  # Too old to infer a receipt from; stop re-checking it every tick.
                     turns = telemetry.turns(fleet['id'], handoff['targetAgentId'], since=handoff['createdAt'], limit=20)
                     # Only a Studio-delivered prompt on the recipient's own session shows the hand-off was read.
                     session = session_key({'sessionId': handoff.get('targetSessionId', ''), **(handoff.get('targetRuntime') or {})})

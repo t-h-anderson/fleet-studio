@@ -11,7 +11,8 @@ import json
 from pathlib import Path
 import re
 import sys
-from urllib.error import HTTPError
+import uuid
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from studio_bindings import same_binding
 
@@ -38,8 +39,8 @@ def acknowledge(fleet, agent, release, root=None):
     return post("/api/workflow/acknowledge", {"fleetId": fleet, "agentId": agent, "releaseId": release}, root)
 
 
-def report(kind, fleet, agent, note, ticket=None, to=None, root=None):
-    payload = {"kind": kind, "fleetId": fleet, "agentId": agent, "note": note}
+def report(kind, fleet, agent, note, ticket=None, to=None, root=None, retry_id=None):
+    payload = {"kind": kind, "fleetId": fleet, "agentId": agent, "note": note, "retryId": retry_id or uuid.uuid4().hex}
     if ticket:
         payload["ticket"] = ticket
     if to:
@@ -97,8 +98,12 @@ if __name__ == "__main__":
     if args.action == "instructions":
         try:
             print(instructions(args.fleet, args.agent, directory=args.directory))
-        except Exception as exc:
-            print("Brief unavailable: " + (str(exc) if isinstance(exc, ValueError) else "Studio's files could not be read") + ". Carry on with your current task.")
+        except ValueError as exc:
+            print("Brief unavailable: " + str(exc) + " Carry on with your current task.")
+            sys.exit(2)
+        except (OSError, KeyError):
+            print("Brief unavailable: Studio's files could not be read. Carry on with your current task.")
+            sys.exit(3)
     elif args.action == "report":
         note = args.note
         if args.note_file:
@@ -107,22 +112,26 @@ if __name__ == "__main__":
             note = sys.stdin.read()
         if not args.kind or not (note or "").strip():
             parser.error("report needs done, blocked, unblocked or handoff, and a note")
-        try:
-            result = report(args.kind, args.fleet, args.agent, note.strip(), args.ticket, args.to)
-        except HTTPError as exc:
+        retry_id = uuid.uuid4().hex
+        result = None
+        for attempt in range(2):
             try:
-                message = json.load(exc).get("error", str(exc.code))
-            except ValueError:
-                message = "Studio returned an error"
-            print("Not recorded: " + message)
-            sys.exit(1)
-        except Exception:
-            print("Studio is unavailable, so this was not recorded. Note it in the ticket and carry on.")
-            sys.exit(0)
-        next_step = {"done": "Stop here; Studio will wake you with the next task.",
-                     "blocked": "Stop here; Studio will wake you when it is resolved.",
-                     "unblocked": "Carry on with the task.",
-                     "handoff": "Stop work on this; it is theirs now."}[result["kind"]]
+                # The same retry ID makes a resend after a dropped connection harmless.
+                result = report(args.kind, args.fleet, args.agent, note.strip(), args.ticket, args.to, retry_id=retry_id)
+                break
+            except HTTPError as exc:
+                try:
+                    message = json.load(exc).get("error", str(exc.code))
+                except ValueError:
+                    message = "Studio returned an error"
+                print("Not recorded: " + message)
+                sys.exit(1)
+            except (URLError, OSError, ValueError):
+                if attempt:
+                    print("Studio is unavailable, so this was not recorded. Note it in the ticket and carry on.")
+                    sys.exit(3)
+        next_step = result.get("next") or {"done": "Stop here.", "blocked": "Stop here.", "unblocked": "Carry on with the task.",
+                                           "handoff": "Stop work on this; it is theirs now."}[result["kind"]]
         who = " for " + result["recipient"] if result.get("recipient") else ""
         delivery = " (" + result["delivery"] + ")" if result.get("delivery") and result["delivery"] not in ("queued", "recorded") else ""
         print("Recorded " + result["kind"] + who + delivery + ". " + next_step)

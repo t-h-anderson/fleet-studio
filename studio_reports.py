@@ -39,7 +39,7 @@ class Reports:
         now = self.clock()
         record = {'kind': kind, 'note': note, 'ticket': ticket, 'at': now, 'agentId': agent['id'], 'agentName': agent['name']}
         if kind == 'handoff':
-            record.update(self.handoff(fleet, agent, payload.get('to'), note, ticket))
+            record.update(self.handoff(fleet, agent, payload.get('to'), note, ticket, payload.get('retryId')))
         with self.app.progress.lock, closing(self.app.progress.connect()) as db, db:
             db.execute('INSERT OR REPLACE INTO agent_notes VALUES(?,?,?)', (fleet['id'], agent['id'], json.dumps(record)))
             self.app.progress.record(db, fleet['id'], 'agent-note', agent['id'] + ':' + str(now), now, record)
@@ -87,26 +87,37 @@ class Reports:
             raise ValueError('No role or agent called ' + target.strip() + '. ' + self.targets_hint(fleet, agent))
         return [role['id']], None
 
-    def handoff(self, fleet, agent, target, note, ticket):
+    def handoff(self, fleet, agent, target, note, ticket, retry_id=None):
         role_ids, named = self.resolve(fleet, agent, target)
-        key = hashlib.sha256(json.dumps([agent['id'], role_ids, named['id'] if named else '', note, ticket]).encode()).hexdigest()[:32]
-        existing = next((f for f in self.app.automation.data['fires'] if f['id'] == key), None)
+        # The client sends one retry ID per invocation, so its own retries match and a later,
+        # identical hand-off is new; without one, a ten-minute window stands in.
+        basis = [agent['id'], retry_id] if retry_id else [agent['id'], role_ids, named['id'] if named else '', note, ticket, int(self.clock() // 600)]
+        key = hashlib.sha256(json.dumps(basis).encode()).hexdigest()[:32]
+        existing = next((f for f in self.app.automation.data['fires'] if f['id'] == key and f['status'] in ('pending', 'sending', 'sent')), None)
         if existing:
-            # A retried report returns the original hand-off instead of sending it twice.
             return {'route': 'direct', 'recipient': existing['recipientName'], 'delivery': existing['status']}
+        if any(f['id'] == key for f in self.app.automation.data['fires']):
+            key += '-' + uuid.uuid4().hex[:6]
         runtime = self.app.runtime_fleet(fleet)
         rules = [r for r in runtime.get('triggers', []) if r['enabled'] and r['kind'] == 'event' and r['targetRoleId'] in role_ids
                  and r['sourceRoleId'] in agent.get('roleIds', [])]
-        if rules:
-            # The workflow defines this hand-off, so its guards and contracts apply; errors go back to the agent.
-            if not ticket:
-                raise ValueError('This hand-off follows the workflow and needs the ticket: add --ticket <URL>.')
-            result = self.app.triggers.report({'fleetId': fleet['id'], 'agentId': agent['id'], 'eventName': rules[0]['eventName'],
-                                               'eventId': 'handoff-' + key[:24], 'ticket': ticket, 'artifact': note[:700],
-                                               'context': note, 'targetAgentId': named['id'] if named else ''})
-            actions = result.get('actions', [])
-            return {'route': 'workflow trigger ' + rules[0]['name'], 'recipient': ', '.join(a['targetName'] for a in actions),
-                    'delivery': ', '.join(sorted({a['status'] for a in actions})) or 'recorded'}
+        if rules and ticket:
+            # The workflow defines this hand-off, so its guards and contracts apply. When they refuse
+            # for reasons the agent cannot fix (holds, routing, contracts), deliver it directly instead.
+            try:
+                result = self.app.triggers.report({'fleetId': fleet['id'], 'agentId': agent['id'], 'eventName': rules[0]['eventName'],
+                                                   'eventId': 'handoff-' + key[:24], 'ticket': ticket, 'artifact': note[:700],
+                                                   'context': note, 'targetAgentId': named['id'] if named else ''})
+            except ValueError as exc:
+                fallback = str(exc)
+            else:
+                actions = result.get('actions', [])
+                if actions:
+                    return {'route': 'workflow trigger ' + rules[0]['name'], 'recipient': ', '.join(a['targetName'] for a in actions),
+                            'delivery': ', '.join(sorted({a['status'] for a in actions})) or 'recorded'}
+                fallback = 'the workflow recorded no delivery'
+            import logging
+            logging.info('Workflow hand-off for %s delivered directly: %s', agent['name'], fallback)
         recipient = named or self.pick(fleet, agent, role_ids)
         message = ('[Fleet Studio] Hand-off from ' + agent['name'] + '\n\n' + note + '\n'
                    + ('Ticket: ' + ticket + '\n' if ticket else '')
@@ -120,7 +131,8 @@ class Reports:
             try:
                 self.app.automation.send(fleet, recipient, message, fire)
             except Exception as exc:
-                fire.update(status='held', detail=str(exc)[-600:])
+                fire.update(status='failed', detail=str(exc)[-600:])
+                self.app.automation.escalate_failure(fleet, fire)
             self.app.automation.persist()
         return {'route': 'direct', 'recipient': recipient['name'], 'delivery': 'queued' if fire['status'] == 'sending' else fire['status']}
 

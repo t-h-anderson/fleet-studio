@@ -57,7 +57,7 @@ class BriefTests(unittest.TestCase):
         client = Path(__file__).resolve().parents[1] / 'workflow_client.py'
         result = subprocess.run([sys.executable, str(client), 'report', 'done', '--fleet', 'f', '--agent', 'a', '--note', 'x'],
                                 cwd=self.root, capture_output=True, text=True, env={'PATH': '', 'PYTHONPATH': str(client.parent)})
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 3, result.stderr)  # Distinct from success, still one line.
         self.assertEqual(result.stdout.strip().count('\n'), 0)
         self.assertNotIn('Traceback', result.stdout + result.stderr)
 
@@ -121,7 +121,8 @@ class ReportTests(unittest.TestCase):
         writer = fleet['agents'][0]
         app.reports.report({'kind': 'blocked', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Need the API key'})
         app.reports.report({'kind': 'unblocked', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Key arrived'})
-        self.assertEqual(self.open_work(app, fleet, writer), (True, None))
+        # Unblocked clears the blocker and leaves open work to the normal task checks (none here).
+        self.assertEqual(self.open_work(app, fleet, writer), (False, None))
 
     def test_retried_direct_handoff_is_sent_once(self):
         app, fleet = self.app()
@@ -133,7 +134,7 @@ class ReportTests(unittest.TestCase):
         send.assert_called_once()
         self.assertEqual(first['recipient'], second['recipient'])
 
-    def test_workflow_handoff_errors_are_not_bypassed(self):
+    def test_workflow_handoff_without_ticket_is_delivered_directly(self):
         app, fleet = self.app()
         writer, integrator = fleet['agents']
         state = app.store.snapshot()
@@ -141,10 +142,20 @@ class ReportTests(unittest.TestCase):
         app.store.save(state)
         preview = app.deployments.preview({'fleetId': fleet['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'})
         app.deployments.apply(preview['id'])
-        with patch.object(app.controls, 'send') as send:
-            with self.assertRaisesRegex(ValueError, 'needs the ticket'):
-                app.reports.report({'kind': 'handoff', 'fleetId': fleet['id'], 'agentId': writer['id'], 'to': 'Integrator', 'note': 'Ready'})
-            send.assert_not_called()
+        with patch.object(app.controls, 'send', return_value={'id': 'r1'}) as send:
+            result = app.reports.report({'kind': 'handoff', 'fleetId': fleet['id'], 'agentId': writer['id'], 'to': 'Integrator', 'note': 'Ready'})
+            send.assert_called_once()
+        self.assertEqual((result['route'], result['recipient']), ('direct', integrator['name']))
+
+    def test_repeated_identical_handoff_with_new_retry_id_is_sent_again(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        payload = {'kind': 'handoff', 'fleetId': fleet['id'], 'agentId': writer['id'], 'to': 'Integrator', 'note': 'Ready for review'}
+        with patch.object(app.controls, 'send', return_value={'id': 'r1'}) as send:
+            app.reports.report({**payload, 'retryId': 'a'})
+            app.reports.report({**payload, 'retryId': 'a'})
+            app.reports.report({**payload, 'retryId': 'b'})
+        self.assertEqual(send.call_count, 2)
 
     def test_unknown_handoff_target_is_one_clear_error(self):
         app, fleet = self.app()

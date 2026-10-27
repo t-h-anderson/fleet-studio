@@ -212,6 +212,37 @@ class LifecycleTests(unittest.TestCase):
         [fire] = app.automation.data['fires']
         self.assertEqual((fire['status'], fire['outcome']), ('sent', 'recovered'))
 
+    def test_undeliverable_direct_handoff_does_not_stop_other_rules(self):
+        app, fleet = self.app()
+        writer, integrator = fleet['agents']
+        app.automation.data['fires'].append({'id': 'h', 'fleetId': fleet['id'], 'ruleId': 'agent-handoff', 'ruleName': 'Agent hand-off',
+            'agentId': writer['id'], 'agentName': writer['name'], 'action': 'handoff', 'fallback': False, 'at': time.time(),
+            'episode': None, 'healthState': 'handoff', 'evidence': 'x', 'status': 'held', 'detail': '', 'outcome': None,
+            'recipientId': integrator['id'], 'recipientName': integrator['name'], 'ticket': '', 'message': 'hi'})
+        fleet = self.configure(app, automations=[rule()])
+        self.set_health(app, fleet, writer, 'looping', time.time() - 10)
+        with patch.object(app.controls, 'preview', side_effect=[ValueError('needs a linked session'), {'id': 'p'}]), \
+                patch.object(app.controls, 'send', return_value={'id': 'r1'}):
+            app.automation.tick(app.store.snapshot(), self.monitor(fleet))
+        statuses = {f['id']: f['status'] for f in app.automation.data['fires']}
+        self.assertEqual(statuses['h'], 'failed')
+        self.assertIn('sending', statuses.values())
+
+    def test_long_held_delivery_escalates_once_and_keeps_waiting(self):
+        from studio_control import AutomationHeld
+        app, fleet = self.app()
+        clock = Clock()
+        app.automation.clock = clock
+        fleet = self.configure(app, automations=[rule(cooldownMinutes=5)])
+        writer = fleet['agents'][0]
+        self.set_health(app, fleet, writer, 'looping', clock.now - 10)
+        with patch.object(app.controls, 'send', side_effect=AutomationHeld('Writer A is open in a client.')):
+            for _ in range(4):
+                app.automation.tick(app.store.snapshot(), self.monitor(fleet))
+                clock.now += 240
+        self.assertEqual(len(app.automation.snapshot(fleet['id'])['escalations']), 1)
+        self.assertEqual(app.automation.data['fires'][0]['status'], 'held')
+
     def test_one_failing_monitor_step_does_not_stop_the_others(self):
         app, fleet = self.app()
         with patch.object(app.health, 'tick', side_effect=RuntimeError('boom')), patch.object(app.automation, 'tick') as automation, \

@@ -187,6 +187,15 @@ class AccuracyTests(unittest.TestCase):
         self.assertEqual(cls('until curl -s localhost:8000; do sleep 2; done'), 'wait')
         self.assertEqual(call_metadata('Task', {'prompt': 'x'})['cls'], 'work')
 
+    def test_quoted_operators_and_common_flags_are_not_misread(self):
+        import time as clock
+        self.assertEqual(call_metadata('Bash', {'command': 'grep -n "a > b" file'})['cls'], 'explore')
+        self.assertEqual(call_metadata('Bash', {'command': 'rg -n "fn .*->" src'})['cls'], 'explore')
+        self.assertEqual(call_metadata('Bash', {'command': 'mkdir -p build/out'})['label'], 'mkdir -p build/out')
+        started = clock.time()
+        call_metadata('Bash', {'command': 'mysql ' * 20000})
+        self.assertLess(clock.time() - started, 0.05)
+
     def test_codex_rollout_without_task_events_splits_turns_per_prompt(self):
         parser = TurnParser('s', 'codex')
         def prompt(text, at):

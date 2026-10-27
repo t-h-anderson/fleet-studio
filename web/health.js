@@ -128,8 +128,6 @@ const healthOriginalRenderContent=renderContent;
 function typingInContent(){return !!document.activeElement?.closest('#content input,#content textarea,#content select');}
 renderContent=function(){
  if(!state||drag)return;
- // The periodic refresh must not redraw a form someone is filling in.
- if(['health','automation','throughput'].includes(view)&&typingInContent())return;
  if(view==='health')return renderHealth();
  if(view==='automation')return renderAutomation();
  if(view==='throughput')return renderThroughput();

@@ -152,7 +152,10 @@ async function automationClick(e){
    const existing=new Set((current().automations||[]).map(r=>r.name));
    const added=presets.filter(p=>!existing.has(p.name));
    await saveAutomations(list=>list.push(...added),'Recommended automations added, switched off. Check the backtests, then turn on the ones you want.');
-   for(const preset of added){const saved=current().automations.find(r=>r.id===preset.id);if(saved)backtests.set(saved.id,await api('/api/automation/backtest',{fleetId:activeId,rule:saved,hours:24}));}
+   await Promise.allSettled(added.map(async preset=>{
+    const saved=current().automations.find(r=>r.id===preset.id);
+    if(saved)backtests.set(saved.id,await api('/api/automation/backtest',{fleetId:activeId,rule:saved,hours:24}));
+   }));
    renderAutomation();
   }
   if(b.dataset.automationEdit)openEditor('automation',b.dataset.automationEdit);

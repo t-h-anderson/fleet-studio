@@ -329,8 +329,7 @@ class Health:
             resumed = any(call['cls'] == 'work' and (call.get('at') or 0) > note['at'] for turn in turns for call in turn.get('calls', []))
             if not resumed:
                 return True, {'reason': note['note'], 'at': note['at']}
-        if note and note['kind'] in ('blocked', 'unblocked'):
-            return True, None
+        # An unblocked or resumed agent falls through to the normal checks below.
         work, blocked = False, None
         for row in db.execute('SELECT data FROM agent_tasks WHERE fleet=? AND agent=?', (fleet_id, agent['id'])):
             report = json.loads(row['data'])

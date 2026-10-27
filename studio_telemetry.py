@@ -50,7 +50,8 @@ SECRET_PATTERNS = (
     (re.compile(r'^(?:\w+=\S+\s+)+'), ''),
     (re.compile(r'\b(export\s+\w+)=\S+'), r'\1=…'),
     (re.compile(r'(--?(?:password|passwd|token|secret|key|api-key|apikey|auth)[=\s]+)\S+', re.IGNORECASE), r'\1…'),
-    (re.compile(r'(\b(?:mysql|mariadb|mysqldump)\b.*?\s-p)\S+'), r'\1…'),
+    # Bounded and anchored to the mysql word so long commands cannot backtrack quadratically.
+    (re.compile(r'(\b(?:mysql|mariadb|mysqldump)\b[^|;&]{0,200}?\s-p)(?=\S)\S+'), r'\1…'),
     (re.compile(r'(authorization:?\s*)(bearer|basic|token)?\s*[^\s\'"]+', re.IGNORECASE), r'\1…'),
     (re.compile(r'\bbearer\s+[^\s\'"]+', re.IGNORECASE), 'Bearer …'),
     (re.compile(r'\b(ghp|gho|ghs|github_pat|glpat|xox[abp]|sk|AKIA)[-_][\w-]{8,}|\bAKIA[0-9A-Z]{16}\b'), '…'),
@@ -82,9 +83,18 @@ def studio_prompt(text):
 
 def redact(text):
     """Remove values that may be credentials or content before a label is stored."""
+    text = text[:SIGNATURE_LIMIT * 4]
     for pattern, replacement in SECRET_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
+
+
+QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"|\'[^\']*\'')
+
+
+def unquoted(text):
+    """The command with quoted arguments blanked, so `grep "a > b"` is not read as a redirect."""
+    return QUOTED.sub('""', text)
 
 
 def shell_script(command):
@@ -127,7 +137,7 @@ def classify(tool, label):
     if tool in SHELL_TOOLS:
         if not label:
             return 'other'
-        if re.match(r'(apply_patch|cat\s*>|tee)\b', label) or WRITE_REDIRECT.search(label):
+        if re.match(r'(apply_patch|cat\s*>|tee)\b', label) or WRITE_REDIRECT.search(unquoted(label)):
             return 'work'
         if ADMIN_COMMAND.search(label) and not re.match(r'(rg|grep|ag|cat|less|head|tail)\b', label):
             return 'admin'
@@ -336,6 +346,8 @@ class TurnParser:
         mid = message.get('id') or row.get('requestId') or row.get('uuid')
         # Later rows of a message that already ended its turn belong to that turn, not a new one.
         turn = self.message_turns.get(mid) if mid else None
+        if turn == 'ended':
+            return  # A late row of a message whose turn ended before a restart.
         if turn is None or turn is not self.current and self.current and self.current['status'] == 'open':
             turn = self.ensure(at)
         if mid:
@@ -445,7 +457,9 @@ class TurnParser:
         return {'current': current, 'pending': [c['seq'] for c in (self.current or {}).get('calls', []) if c.get('open')],
                 'pendingIds': {key: call['seq'] for key, call in self.pending_calls.items()},
                 'usage': dict(list(self.usage_by_message.items())[-200:]), 'codexTotal': self.codex_total,
-                'taskEvents': self.task_events}
+                'taskEvents': self.task_events,
+                # Message IDs only: those of the current turn reattach to it, the rest are ignored.
+                'messages': {mid: (turn['id'] if isinstance(turn, dict) else turn) for mid, turn in self.message_turns.items()}}
 
     def restore(self, saved):
         self.current = saved.get('current')
@@ -454,6 +468,8 @@ class TurnParser:
         self.task_events = saved.get('taskEvents', False)
         calls = {c['seq']: c for c in (self.current or {}).get('calls', [])}
         self.pending_calls = {key: calls[seq] for key, seq in (saved.get('pendingIds') or {}).items() if seq in calls}
+        current_id = (self.current or {}).get('id')
+        self.message_turns = {mid: self.current if turn_id == current_id else 'ended' for mid, turn_id in (saved.get('messages') or {}).items()}
 
     def drain(self):
         changed = [deepcopy(turn) for turn in self.changed.values()]
@@ -483,14 +499,20 @@ class TranscriptFollower:
 
     def read(self):
         size = self.path.stat().st_size
+        carried = []
         if self.offset is None or size < self.offset:
+            old = self.parser
+            if self.offset is not None and old.current and old.current['status'] == 'open':
+                # The file was rewritten; its open turn will never finish, so close it.
+                old.finish('aborted', old.current['lastAt'])
+                carried = old.drain()
             self.offset = max(0, size - INITIAL_TAIL)
-            self.parser = TurnParser(self.parser.session, self.parser.backend)
+            self.parser = TurnParser(old.session, old.backend)
             skip_first = self.offset > 0
         else:
             skip_first = False
         if size == self.offset:
-            return []
+            return carried
         with self.path.open('rb') as stream:
             stream.seek(self.offset)
             data = stream.read(size - self.offset)
@@ -504,7 +526,7 @@ class TranscriptFollower:
                 self.parser.feed(json.loads(line))
             except (ValueError, UnicodeError, TypeError, AttributeError, KeyError):
                 continue
-        return self.parser.drain()
+        return carried + self.parser.drain()
 
 
 class Telemetry:

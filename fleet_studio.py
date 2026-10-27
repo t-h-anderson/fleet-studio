@@ -31,6 +31,7 @@ from studio_backlog import Backlog, clean_config
 from studio_activity import activity
 from studio_progress import Progress, clean_settings
 from studio_telemetry import Telemetry
+from studio_health import Health, clean_health_settings
 from studio_reconciliation import Reconciliation
 from studio_goals import Goals
 from studio_agents import Runtimes, clean_binding, clean_hosts, tmux_launch, LOCAL_HOST
@@ -151,10 +152,12 @@ def validate_fleets(value, host_ids=()):
             design = clean_design(raw, agents)
             triggers = validate_triggers(raw.get("triggers", []), {r["id"] for r in design["roles"]}, agent_ids)
             backlog = clean_config(raw.get("backlog"), agent_ids, design.get("roleSource"))
+            health = clean_health_settings(raw.get("health"))
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise ValidationError(str(exc)) from None
         candidate = {
             **design, "triggers": triggers, "backlog": backlog, "progress": clean_settings(raw.get("progress")),
+            "health": health,
             "id": fid, "name": text(raw.get("name"), "Fleet name", 80),
             "description": text(raw.get("description", ""), "Description", 600, required=False),
             "windowName": window_name, "agents": agents, "links": links,
@@ -314,6 +317,7 @@ class Application:
         self.triggers = Triggers(self)
         self.progress = Progress(self)
         self.telemetry = Telemetry(self)
+        self.health = Health(self)
         self.goals = Goals(self)
         self.reconciliation = Reconciliation(self)
         from studio_context import CurrentContext
@@ -345,6 +349,7 @@ class Application:
                     previous = self.monitor["sessions"]
                     self.monitor = latest
                 self.telemetry.tick(state)
+                self.health.tick(state, latest)
                 self.triggers.tick(state, self.status())
                 self.progress.tick(state, self.status())
                 for fleet in state["fleets"]:
@@ -542,6 +547,9 @@ class Handler(BaseHTTPRequestHandler):
                 fleet = app.store.fleet(query.get("fleetId", [None])[0])
                 agent_id = query.get("agentId", [None])[0]
                 return self.json(200, {"turns": app.telemetry.turns(fleet["id"], agent_id, limit=100)})
+            if path == "/api/health/agents":
+                fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
+                return self.json(200, app.health.snapshot(fleet_id))
             if path == "/api/backlog":
                 fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
                 return self.json(200, app.backlog.snapshot(fleet_id))

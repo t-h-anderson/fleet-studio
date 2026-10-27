@@ -26,14 +26,14 @@ MARKER = '[Fleet Studio]'
 
 DEFAULT_MESSAGES = {
     'looping': ("You appear to be repeating yourself: {evidence}\n"
-                "Stop repeating that step. Write down the root cause in one or two sentences, then try a different approach "
+                "Stop repeating that step. State the root cause in one or two sentences in your reply, then try a different approach "
                 "toward your goal. If you cannot make progress without help, run the blocked report and stop."),
-    'stalled': ("{evidence}\nYour goal: {goal}\nContinue the work on {ticket}. If something is stopping you, "
+    'stalled': ("{evidence}\nYour goal: {goal}\nContinue the work{on_ticket}. If something is stopping you, "
                 "say what it is with the blocked report instead of waiting."),
     'admin-heavy': ("{evidence}\nReporting is not the goal. Do not post status updates, poll, or re-read instructions. "
                     "Spend the next turn on the work itself: {goal}"),
     'burning': ("{evidence}\nPause and summarise what you have learned in three bullet points, decide the single next edit "
-                "or test that moves {ticket} forward, and do it."),
+                "or test that moves the work{on_ticket} forward, and do it."),
     'waiting': "You reported a blocker: {evidence}\nCheck whether it is resolved. If it is, continue; if not, do nothing further.",
 }
 PRESETS = [
@@ -422,6 +422,13 @@ class Automation:
         fire['detail'] += ' Escalated instead.'
 
     def goal(self, fleet, agent):
+        """The goal as the agent's brief states it: from the active release when there is one."""
+        release = self.app.deployments.data['active'].get(fleet['id'])
+        if release:
+            try:
+                fleet = self.app.deployments.release(release)['fleet']
+            except (OSError, ValueError):
+                pass
         roles = [r for r in fleet.get('roles', []) if r['id'] in agent.get('roleIds', [])]
         return '; '.join(r.get('goal') or r.get('responsibilities', '') for r in roles if r.get('goal') or r.get('responsibilities')) or 'the outcome of your role'
 
@@ -438,8 +445,9 @@ class Automation:
 
     def compose(self, fleet, rule, agent, health):
         template = rule['message'] or DEFAULT_MESSAGES.get(health['state'], DEFAULT_MESSAGES['stalled'])
+        ticket = self.ticket(fleet, agent)
         values = {'agent': agent['name'], 'goal': self.goal(fleet, agent), 'evidence': evidence_text(health),
-                  'ticket': self.ticket(fleet, agent) or 'your current task', 'state': health['state'],
+                  'ticket': ticket or 'your current task', 'on_ticket': ' on ' + ticket if ticket else '', 'state': health['state'],
                   'minutes': str(int((self.clock() - health['since']) // 60))}
         body = template
         for key, value in values.items():

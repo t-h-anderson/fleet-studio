@@ -141,8 +141,9 @@ class SpecificationTests(unittest.TestCase):
         self.assertIn("workflow_client.py",preview["targets"][0]["text"])
         for target in preview["targets"]:
             self.assertIn("--agent "+target["agentId"],target["text"])
-            self.assertIn("instructions --fleet "+f["id"],target["text"])
-            self.assertNotIn("acknowledge",target["text"])
+            # Short briefs arrive inline, so the agent need not run anything to read them.
+            self.assertIn("## Reporting",target["text"])
+            self.assertNotIn("' acknowledge",target["text"])
             self.assertNotIn("<your-agent-id>",target["text"])
         self.assertEqual(preview,app.controls.existing_preview(preview["id"]))
         self.assertEqual(app.deployments.overview(f)["acks"],[])
@@ -211,7 +212,7 @@ class SpecificationTests(unittest.TestCase):
         self.assertIn("Writer A",instructions(f["id"],aid,self.root,self.root))
         self.assertIn("report handoff", instructions(f["id"],aid,self.root,self.root))
         self.assertIn("## Hand-offs", instructions(f["id"],aid,self.root,self.root))
-        with self.assertRaisesRegex(ValueError,"no longer matches"):
+        with self.assertRaisesRegex(ValueError,"belongs to"):
             instructions(f["id"],aid,self.root,self.root.parent)
         state=app.store.snapshot();state["fleets"][0]["roles"][1]["responsibilities"]="Redeployed role";app.store.save(state);self.deploy(app)
         self.assertIn("Redeployed role",instructions(f["id"],aid,self.root,self.root))
@@ -239,7 +240,10 @@ class SpecificationTests(unittest.TestCase):
         f=installed["state"]["fleets"][0]
         self.assertTrue(all(a["entryPoint"]=="installed" for a in app.deployments.overview(f)["adoption"]))
         child=self.root/"child";child.mkdir()
-        with self.assertRaisesRegex(ValueError,"no longer matches"):
+        # A subfolder of the agent's workspace still reads the brief; a nested checkout does not.
+        self.assertIn("## Reporting",instructions(f["id"],f["agents"][0]["id"],self.root,child))
+        (child/".git").mkdir()
+        with self.assertRaisesRegex(ValueError,"separate checkout"):
             instructions(f["id"],f["agents"][0]["id"],self.root,child)
         for a in f["agents"]:
             self.assertIn("# "+a["name"]+" — ",instructions(f["id"],a["id"],self.root,self.root))

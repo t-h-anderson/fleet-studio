@@ -67,7 +67,8 @@ class Reports:
             return 'not linked: ' + str(exc)
 
     def targets_hint(self, fleet, agent):
-        names = [r['name'] for r in fleet.get('roles', []) if r.get('kind') != 'subagent'] + [a['name'] for a in fleet['agents'] if a['id'] != agent['id']]
+        names = [r['name'] for r in fleet.get('roles', []) if r.get('kind', 'subagent' if r.get('key') == 'subagent-reviewers' else 'agent') == 'agent']
+        names += [a['name'] for a in fleet['agents'] if a['id'] != agent['id'] and a['enabled']]
         return 'Use --to with one of: ' + ', '.join(names) + '.'
 
     def resolve(self, fleet, agent, target):

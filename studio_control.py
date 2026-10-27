@@ -87,29 +87,9 @@ def assignment_text(fleet, agent):
             raise ValueError(role["name"] + " has unpublished policy edits. Prepare/reconcile the policy proposal before applying this role.")
         lines += ["Role: " + role["name"], "Responsibilities: " + role["responsibilities"],
                   "Authority and handoff: " + role["authority"], ""]
-    if agent.get("notes"):
-        lines += ["Agent-specific assignment:", agent["notes"], ""]
-    outgoing = [link for link in fleet.get("roleLinks", []) if link["source"] in agent.get("roleIds", [])]
-    role_names = {role["id"]: role["name"] for role in fleet.get("roles", [])}
-    if outgoing:
-        lines.append("Designed handoffs (task routing remains subject to current policy and custody):")
-        for link in outgoing:
-            lines.append("- " + link["label"] + " -> " + role_names[link["target"]] +
-                         "; when: " + (link.get("trigger") or "as agreed") +
-                         "; deliver: " + (link.get("artifact") or "as agreed") +
-                         "; condition: " + (link.get("condition") or "current project policy"))
-    events = [rule for rule in fleet.get("triggers", []) if rule["kind"] == "event" and rule["sourceRoleId"] in agent.get("roleIds", [])]
-    if events:
-        helper = Path(__file__).resolve().parent / "fleet_event.py"
-        lines += ["", "Formal handoff events configured for these roles:",
-                  "Report an event only after its stated condition is satisfied. Use a stable event ID such as ticket plus reviewed commit; reporting is not acceptance evidence."]
-        for rule in events:
-            lines.append("Event: " + rule["eventName"] + "; trigger: " + rule["name"])
-        lines.append("Command: python " + str(helper) + " --agent " + agent["id"] +
-                     " --fleet " + fleet["id"] + " --event <event-name> --id <stable-handoff-id>" +
-                     " --to <recipient-name-or-id> --ticket <ticket-or-comment-URL> --artifact <exact-head-and-evidence> --context <bounded-next-action>")
-    lines += ["", "Acknowledge the assignment and identify any conflict before changing active ownership or scope."]
-    return "\n".join(lines)
+    # The checks above keep committed policy authoritative; the message itself is the agent's brief.
+    from workflow_spec import brief_document, export_spec
+    return "[Fleet Studio] Your brief (draft, not yet deployed):\n\n" + brief_document(fleet, export_spec(fleet), agent, "draft", Path(__file__).resolve().parent)
 
 
 class Controls:

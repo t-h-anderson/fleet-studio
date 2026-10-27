@@ -3,6 +3,7 @@
     python workflow_client.py instructions --fleet F --agent A
     python workflow_client.py report done --fleet F --agent A --ticket URL --note "what changed"
     python workflow_client.py report blocked --fleet F --agent A --note "what you need"
+    python workflow_client.py report unblocked --fleet F --agent A --note "what changed"
     python workflow_client.py report handoff --fleet F --agent A --to ROLE --note "what to pick up"
 """
 import argparse
@@ -63,9 +64,18 @@ def instructions(fleet_id, agent_id, root=None, directory=None):
     agent = next(a for a in release["fleet"]["agents"] if a["id"] == agent_id)
     state = json.loads((root / "fleet-studio.json").read_text(encoding="utf-8-sig"))
     current = next((a for f in state["fleets"] if f["id"] == fleet_id for a in f["agents"] if a["id"] == agent_id), None)
-    expected = Path(directory or Path.cwd()).resolve()
-    if agent.get('hostId', 'local') != 'local' or not same_binding(current, agent) or Path(agent["directory"]).resolve() != expected:
-        raise ValueError("This agent folder or session no longer matches the deployed binding. Review and redeploy the assignment.")
+    here = Path(directory or Path.cwd()).resolve()
+    home = Path(agent["directory"]).resolve()
+    if agent.get('hostId', 'local') != 'local' or not (here == home or here.is_relative_to(home)):
+        raise ValueError("This brief belongs to " + agent["name"] + " in " + str(home) + "; run the command from that folder.")
+    # Subfolders are fine, but a nested checkout has its own workflow and must not inherit this one.
+    for folder in [here, *here.parents]:
+        if folder == home:
+            break
+        if (folder / ".git").exists():
+            raise ValueError(str(folder) + " is a separate checkout; this brief does not apply there.")
+    if not same_binding(current, agent):
+        raise ValueError("Your Studio binding changed since this brief was published. Carry on with your current task; Studio will send you an updated brief.")
     return assignment_document(release["fleet"], release["spec"], agent, rid, Path(__file__).parent)
 
 
@@ -73,27 +83,49 @@ if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("action", choices=["instructions", "report", "acknowledge"])
-    parser.add_argument("kind", nargs="?", choices=["done", "blocked", "handoff"])
+    parser.add_argument("kind", nargs="?", choices=["done", "blocked", "unblocked", "handoff"])
     parser.add_argument("--fleet", required=True)
     parser.add_argument("--agent", required=True)
-    parser.add_argument("--note")
+    parser.add_argument("--note", help="the note, or - to read it from standard input")
+    parser.add_argument("--note-file", help="read the note from this file (avoids shell quoting)")
     parser.add_argument("--ticket")
     parser.add_argument("--to")
     parser.add_argument("--release")
     parser.add_argument("--directory")
     args = parser.parse_args()
+    # Every outcome is one plain line, so an agent never goes investigating Studio itself.
     if args.action == "instructions":
-        print(instructions(args.fleet, args.agent, directory=args.directory))
-    elif args.action == "report":
-        if not args.kind or not args.note:
-            parser.error("report needs done, blocked or handoff and --note")
         try:
-            result = report(args.kind, args.fleet, args.agent, args.note, args.ticket, args.to)
+            print(instructions(args.fleet, args.agent, directory=args.directory))
+        except Exception as exc:
+            print("Brief unavailable: " + (str(exc) if isinstance(exc, ValueError) else "Studio's files could not be read") + ". Carry on with your current task.")
+    elif args.action == "report":
+        note = args.note
+        if args.note_file:
+            note = Path(args.note_file).read_text(encoding="utf-8")
+        elif note == "-":
+            note = sys.stdin.read()
+        if not args.kind or not (note or "").strip():
+            parser.error("report needs done, blocked, unblocked or handoff, and a note")
+        try:
+            result = report(args.kind, args.fleet, args.agent, note.strip(), args.ticket, args.to)
         except HTTPError as exc:
-            # One clear line, so an agent does not investigate Studio internals.
-            print("Not recorded: " + json.load(exc).get("error", str(exc.code)))
+            try:
+                message = json.load(exc).get("error", str(exc.code))
+            except ValueError:
+                message = "Studio returned an error"
+            print("Not recorded: " + message)
             sys.exit(1)
-        print("Recorded " + result["kind"] + (" for " + result["recipient"] if result.get("recipient") else "") + ". Carry on.")
+        except Exception:
+            print("Studio is unavailable, so this was not recorded. Note it in the ticket and carry on.")
+            sys.exit(0)
+        next_step = {"done": "Stop here; Studio will wake you with the next task.",
+                     "blocked": "Stop here; Studio will wake you when it is resolved.",
+                     "unblocked": "Carry on with the task.",
+                     "handoff": "Stop work on this; it is theirs now."}[result["kind"]]
+        who = " for " + result["recipient"] if result.get("recipient") else ""
+        delivery = " (" + result["delivery"] + ")" if result.get("delivery") and result["delivery"] not in ("queued", "recorded") else ""
+        print("Recorded " + result["kind"] + who + delivery + ". " + next_step)
     else:
         if not args.release:
             parser.error("acknowledge requires --release")

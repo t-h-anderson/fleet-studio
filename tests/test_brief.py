@@ -41,6 +41,26 @@ class BriefTests(unittest.TestCase):
         for phrase in ('workflow_client.py" acknowledge', 'handoff-received', 'stable event ID', '## Ticket states'):
             self.assertNotIn(phrase, text)
 
+    def test_fleet_wide_policies_reach_every_brief_without_bloating_it(self):
+        app, fleet = self.app()
+        spec = export_spec(fleet)
+        spec['policies'] = [{'id': 'short-rule', 'name': 'Small commits', 'roles': [], 'sources': [], 'text': 'Keep each commit small and focused.'},
+                            {'id': 'long-rule', 'name': 'Release process', 'roles': [], 'sources': [], 'text': ' '.join(['step'] * 200)}]
+        text = brief_document(fleet, spec, fleet['agents'][0], 'a' * 32, Path('/studio'))
+        self.assertIn('Keep each commit small and focused.', text)
+        self.assertIn('Also in force', text)
+        self.assertIn('Release process', text)
+        self.assertNotIn('step step step', text)
+
+    def test_client_reports_an_unavailable_studio_in_one_line(self):
+        import subprocess
+        client = Path(__file__).resolve().parents[1] / 'workflow_client.py'
+        result = subprocess.run([sys.executable, str(client), 'report', 'done', '--fleet', 'f', '--agent', 'a', '--note', 'x'],
+                                cwd=self.root, capture_output=True, text=True, env={'PATH': '', 'PYTHONPATH': str(client.parent)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().count('\n'), 0)
+        self.assertNotIn('Traceback', result.stdout + result.stderr)
+
     def test_goal_fields_round_trip_and_v1_specs_still_validate(self):
         app, fleet = self.app()
         fleet = self.with_goal(app)

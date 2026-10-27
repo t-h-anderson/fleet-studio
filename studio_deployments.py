@@ -257,8 +257,6 @@ class Deployments:
         if not rid:
             raise ValueError("Deploy the workflow before notifying agents.")
         release = self.release(rid)
-        if any(a.get("hostId", "local") != "local" and a.get("enabled") for a in release["fleet"]["agents"]):
-            raise ValueError("Remote workflow adoption is unavailable until remote assignment and receipt transport is configured.")
         bindings = {a["id"]: a for a in release["fleet"]["agents"]}
         ids = payload.get("agentIds", [a["id"] for a in fleet["agents"] if a["sessionId"]])
         for agent in fleet["agents"]:
@@ -303,8 +301,17 @@ class Deployments:
                 changed = []
         summary = ("Changed: " + ", ".join(changed) + "." if changed else
                    "Nothing in your brief changed." if previous else "This is your first brief.")
-        return ("[Fleet Studio] Your brief was updated (release " + release_id[:8] + "). " + summary + "\n\n"
-                "Read it when you reach a natural stopping point, then carry on with your current work:\n" + command)
+        header = "[Fleet Studio] Your brief was updated (release " + release_id[:8] + "). " + summary
+        try:
+            brief = (self.root / release_id / "agents" / (agent["id"] + ".md")).read_text(encoding="utf-8")
+        except OSError:
+            brief = ""
+        # Agents without a folder entry point (Claude Code, remote) cannot run the read command, so
+        # they get the brief itself; so does anyone whose brief is short enough to read in place.
+        inline = agent.get("backend", "codex") != "codex" or agent.get("hostId", "local") != "local" or len(brief.split()) <= 400
+        if brief and inline and len(header) + len(brief) < 15000:
+            return header + " Read it at a natural stopping point, then carry on:\n\n" + brief
+        return header + "\n\nRead it when you reach a natural stopping point, then carry on with your current work:\n" + command
 
     def acknowledge(self, payload):
         with self.app.store.lock:

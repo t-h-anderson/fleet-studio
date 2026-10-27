@@ -104,7 +104,8 @@ class DesignTests(unittest.TestCase):
         message = assignment_text(fleet, fleet["agents"][0])
         self.assertIn("Implement assigned work", message)
         self.assertIn("Only packet A", message)
-        self.assertIn("explicit stops", message)
+        self.assertIn("## Reporting", message)
+        self.assertNotIn("Acknowledge", message)
 
     def test_preview_rejects_stale_state_and_slash_commands(self):
         app, fleet = self.app()

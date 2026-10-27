@@ -65,7 +65,9 @@ class EntryPoints:
         rid = self.app.deployments.data["active"].get(fleet["id"])
         if not rid:
             raise ValueError("Deploy a workflow before installing entry points.")
-        ids = payload.get("agentIds", [a["id"] for a in fleet["agents"] if a["directory"]])
+        # Claude Code and remote agents receive their brief inside the notification instead.
+        ids = payload.get("agentIds", [a["id"] for a in fleet["agents"] if a["directory"] and a.get("hostId", "local") == "local"
+                                       and a.get("backend", "codex") == "codex"])
         agents = [a for a in fleet["agents"] if a["id"] in ids]
         if not agents or len(agents) != len(set(ids)):
             raise ValueError("Choose existing agents with assigned folders.")
@@ -75,7 +77,7 @@ class EntryPoints:
             if agent.get("hostId", "local") != "local":
                 raise ValueError("Remote entry-point installation is not supported; remote paths must never be opened locally.")
             if agent.get('backend', 'codex') != 'codex':
-                raise ValueError('Automatic entry-point installation supports Codex only. Load Claude assignments explicitly with workflow_client.py instructions.')
+                raise ValueError('Entry points are installed for Codex agents only; Claude Code agents receive their brief inside the notification.')
             if agent["id"] not in deployed or not same_binding(deployed[agent["id"]], agent):
                 raise ValueError("Agent bindings changed. Deploy again before installing entry points.")
             if not agent["directory"]:

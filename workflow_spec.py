@@ -321,7 +321,7 @@ def brief_document(fleet, spec, agent, release_id, app_root):
     spec_roles = {r["id"]: r for r in spec["roles"]}
     mine = [spec_roles[by_id[rid]] for rid in agent.get("roleIds", []) if by_id.get(rid) in spec_roles]
     names = {r["id"]: r["name"] for r in fleet["roles"]}
-    client = '"' + str(Path(app_root) / "workflow_client.py") + '"'
+    client = "'" + str(Path(app_root) / "workflow_client.py") + "'"
     identity = " --fleet " + fleet["id"] + " --agent " + agent["id"]
     lines = ["# " + agent["name"] + " — " + (", ".join(r["name"] for r in mine) or "unassigned"), ""]
     for role in mine:
@@ -353,17 +353,30 @@ def brief_document(fleet, spec, agent, release_id, app_root):
               "Studio watches your session, so do not post progress updates, receipts or acknowledgements, "
               "and do not poll, sleep-loop or re-read this brief. Studio wakes you when there is work and tells you when this brief changes. "
               "Keep technical evidence where it normally goes (commits, the ticket or MR). Run one command only when:", "",
-              "```shell",
-              "python " + client + " report done" + identity + ' --ticket "<ticket URL>" --note "<what changed and where>"',
-              "python " + client + " report blocked" + identity + ' --note "<what you need, and from whom>"',
-              "python " + client + " report handoff" + identity + ' --to "<role or agent>" --note "<what to pick up>"',
+              "```",
+              "python " + client + " report done" + identity + " --note '<what changed and where>'",
+              "python " + client + " report blocked" + identity + " --note '<what you need, and from whom>'",
+              "python " + client + " report unblocked" + identity + " --note '<what changed>'",
+              "python " + client + " report handoff" + identity + " --to '<who>' --note '<what to pick up>'",
               "```", "",
-              "A blocked report stays in force until you report done or hand off; there is no need to repeat it.", ""]
-    policies = [p for p in spec.get("policies", []) if set(p["roles"]) & {r["id"] for r in mine}]
-    if policies:
-        lines += ["## Policies for your role", ""]
-        for policy in policies:
+              "Studio infers your current ticket; add --ticket <URL> to name a different one. "
+              "For long notes use --note-file <path>, or --note - to read standard input. "
+              "A blocked report stays in force until you report unblocked, done or a hand-off, so there is no need to repeat it.", ""]
+    targets = [r["name"] for r in fleet.get("roles", []) if r.get("kind", "subagent" if r.get("key") == "subagent-reviewers" else "agent") == "agent"]
+    targets += [a["name"] for a in fleet["agents"] if a["id"] != agent["id"] and a.get("enabled", True)]
+    if targets:
+        lines += ["--to accepts: " + ", ".join(targets) + ".", ""]
+    role_ids = {r["id"] for r in mine}
+    tagged = [p for p in spec.get("policies", []) if set(p["roles"]) & role_ids]
+    shared = [p for p in spec.get("policies", []) if not p["roles"]]
+    if tagged or shared:
+        lines += ["## Policies", ""]
+        for policy in tagged + [p for p in shared if len(p["text"].split()) <= 80]:
             lines += ["### " + policy["name"], "", policy["text"], ""]
+        longer = [p["name"] for p in shared if len(p["text"].split()) > 80]
+        if longer:
+            # Long fleet-wide policies are named, not copied, so every brief stays short.
+            lines += ["Also in force (full text in WORKFLOW.md; read only when your task touches it): " + "; ".join(longer) + ".", ""]
     lines += ["Brief " + digest({"spec": digest(spec), "agent": agent["id"]})[:12] + " · release " + release_id]
     return "\n".join(line.rstrip() for line in lines)
 

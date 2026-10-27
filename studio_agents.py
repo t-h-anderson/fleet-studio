@@ -22,7 +22,7 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 from studio_bindings import runtime_binding, session_key
 import studio_runtime
-from studio_activity import activity as codex_activity
+from studio_activity import activity as codex_activity, rollout_path
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 LOCAL_HOST = "local"
@@ -102,12 +102,16 @@ class CodexBackend(AgentBackend):
     def activity(self, session_id, fixture=None):
         return codex_activity(self.root, session_id, fixture)
 
+    def transcript_path(self, session_id):
+        return rollout_path(self.root, session_id)
+
     def resume_command(self, session_id, directory):
         return [self.executable, "resume", session_id, "--cd", directory]
 
 
 def claude_text(content):
-    """Public text blocks only. Thinking, tool inputs and tool results are never copied."""
+    """Public text blocks only. Thinking, tool inputs and tool results are never copied here;
+    studio_telemetry keeps tool-call metadata (name, short signature, error flag) separately."""
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
@@ -351,6 +355,9 @@ class ClaudeCodeBackend(AgentBackend):
             if log:
                 log.close()
         return 'started', 'Headless Claude Code process started; turn completion and agent adoption are not yet confirmed.'
+
+    def transcript_path(self, session_id):
+        return self.transcripts().get(session_id)
 
     def activity(self, session_id, fixture=None):
         path = self.transcripts().get(session_id)

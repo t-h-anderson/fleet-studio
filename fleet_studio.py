@@ -30,6 +30,7 @@ from studio_workflow import populate_roles, populate_triggers, contract_problem
 from studio_backlog import Backlog, clean_config
 from studio_activity import activity
 from studio_progress import Progress, clean_settings
+from studio_telemetry import Telemetry
 from studio_reconciliation import Reconciliation
 from studio_goals import Goals
 from studio_agents import Runtimes, clean_binding, clean_hosts, tmux_launch, LOCAL_HOST
@@ -312,6 +313,7 @@ class Application:
         self.controls = Controls(self)
         self.triggers = Triggers(self)
         self.progress = Progress(self)
+        self.telemetry = Telemetry(self)
         self.goals = Goals(self)
         self.reconciliation = Reconciliation(self)
         from studio_context import CurrentContext
@@ -342,6 +344,7 @@ class Application:
                 with self.lock:
                     previous = self.monitor["sessions"]
                     self.monitor = latest
+                self.telemetry.tick(state)
                 self.triggers.tick(state, self.status())
                 self.progress.tick(state, self.status())
                 for fleet in state["fleets"]:
@@ -534,6 +537,11 @@ class Handler(BaseHTTPRequestHandler):
                 if path.endswith("history"):
                     return self.json(200, app.progress.history(fid, query.get("taskUrl", [None])[0], query.get("agentId", [None])[0], query.get("before", [None])[0]))
                 return self.json(200, app.progress.snapshot(fid))
+            if path == "/api/telemetry/turns":
+                query = parse_qs(urlsplit(self.path).query)
+                fleet = app.store.fleet(query.get("fleetId", [None])[0])
+                agent_id = query.get("agentId", [None])[0]
+                return self.json(200, {"turns": app.telemetry.turns(fleet["id"], agent_id, limit=100)})
             if path == "/api/backlog":
                 fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
                 return self.json(200, app.backlog.snapshot(fleet_id))

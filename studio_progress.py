@@ -371,6 +371,7 @@ class Progress:
                     cutoff = now - clean_settings(f.get('progress'))['retentionDays'] * 86400
                     db.execute('DELETE FROM observations WHERE fleet=? AND at<?', (f['id'], cutoff))
                     self.metrics.prune(db, f['id'], cutoff)
+                    self.app.telemetry.prune(db, f['id'], cutoff)
                     for row in db.execute('SELECT * FROM handoffs WHERE fleet=?', (f['id'],)).fetchall():
                         h = json.loads(row['data'])
                         if not h.get('assignmentContract') and (h.get('receivedAt') or h.get('status') == 'dismissed') and h['createdAt'] < cutoff:

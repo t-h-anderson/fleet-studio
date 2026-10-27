@@ -33,6 +33,7 @@ from studio_progress import Progress, clean_settings
 from studio_telemetry import Telemetry
 from studio_health import Health, clean_health_settings
 from studio_reports import Reports
+from studio_dispatch import Dispatch, clean_dispatch
 from studio_automation import Automation, backtest, clean_alerts, clean_automations, clean_throttles
 from studio_reconciliation import Reconciliation
 from studio_goals import Goals
@@ -159,11 +160,12 @@ def validate_fleets(value, host_ids=()):
             automations = clean_automations(raw.get("automations"), role_ids)
             throttles = clean_throttles(raw.get("throttles"), role_ids)
             alerts = clean_alerts(raw.get("alerts"))
+            dispatch = clean_dispatch(raw.get("dispatch"), [s["id"] for s in (raw.get("workflow") or {}).get("states", [])])
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise ValidationError(str(exc)) from None
         candidate = {
             **design, "triggers": triggers, "backlog": backlog, "progress": clean_settings(raw.get("progress")),
-            "health": health, "automations": automations, "throttles": throttles, "alerts": alerts,
+            "health": health, "automations": automations, "throttles": throttles, "alerts": alerts, "dispatch": dispatch,
             "id": fid, "name": text(raw.get("name"), "Fleet name", 80),
             "description": text(raw.get("description", ""), "Description", 600, required=False),
             "windowName": window_name, "agents": agents, "links": links,
@@ -326,6 +328,7 @@ class Application:
         self.health = Health(self)
         self.automation = Automation(self)
         self.reports = Reports(self)
+        self.dispatch = Dispatch(self)
         self.goals = Goals(self)
         self.reconciliation = Reconciliation(self)
         from studio_context import CurrentContext
@@ -377,6 +380,7 @@ class Application:
         steps = (("Telemetry", lambda: self.telemetry.tick(state)),
                  ("Health", lambda: self.health.tick(state, latest)),
                  ("Automations", lambda: self.automation.tick(state, latest)),
+                 ("Dispatch", lambda: self.dispatch.tick(state, latest)),
                  ("Triggers", lambda: self.triggers.tick(state, self.status())),
                  ("Progress", lambda: self.progress.tick(state, self.status())))
         failures = []
@@ -661,7 +665,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/workflow/preview":
                 return self.json(200, app.deployments.preview(payload))
             if path == "/api/workflow/apply":
-                return self.json(200, app.deployments.apply(payload.get("previewId")))
+                preview = app.deployments.previews.get(payload.get("previewId")) or {}
+                result = app.deployments.apply(payload.get("previewId"))
+                if result.get("release") and preview.get("fleetId"):
+                    # Agents get their brief straight away, and dispatch then offers them work.
+                    result["notified"] = bool(app.dispatch.on_deploy(preview["fleetId"]))
+                return self.json(200, result)
             if path == "/api/workflow/pause":
                 return self.json(200, app.deployments.pause(payload))
             if path == "/api/workflow/notify":

@@ -38,14 +38,26 @@ class Reports:
         ticket = link(payload['ticket'], 'ticket') if payload.get('ticket') else self.app.automation.ticket(fleet, agent)
         now = self.clock()
         record = {'kind': kind, 'note': note, 'ticket': ticket, 'at': now, 'agentId': agent['id'], 'agentName': agent['name']}
+        dispatch = self.app.dispatch
         if kind == 'handoff':
             record.update(self.handoff(fleet, agent, payload.get('to'), note, ticket, payload.get('retryId')))
+            record['next'] = 'Stop work on this; it is ' + (record.get('recipient') or 'theirs') + ' now.'
+            if ticket:
+                dispatch.release(fleet['id'], ticket)
+        elif kind == 'done':
+            record.update(dispatch.route_done(fleet, agent, note, ticket, payload.get('to'), payload.get('retryId')))
+        elif kind == 'blocked':
+            record.update(dispatch.blocked(fleet, agent, note, ticket, payload.get('to')))
+        else:
+            record['next'] = 'Carry on with the task.'
         with self.app.progress.lock, closing(self.app.progress.connect()) as db, db:
             db.execute('INSERT OR REPLACE INTO agent_notes VALUES(?,?,?)', (fleet['id'], agent['id'], json.dumps(record)))
             self.app.progress.record(db, fleet['id'], 'agent-note', agent['id'] + ':' + str(now), now, record)
         record['milestone'] = self.milestone(fleet, agent, kind, note, ticket)
         self.app.event(agent['name'] + ' · ' + kind, note[:140], fleet['id'])
-        return {'recorded': True, 'kind': kind, 'ticket': ticket, **{k: record[k] for k in ('recipient', 'route', 'delivery') if k in record}}
+        if kind in ('done', 'unblocked', 'handoff'):
+            dispatch.wake_waiting(fleet, agent)
+        return {'recorded': True, 'kind': kind, 'ticket': ticket, **{k: record[k] for k in ('recipient', 'route', 'delivery', 'next') if k in record}}
 
     def milestone(self, fleet, agent, kind, note, ticket):
         """Mirror the report into the tracker-linked progress model when a release and ticket exist."""

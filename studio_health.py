@@ -331,6 +331,10 @@ class Health:
                 return True, {'reason': note['note'], 'at': note['at']}
         # An unblocked or resumed agent falls through to the normal checks below.
         work, blocked = False, None
+        if db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='dispatch_claims'").fetchone():
+            # A ticket Studio offered or routed to the agent is its open work until it reports back.
+            work = bool(db.execute("SELECT 1 FROM dispatch_claims WHERE fleet=? AND agent=? AND status!='done' AND at>?",
+                                   (fleet_id, agent['id'], settled)).fetchone())
         for row in db.execute('SELECT data FROM agent_tasks WHERE fleet=? AND agent=?', (fleet_id, agent['id'])):
             report = json.loads(row['data'])
             if (report.get('taskUrl') in closed or report.get('phase') == 'submitted' or report.get('kind') == 'work-finished'

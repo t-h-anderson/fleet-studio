@@ -314,11 +314,18 @@ class Automation:
             if fire['status'] == 'sending':
                 changed = self.settle(fleet, fire) or changed
                 continue
+            if fire['ruleId'] == 'dispatch' and now - fire['at'] > 900:
+                # An offer the agent could not take within 15 minutes goes back to the pool.
+                fire.update(status='skipped', detail='The agent was not ready; the ticket was offered back.')
+                self.app.dispatch.release(fleet['id'], fire['ticket'])
+                changed = True
+                continue
             if now - fire['at'] > 86400:
                 fire.update(status='skipped', detail='Not delivered within a day; dropped.')
                 changed = True
                 continue
-            if fire['ruleId'] == 'agent-handoff':
+            if fire.get('message') and fire.get('recipientId'):
+                # Direct messages (agent hand-offs, dispatch, blocker notices) resend as written.
                 recipient = next((a for a in fleet['agents'] if a['id'] == fire['recipientId']), None)
                 if not recipient:
                     fire.update(status='failed', detail='The hand-off recipient left the fleet.')
@@ -328,11 +335,15 @@ class Automation:
                 try:
                     self.send(fleet, recipient, fire['message'], fire)
                 except Exception as exc:
-                    # One undeliverable hand-off must never stop the other rules from running.
+                    # One undeliverable message must never stop the other rules from running.
                     fire.update(status='failed', detail=str(exc)[-600:])
-                    self.escalate_failure(fleet, fire)
+                    if fire['ruleId'] == 'dispatch':
+                        self.app.dispatch.release(fleet['id'], fire['ticket'])
+                    else:
+                        self.escalate_failure(fleet, fire)
                 changed = changed or fire['status'] != 'held' or fire['detail'] != before
-                changed = self.escalate_long_hold(fleet, fire, now, 15) or changed
+                if fire['ruleId'] != 'dispatch':
+                    changed = self.escalate_long_hold(fleet, fire, now, 15) or changed
                 continue
             rule = next((r for r in fleet.get('automations', []) if r['id'] == fire['ruleId']), None)
             agent = next((a for a in fleet['agents'] if a['id'] == fire['agentId']), None)
@@ -461,8 +472,17 @@ class Automation:
         latest = max(open_rows, key=lambda r: r['at'], default=None)
         if latest:
             return latest['taskUrl']
+        claimed = self.app.dispatch.current_ticket(fleet['id'], agent['id']) if hasattr(self.app, 'dispatch') else ''
+        if claimed:
+            return claimed
         handed = [f for f in self.data['fires'] if f.get('recipientId') == agent['id'] and f.get('ticket')]
-        return task_key(handed[-1]['ticket']) if handed else ''
+        if handed:
+            return task_key(handed[-1]['ticket'])
+        # Workflow hand-offs delivered through triggers name their ticket too.
+        with self.app.progress.lock, closing(self.app.progress.connect()) as db:
+            handoffs = [json.loads(r['data']) for r in db.execute('SELECT data FROM handoffs WHERE fleet=?', (fleet['id'],))]
+        mine = [h for h in handoffs if h.get('targetAgentId') == agent['id'] and h.get('ticket') and not h.get('submittedAt')]
+        return task_key(max(mine, key=lambda h: h['createdAt'])['ticket']) if mine else ''
 
     def compose(self, fleet, rule, agent, health):
         template = rule['message'] or DEFAULT_MESSAGES.get(health['state'], DEFAULT_MESSAGES['stalled'])

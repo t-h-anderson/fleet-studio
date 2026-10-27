@@ -364,6 +364,8 @@ def brief_document(fleet, spec, agent, release_id, app_root):
               "python " + client + " report unblocked" + identity + " --note " + sample("<what changed>"),
               "python " + client + " report handoff" + identity + " --to " + sample("<who>") + " --note " + sample("<what to pick up>"),
               "```", "",
+              "When you report done, Studio passes the work to the next role and sends you your next ticket, so you never need to go looking. "
+              "Add --to <who> to a blocked report and Studio tells them, then wakes you when they report back. "
               "Studio infers your current ticket; add --ticket <URL> to name a different one. "
               "For long notes use --note-file <path>, or --note - to read standard input. "
               "A blocked report stays in force until you report unblocked, done or a hand-off, so there is no need to repeat it.", ""]

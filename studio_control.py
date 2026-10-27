@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from studio_bindings import runtime_binding, same_binding, host_config
+from studio_agents import NotReady
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -325,7 +326,7 @@ class Controls:
                         status, detail = backend.rename(target['sessionId'], target['text'])
                     else:
                         status, detail = backend.send(target['sessionId'], target['text'], target['directory'])
-            except AutomationHeld as exc:
+            except (AutomationHeld, NotReady) as exc:
                 status, detail = "held", str(exc)
             except (subprocess.TimeoutExpired, TimeoutError, queue.Empty):
                 status, detail = "unknown", "No acknowledgement received. Check the session before retrying; the message may have been accepted."

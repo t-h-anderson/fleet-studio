@@ -12,7 +12,7 @@ import uuid
 
 from studio_health import PROBLEM_STATES
 
-KINDS = ('done', 'blocked', 'handoff')
+KINDS = ('done', 'blocked', 'unblocked', 'handoff')
 
 
 class Reports:
@@ -29,7 +29,7 @@ class Reports:
         from studio_progress import link, plain
         kind = payload.get('kind')
         if kind not in KINDS:
-            raise ValueError('Report done, blocked or handoff.')
+            raise ValueError('Report done, blocked, unblocked or handoff.')
         fleet = self.app.store.fleet(payload.get('fleetId'))
         agent = next((a for a in fleet['agents'] if a['id'] == payload.get('agentId')), None)
         if not agent or not agent['enabled']:
@@ -45,17 +45,18 @@ class Reports:
             self.app.progress.record(db, fleet['id'], 'agent-note', agent['id'] + ':' + str(now), now, record)
         record['milestone'] = self.milestone(fleet, agent, kind, note, ticket)
         self.app.event(agent['name'] + ' · ' + kind, note[:140], fleet['id'])
-        return {'recorded': True, 'kind': kind, 'ticket': ticket, **{k: record[k] for k in ('recipient', 'route') if k in record}}
+        return {'recorded': True, 'kind': kind, 'ticket': ticket, **{k: record[k] for k in ('recipient', 'route', 'delivery') if k in record}}
 
     def milestone(self, fleet, agent, kind, note, ticket):
         """Mirror the report into the tracker-linked progress model when a release and ticket exist."""
         release = self.app.deployments.data['active'].get(fleet['id'])
         if not release or not ticket or kind == 'handoff':
             return ''
+        kind_map = {'done': 'work-finished', 'blocked': 'blocked', 'unblocked': 'unblocked'}
         event = hashlib.sha256((kind + note + ticket).encode()).hexdigest()[:24]
         payload = {'fleetId': fleet['id'], 'agentId': agent['id'], 'releaseId': release, 'sessionId': agent['sessionId'],
                    'eventId': kind + '-' + event, 'taskUrl': ticket, 'evidenceUrl': ticket, 'summary': note,
-                   'kind': 'work-finished' if kind == 'done' else 'blocked'}
+                   'kind': kind_map[kind]}
         if kind == 'blocked':
             payload.update(reason=note, nextAction='Resolve: ' + note[:1700])
         try:
@@ -65,59 +66,71 @@ class Reports:
             # The note itself is recorded; a tracker mismatch is for the operator, not the agent.
             return 'not linked: ' + str(exc)
 
+    def targets_hint(self, fleet, agent):
+        names = [r['name'] for r in fleet.get('roles', []) if r.get('kind') != 'subagent'] + [a['name'] for a in fleet['agents'] if a['id'] != agent['id']]
+        return 'Use --to with one of: ' + ', '.join(names) + '.'
+
     def resolve(self, fleet, agent, target):
+        """Role IDs a hand-off may go to, and the named agent if one was given."""
         if not isinstance(target, str) or not target.strip():
-            outgoing = [link['target'] for link in fleet.get('roleLinks', []) if link['source'] in agent.get('roleIds', [])]
-            if len(set(outgoing)) == 1:
-                return outgoing[0], None
-            raise ValueError('Name the role or agent to hand off to with --to.')
+            outgoing = {link['target'] for link in fleet.get('roleLinks', []) if link['source'] in agent.get('roleIds', [])}
+            if len(outgoing) == 1:
+                return list(outgoing), None
+            raise ValueError('Say who should pick this up. ' + self.targets_hint(fleet, agent))
         wanted = target.strip().casefold()
-        named = next((a for a in fleet['agents'] if wanted in (a['name'].casefold(), a['id'])), None)
+        named = next((a for a in fleet['agents'] if wanted in (a['name'].casefold(), a['id']) and a['id'] != agent['id']), None)
         if named:
-            return next(iter(named.get('roleIds', [])), ''), named
+            return list(named.get('roleIds', [])), named
         role = next((r for r in fleet.get('roles', []) if wanted in (r['name'].casefold(), r.get('key', ''), r['id'])), None)
         if not role:
-            raise ValueError('No role or agent called ' + target.strip() + ' in this fleet.')
-        return role['id'], None
+            raise ValueError('No role or agent called ' + target.strip() + '. ' + self.targets_hint(fleet, agent))
+        return [role['id']], None
 
     def handoff(self, fleet, agent, target, note, ticket):
-        role_id, named = self.resolve(fleet, agent, target)
+        role_ids, named = self.resolve(fleet, agent, target)
+        key = hashlib.sha256(json.dumps([agent['id'], role_ids, named['id'] if named else '', note, ticket]).encode()).hexdigest()[:32]
+        existing = next((f for f in self.app.automation.data['fires'] if f['id'] == key), None)
+        if existing:
+            # A retried report returns the original hand-off instead of sending it twice.
+            return {'route': 'direct', 'recipient': existing['recipientName'], 'delivery': existing['status']}
         runtime = self.app.runtime_fleet(fleet)
-        rules = [r for r in runtime.get('triggers', []) if r['enabled'] and r['kind'] == 'event' and r['targetRoleId'] == role_id
+        rules = [r for r in runtime.get('triggers', []) if r['enabled'] and r['kind'] == 'event' and r['targetRoleId'] in role_ids
                  and r['sourceRoleId'] in agent.get('roleIds', [])]
-        if rules and ticket:
-            event = hashlib.sha256((agent['id'] + note + ticket).encode()).hexdigest()[:24]
-            try:
-                result = self.app.triggers.report({'fleetId': fleet['id'], 'agentId': agent['id'], 'eventName': rules[0]['eventName'],
-                                                   'eventId': 'handoff-' + event, 'ticket': ticket, 'artifact': note[:700],
-                                                   'context': note, 'targetAgentId': named['id'] if named else ''})
-                return {'route': 'workflow trigger ' + rules[0]['name'], 'recipient': ', '.join(a['targetName'] for a in result.get('actions', []))}
-            except ValueError:
-                pass  # Fall back to a direct hand-off below.
-        recipient = named or self.pick(fleet, agent, role_id)
+        if rules:
+            # The workflow defines this hand-off, so its guards and contracts apply; errors go back to the agent.
+            if not ticket:
+                raise ValueError('This hand-off follows the workflow and needs the ticket: add --ticket <URL>.')
+            result = self.app.triggers.report({'fleetId': fleet['id'], 'agentId': agent['id'], 'eventName': rules[0]['eventName'],
+                                               'eventId': 'handoff-' + key[:24], 'ticket': ticket, 'artifact': note[:700],
+                                               'context': note, 'targetAgentId': named['id'] if named else ''})
+            actions = result.get('actions', [])
+            return {'route': 'workflow trigger ' + rules[0]['name'], 'recipient': ', '.join(a['targetName'] for a in actions),
+                    'delivery': ', '.join(sorted({a['status'] for a in actions})) or 'recorded'}
+        recipient = named or self.pick(fleet, agent, role_ids)
         message = ('[Fleet Studio] Hand-off from ' + agent['name'] + '\n\n' + note + '\n'
                    + ('Ticket: ' + ticket + '\n' if ticket else '')
                    + 'Your goal: ' + self.app.automation.goal(fleet, recipient))
-        fire = {'id': uuid.uuid4().hex, 'fleetId': fleet['id'], 'ruleId': 'agent-handoff', 'ruleName': 'Agent hand-off',
+        fire = {'id': key, 'fleetId': fleet['id'], 'ruleId': 'agent-handoff', 'ruleName': 'Agent hand-off',
                 'agentId': agent['id'], 'agentName': agent['name'], 'action': 'handoff', 'fallback': False, 'at': self.clock(),
                 'episode': None, 'healthState': 'handoff', 'evidence': note, 'status': 'pending', 'detail': '', 'outcome': None,
                 'recipientId': recipient['id'], 'recipientName': recipient['name'], 'ticket': ticket, 'message': message}
         with self.app.automation.lock:
             self.app.automation.data['fires'].append(fire)
             try:
-                self.app.automation.send(fleet, recipient, message, fire, self.app.status())
+                self.app.automation.send(fleet, recipient, message, fire)
             except Exception as exc:
                 fire.update(status='held', detail=str(exc)[-600:])
             self.app.automation.persist()
-        return {'route': 'direct', 'recipient': recipient['name']}
+        return {'route': 'direct', 'recipient': recipient['name'], 'delivery': 'queued' if fire['status'] == 'sending' else fire['status']}
 
-    def pick(self, fleet, agent, role_id):
-        candidates = []
-        for other in fleet['agents']:
-            if other['id'] == agent['id'] or not other['enabled'] or not other.get('sessionId') or role_id not in other.get('roleIds', []):
-                continue
-            health = self.app.health.get(fleet['id'], other['id']) or {}
-            candidates.append((health.get('state') in PROBLEM_STATES, health.get('state') != 'idle', bool(health.get('openWork')), other['name'], other))
-        if not candidates:
-            raise ValueError('No other agent holds that role.')
-        return sorted(candidates, key=lambda c: c[:4])[0][4]
+    def pick(self, fleet, agent, role_ids):
+        """The best agent to receive work now, or the healthiest member if none can receive yet."""
+        ready, _ = self.app.automation.candidates(fleet, role_ids, agent['id'], self.app.status())
+        if ready:
+            return ready[0]
+        members = [a for a in fleet['agents'] if a['id'] != agent['id'] and a['enabled'] and a.get('sessionId')
+                   and set(role_ids) & set(a.get('roleIds', []))]
+        if not members:
+            raise ValueError('Nobody else holds that role. ' + self.targets_hint(fleet, agent))
+        rank = lambda a: ((self.app.health.get(fleet['id'], a['id']) or {}).get('state') in PROBLEM_STATES, a['name'])
+        return sorted(members, key=rank)[0]

@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import shutil
 import subprocess
 import threading
@@ -31,6 +32,10 @@ BACKENDS = ("codex", "claude-code")
 
 class BackendUnsupported(ValueError):
     """The selected backend does not offer this operation."""
+
+
+class NotReady(RuntimeError):
+    """The session cannot take a message yet; nothing was sent and delivery may be retried."""
 
 
 class AgentBackend:
@@ -252,6 +257,8 @@ class ClaudeCodeBackend(AgentBackend):
         self.readers = {}
         self.send_lock = threading.Lock()
         self.processes = {}
+        # Sessions whose Studio turn was stopped mid-tool, by transcript mtime at the stop.
+        self.interrupted = {}
 
     def transcripts(self):
         projects = self.root / "projects"
@@ -303,6 +310,10 @@ class ClaudeCodeBackend(AgentBackend):
                 owners = claude_processes(session_id, state["cwd"])
                 item["pids"] = owners or []
                 item["livenessKnown"] = owners is not None
+                stopped_at = self.interrupted.get(session_id)
+                if stopped_at is not None and modified <= stopped_at + 1 and not owners:
+                    # A stopped turn leaves its last record open; nothing has written since.
+                    item["turnStatus"] = "interrupted"
                 if item["turnStatus"] == "inProgress":
                     item["status"] = "working"
                 elif owners is None:
@@ -333,13 +344,13 @@ class ClaudeCodeBackend(AgentBackend):
         if not directory or not state['cwd'] or Path(directory).resolve() != Path(state['cwd']).resolve():
             raise RuntimeError('The assigned folder differs from the saved Claude session.')
         if time.time() - path.stat().st_mtime < self.active_seconds:
-            raise RuntimeError("This Claude Code session wrote to its transcript recently. Deliver after its turn settles.")
+            raise NotReady("This Claude Code session wrote to its transcript recently. Deliver after its turn settles.")
         owners = claude_processes(session_id, directory)
         if owners is None:
             raise RuntimeError('Claude process ownership is unavailable on this host; no headless turn was started.')
         if owners:
-            raise RuntimeError("A Claude Code client may have this session open (PID "
-                               + ",".join(map(str, owners)) + "). Deliver at a safe boundary or close it first.")
+            raise NotReady("A Claude Code client may have this session open (PID "
+                           + ",".join(map(str, owners)) + "). Deliver at a safe boundary or close it first.")
         log = None
         if self.runtime:
             folder = self.runtime / "claude-turns"
@@ -365,11 +376,17 @@ class ClaudeCodeBackend(AgentBackend):
             process = self.processes.get(session_id)
             if process is None or process.poll() is not None:
                 raise RuntimeError('No Studio-started Claude turn is running for this session.')
-            process.terminate()
+            # The turn runs in its own process group; stop its tools too.
+            stop = (lambda sig: os.killpg(process.pid, sig)) if os.name != 'nt' else (lambda sig: process.terminate())
             try:
+                stop(signal.SIGTERM)
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                process.kill()
+                stop(signal.SIGKILL if os.name != 'nt' else signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            path = self.transcripts().get(session_id)
+            self.interrupted[session_id] = path.stat().st_mtime if path else time.time()
         return 'Stopped the Studio-started Claude turn.'
 
     def activity(self, session_id, fixture=None):

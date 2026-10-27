@@ -119,6 +119,10 @@ class AutomationTests(unittest.TestCase):
             preview = app.controls.previews[send.call_args[0][0]]
         self.assertEqual(preview['targets'][0]['agentId'], integrator['id'])
         self.assertIn(writer['name'] + ' is looping', preview['targets'][0]['text'])
+        # The source is parked only once the hand-off is confirmed delivered.
+        self.assertEqual(app.automation.paused_reason(fleet['id'], writer), '')
+        app.controls.receipts['r1'] = {'id': 'r1', 'status': 'completed', 'targets': [{'status': 'queued', 'detail': 'Queued.'}]}
+        app.automation.tick(app.store.snapshot(), self.monitor(fleet))
         self.assertIn('paused by automation', app.automation.paused_reason(fleet['id'], writer))
 
     def test_throttle_holds_and_records_time(self):
@@ -155,6 +159,67 @@ class AutomationTests(unittest.TestCase):
         self.assertIn('mid-turn', app.triggers.hold_reason([agent], monitor))
         item.update(status='closed', livenessKnown=False)
         self.assertIn('unknown process ownership', app.triggers.hold_reason([agent], monitor))
+
+
+class LifecycleTests(unittest.TestCase):
+    setUp = fixtures.DesignTests.setUp
+    tearDown = fixtures.DesignTests.tearDown
+    app = fixtures.DesignTests.app
+    monitor = fixtures.DesignTests.monitor
+    configure = AutomationTests.configure
+    set_health = AutomationTests.set_health
+
+    def test_held_delivery_waits_without_using_the_budget(self):
+        from studio_control import AutomationHeld
+        app, fleet = self.app()
+        clock = Clock()
+        app.automation.clock = clock
+        fleet = self.configure(app, automations=[rule(maxFires=1)])
+        writer = fleet['agents'][0]
+        self.set_health(app, fleet, writer, 'looping', clock.now - 10)
+        with patch.object(app.controls, 'send', side_effect=AutomationHeld('Writer A is mid-turn.')):
+            for _ in range(3):
+                clock.now += 120
+                app.automation.tick(app.store.snapshot(), self.monitor(fleet))
+        self.assertEqual([f['status'] for f in app.automation.data['fires']], ['held'])
+        with patch.object(app.controls, 'send', return_value={'id': 'r1'}) as send:
+            app.automation.tick(app.store.snapshot(), self.monitor(fleet))
+            send.assert_called_once()
+        self.assertEqual(app.automation.data['fires'][0]['status'], 'sending')
+        self.assertFalse(any(f['action'] == 'escalate' for f in app.automation.data['fires']))
+
+    def test_handoff_without_a_candidate_escalates(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        fleet = self.configure(app, automations=[rule(action='handoff', roleId=writer['roleIds'][0])])
+        self.set_health(app, fleet, writer, 'looping', time.time() - 10)
+        app.automation.tick(app.store.snapshot(), self.monitor(fleet))
+        [fire] = app.automation.data['fires']
+        self.assertEqual(fire['status'], 'failed')
+        self.assertIn('Escalated instead', fire['detail'])
+        self.assertEqual(len(app.automation.snapshot(fleet['id'])['escalations']), 1)
+
+    def test_sending_fire_settles_after_the_agent_recovers(self):
+        app, fleet = self.app()
+        fleet = self.configure(app, automations=[rule()])
+        writer = fleet['agents'][0]
+        self.set_health(app, fleet, writer, 'looping', time.time() - 10)
+        with patch.object(app.controls, 'send', return_value={'id': 'r1'}):
+            app.automation.tick(app.store.snapshot(), self.monitor(fleet))
+        self.set_health(app, fleet, writer, 'productive', time.time(), lastWorkAt=time.time() + 1)
+        app.controls.receipts['r1'] = {'id': 'r1', 'status': 'completed', 'targets': [{'status': 'queued', 'detail': 'Queued.'}]}
+        app.automation.tick(app.store.snapshot(), self.monitor(fleet))
+        [fire] = app.automation.data['fires']
+        self.assertEqual((fire['status'], fire['outcome']), ('sent', 'recovered'))
+
+    def test_one_failing_monitor_step_does_not_stop_the_others(self):
+        app, fleet = self.app()
+        with patch.object(app.health, 'tick', side_effect=RuntimeError('boom')), patch.object(app.automation, 'tick') as automation, \
+                patch.object(app.triggers, 'tick') as triggers:
+            failures = app.run_steps(app.store.snapshot(), {'sessions': {}})
+        automation.assert_called_once()
+        triggers.assert_called_once()
+        self.assertEqual(failures, ['Health refresh failed: boom'])
 
 
 class EndToEndTests(unittest.TestCase):

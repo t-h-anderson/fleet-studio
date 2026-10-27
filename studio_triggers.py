@@ -152,6 +152,9 @@ class Triggers:
                     return agent["name"] + " is open in a Claude Code client; Studio cannot start a turn alongside it."
                 if item.get("status") != "closed" or not item.get("livenessKnown"):
                     return agent["name"] + " has unknown process ownership on this host."
+                from studio_agents import ClaudeCodeBackend
+                if time.time() - ((item.get("session") or {}).get("updatedAt") or 0) < ClaudeCodeBackend.active_seconds:
+                    return agent["name"] + " finished a turn moments ago; waiting for it to settle."
                 if idle_only and item.get("status") not in ("idle", "closed"):
                     return agent["name"] + " is working; waiting for idle."
                 continue

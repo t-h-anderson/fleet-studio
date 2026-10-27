@@ -266,6 +266,7 @@ def assess(session, turns, now, settings, open_work=False, blocked=None, since_i
         'signals': signals,
         'sessionStatus': status,
         'lastActivityAt': max((turn.get('lastAt') or 0 for turn in turns), default=None) or None,
+        'lastWorkAt': max((call.get('at') or 0 for turn in turns for call in turn.get('calls', []) if call['cls'] == 'work'), default=None) or None,
         'currentTurnStartedAt': current['startedAt'] if current else None,
         'tokensLastHour': sum(tokens_since(turn, hour_start) for turn in turns),
         'polling': polling_note(turns, now),

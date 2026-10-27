@@ -356,22 +356,37 @@ class Application:
                 with self.lock:
                     previous = self.monitor["sessions"]
                     self.monitor = latest
-                self.telemetry.tick(state)
-                self.health.tick(state, latest)
-                self.automation.tick(state, latest)
-                self.triggers.tick(state, self.status())
-                self.progress.tick(state, self.status())
+                failures = self.run_steps(state, latest)
                 for fleet in state["fleets"]:
                     for agent in fleet["agents"]:
                         sid = session_key(agent)
                         before, after = previous.get(sid), latest["sessions"].get(sid)
                         if before and after and before["status"] != after["status"]:
                             self.event(agent["name"] + " · " + after["status"], fleet["name"], fleet["id"])
+                if failures:
+                    with self.lock:
+                        self.monitor["errors"] = self.monitor["errors"] + failures
             except Exception as exc:
                 logging.exception("Monitor refresh failed")
                 with self.lock:
                     self.monitor["errors"] = ["Status refresh failed: " + str(exc)]
             self.stop.wait(5)
+
+    def run_steps(self, state, latest):
+        """Run each monitoring step independently so one failure cannot stop the others."""
+        steps = (("Telemetry", lambda: self.telemetry.tick(state)),
+                 ("Health", lambda: self.health.tick(state, latest)),
+                 ("Automations", lambda: self.automation.tick(state, latest)),
+                 ("Triggers", lambda: self.triggers.tick(state, self.status())),
+                 ("Progress", lambda: self.progress.tick(state, self.status())))
+        failures = []
+        for name, step in steps:
+            try:
+                step()
+            except Exception as exc:
+                logging.exception("%s refresh failed", name)
+                failures.append(name + " refresh failed: " + str(exc))
+        return failures
 
     def status(self):
         with self.lock:

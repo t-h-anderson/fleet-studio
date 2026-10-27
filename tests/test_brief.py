@@ -96,9 +96,39 @@ class ReportTests(unittest.TestCase):
         fire = app.automation.data['fires'][-1]
         self.assertEqual((fire['ruleId'], fire['status']), ('agent-handoff', 'sending'))
 
+    def test_unblocked_clears_the_blocker(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        app.reports.report({'kind': 'blocked', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Need the API key'})
+        app.reports.report({'kind': 'unblocked', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Key arrived'})
+        self.assertEqual(self.open_work(app, fleet, writer), (True, None))
+
+    def test_retried_direct_handoff_is_sent_once(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        payload = {'kind': 'handoff', 'fleetId': fleet['id'], 'agentId': writer['id'], 'to': 'Integrator', 'note': 'Packet ready'}
+        with patch.object(app.controls, 'send', return_value={'id': 'r1'}) as send:
+            first = app.reports.report(payload)
+            second = app.reports.report(payload)
+        send.assert_called_once()
+        self.assertEqual(first['recipient'], second['recipient'])
+
+    def test_workflow_handoff_errors_are_not_bypassed(self):
+        app, fleet = self.app()
+        writer, integrator = fleet['agents']
+        state = app.store.snapshot()
+        state['fleets'][0]['triggers'] = [fixtures.DesignTests.rule(self, fleet, 'event')]
+        app.store.save(state)
+        preview = app.deployments.preview({'fleetId': fleet['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'})
+        app.deployments.apply(preview['id'])
+        with patch.object(app.controls, 'send') as send:
+            with self.assertRaisesRegex(ValueError, 'needs the ticket'):
+                app.reports.report({'kind': 'handoff', 'fleetId': fleet['id'], 'agentId': writer['id'], 'to': 'Integrator', 'note': 'Ready'})
+            send.assert_not_called()
+
     def test_unknown_handoff_target_is_one_clear_error(self):
         app, fleet = self.app()
-        with self.assertRaisesRegex(ValueError, 'No role or agent called Nobody'):
+        with self.assertRaisesRegex(ValueError, 'No role or agent called Nobody.*Use --to with one of: .*Integrator'):
             app.reports.report({'kind': 'handoff', 'fleetId': fleet['id'], 'agentId': fleet['agents'][0]['id'],
                                 'to': 'Nobody', 'note': 'x'})
 

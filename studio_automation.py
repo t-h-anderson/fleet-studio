@@ -195,10 +195,14 @@ class Automation:
     def persist(self):
         from fleet_studio import atomic_json
         self.path.parent.mkdir(exist_ok=True)
-        self.data['fires'] = self.data['fires'][-1000:]
-        self.data['escalations'] = self.data['escalations'][-500:]
-        self.data['throttleLog'] = self.data['throttleLog'][-1000:]
         with self.hold_lock:
+            # Each fleet keeps its own history so a busy fleet cannot erase another's rule limits.
+            by_fleet = {}
+            for fire in self.data['fires']:
+                by_fleet.setdefault(fire['fleetId'], []).append(fire)
+            self.data['fires'] = sorted((f for fires in by_fleet.values() for f in fires[-1000:]), key=lambda f: f['at'])
+            self.data['escalations'] = self.data['escalations'][-500:]
+            self.data['throttleLog'] = self.data['throttleLog'][-1000:]
             snapshot = deepcopy(self.data)
         atomic_json(self.path, snapshot)
 
@@ -260,9 +264,9 @@ class Automation:
     def tick(self, state, monitor):
         now = self.clock()
         with self.lock:
-            changed = self.track_outcomes(now)
+            changed = self.expire(state, monitor, now)
             for fleet in state['fleets']:
-                changed = self.retry_direct(fleet, monitor) or changed
+                changed = self.resolve(fleet, monitor, now) or changed
                 if self.app.deployments.data['paused'].get(fleet['id']):
                     continue
                 for rule in fleet.get('automations', []):
@@ -277,20 +281,104 @@ class Automation:
                         if not matches(rule, health) or now - health['since'] < rule['when']['forMinutes'] * 60:
                             continue
                         changed = self.consider(fleet, rule, agent, health, monitor, now) or changed
+            changed = self.track_outcomes(now) or changed
             if changed:
                 self.persist()
 
+    def expire(self, state, monitor, now):
+        """Drop finished pauses and close throttle records for agents no longer throttled."""
+        changed = False
+        for key, until in list(self.data['paused'].items()):
+            if until <= now:
+                self.data['paused'].pop(key)
+                changed = True
+        fleets = {fleet['id']: fleet for fleet in state['fleets']}
+        for key in list(self.data['throttled']):
+            fleet_id, agent_id = key.split(':', 1)
+            fleet = fleets.get(fleet_id)
+            agent = next((a for a in fleet['agents'] if a['id'] == agent_id), None) if fleet else None
+            if not agent or not self.throttle_reason(fleet, [agent], monitor):
+                with self.hold_lock:
+                    started = self.data['throttled'].pop(key, None)
+                    if started is not None:
+                        self.data['throttleLog'].append({'fleetId': fleet_id, 'agentId': agent_id, 'start': started, 'end': now})
+                changed = True
+        return changed
+
+    def resolve(self, fleet, monitor, now):
+        """Settle every unfinished fire, whether or not its rule still matches."""
+        changed = False
+        for fire in self.data['fires']:
+            if fire['fleetId'] != fleet['id'] or fire['status'] not in ('sending', 'held'):
+                continue
+            if fire['status'] == 'sending':
+                changed = self.settle(fleet, fire) or changed
+                continue
+            if now - fire['at'] > 86400:
+                fire.update(status='skipped', detail='Not delivered within a day; dropped.')
+                changed = True
+                continue
+            if fire['ruleId'] == 'agent-handoff':
+                recipient = next((a for a in fleet['agents'] if a['id'] == fire['recipientId']), None)
+                if not recipient:
+                    fire.update(status='failed', detail='The hand-off recipient left the fleet.')
+                    changed = True
+                    continue
+                before = fire['detail']
+                self.send(fleet, recipient, fire['message'], fire)
+                changed = changed or fire['status'] != 'held' or fire['detail'] != before
+                continue
+            rule = next((r for r in fleet.get('automations', []) if r['id'] == fire['ruleId']), None)
+            agent = next((a for a in fleet['agents'] if a['id'] == fire['agentId']), None)
+            health = self.app.health.get(fleet['id'], fire['agentId'])
+            if not rule or not rule['enabled'] or not agent or not matches(rule, health) or health['since'] != fire['episode']:
+                fire.update(status='skipped', detail='The agent recovered or the rule changed before delivery.')
+                changed = True
+                continue
+            before = (fire['status'], fire['detail'])
+            self.execute(fleet, rule, agent, health, fire, monitor)
+            changed = changed or before != (fire['status'], fire['detail'])
+        return changed
+
+    def settle(self, fleet, fire):
+        receipt = next((c for c in self.app.controls.snapshot(full=True) if c['id'] == fire.get('controlId')), None)
+        if not receipt or receipt['status'] == 'sending':
+            return False
+        targets = receipt['targets']
+        detail = '; '.join(t.get('detail', t['status']) for t in targets)
+        if all(t['status'] == 'held' for t in targets):
+            # A late check found the recipient not ready; nothing was sent, so it waits again.
+            fire.update(status='held', detail=detail)
+            fire.pop('controlId', None)
+        elif receipt['status'] == 'completed':
+            fire.update(status='sent', detail=detail)
+            self.park(fleet, fire)
+        else:
+            fire.update(status='failed', detail=detail)
+            if fire.get('fallback') or fire['action'] == 'handoff':
+                self.escalate_failure(fleet, fire)
+        return True
+
+    def park(self, fleet, fire):
+        """Pause the stuck agent only once its work has actually reached someone else."""
+        minutes = fire.pop('parkMinutes', None)
+        if minutes:
+            self.data['paused'][fleet['id'] + ':' + fire['agentId']] = self.clock() + minutes * 60
+            fire['detail'] = (fire['detail'] + ' ' if fire['detail'] else '') + fire['agentName'] + ' parked for ' + str(minutes) + ' min.'
+
     def consider(self, fleet, rule, agent, health, monitor, now):
         fires = [f for f in self.data['fires'] if f['ruleId'] == rule['id'] and f['agentId'] == agent['id']]
+        if any(f['status'] in ('pending', 'sending', 'held') for f in fires):
+            return False  # resolve() owns unfinished fires.
         last = fires[-1] if fires else None
-        if last and last['status'] in ('sending', 'held') and last.get('episode') == health['since']:
-            return self.retry(fleet, last, monitor)
         if last and now - last['at'] < rule['cooldownMinutes'] * 60:
             return False
-        recent = [f for f in fires if f['at'] > now - rule['windowHours'] * 3600 and not f.get('fallback')]
+        # Only attempts that reached the agent, or failed outright, use up the rule's budget.
+        regular = [f for f in fires if not f.get('fallback') and f['status'] in ('sent', 'failed')]
+        recent = [f for f in regular if f['at'] > now - rule['windowHours'] * 3600]
         action, fallback = rule['action'], False
         if rule['maxFires'] and len(recent) >= rule['maxFires']:
-            if any(f.get('fallback') and f['at'] > recent[-1]['at'] for f in fires) or rule['thenAction'] == 'none':
+            if rule['thenAction'] == 'none' or any(f.get('fallback') and f['at'] > recent[-1]['at'] for f in fires):
                 return False
             action, fallback = rule['thenAction'], True
         fire = {'id': uuid.uuid4().hex, 'fleetId': fleet['id'], 'ruleId': rule['id'], 'ruleName': rule['name'],
@@ -299,59 +387,14 @@ class Automation:
                 'evidence': evidence_text(health), 'status': 'pending', 'detail': '', 'outcome': None}
         self.data['fires'].append(fire)
         self.execute(fleet, rule, agent, health, fire, monitor)
-        self.app.event('Automation · ' + rule['name'], agent['name'] + ': ' + action + ' (' + fire['status'] + ')', fleet['id'])
+        self.app.event('Automation · ' + rule['name'], agent['name'] + ': ' + fire['action'] + ' (' + fire['status'] + ')', fleet['id'])
         return True
-
-    def retry_direct(self, fleet, monitor):
-        """Agent-requested hand-offs have no rule; resend them until delivered."""
-        changed = False
-        for fire in self.data['fires']:
-            if fire['fleetId'] != fleet['id'] or fire['ruleId'] != 'agent-handoff' or fire['status'] not in ('held', 'sending'):
-                continue
-            if fire['status'] == 'sending':
-                changed = self.retry(fleet, fire, monitor) or changed
-                continue
-            recipient = next((a for a in fleet['agents'] if a['id'] == fire['recipientId']), None)
-            if not recipient or self.clock() - fire['at'] > 86400:
-                fire.update(status='failed', detail='The hand-off recipient is gone or the hand-off expired.')
-                changed = True
-                continue
-            before = fire['detail']
-            try:
-                self.send(fleet, recipient, fire['message'], fire, monitor)
-            except Exception as exc:
-                fire['detail'] = str(exc)[-600:]
-            changed = changed or fire['detail'] != before
-        return changed
-
-    def retry(self, fleet, fire, monitor):
-        if fire['status'] == 'sending':
-            receipt = next((c for c in self.app.controls.snapshot(full=True) if c['id'] == fire.get('controlId')), None)
-            if not receipt or receipt['status'] == 'sending':
-                return False
-            targets = receipt['targets']
-            if all(t['status'] == 'held' for t in targets):
-                fire.update(status='held', detail='; '.join(t.get('detail', '') for t in targets))
-                fire.pop('controlId', None)
-            else:
-                fire.update(status='sent' if receipt['status'] == 'completed' else 'failed',
-                            detail='; '.join(t.get('detail', t['status']) for t in targets))
-            return True
-        rule = next((r for r in fleet.get('automations', []) if r['id'] == fire['ruleId']), None)
-        agent = next((a for a in fleet['agents'] if a['id'] == fire['agentId']), None)
-        health = self.app.health.get(fleet['id'], fire['agentId'])
-        if not rule or not agent or not matches(rule, health):
-            fire.update(status='skipped', detail='The agent recovered before delivery.')
-            return True
-        before = (fire['status'], fire['detail'])
-        self.execute(fleet, rule, agent, health, fire, monitor)
-        return before != (fire['status'], fire['detail'])
 
     def execute(self, fleet, rule, agent, health, fire, monitor):
         action = fire['action']
         try:
             if action == 'reprompt':
-                self.send(fleet, agent, self.compose(fleet, rule, agent, health), fire, monitor)
+                self.send(fleet, agent, self.compose(fleet, rule, agent, health), fire)
             elif action == 'handoff':
                 self.handoff(fleet, rule, agent, health, fire, monitor)
             elif action == 'stop-turn':
@@ -362,11 +405,21 @@ class Automation:
                 fire.update(status='sent', detail=stop(agent['sessionId']))
             elif action == 'pause':
                 self.data['paused'][fleet['id'] + ':' + agent['id']] = self.clock() + rule['pauseMinutes'] * 60
-                fire.update(status='sent', detail='Automatic deliveries to ' + agent['name'] + ' paused for ' + str(rule['pauseMinutes']) + ' min.')
+                fire.update(status='sent', detail='Automatic messages to ' + agent['name'] + ' stopped for ' + str(rule['pauseMinutes']) + ' min.')
             elif action == 'escalate':
                 self.escalate(fleet, agent, rule, fire)
         except Exception as exc:
             fire.update(status='failed', detail=str(exc)[-600:])
+        if fire['status'] == 'failed' and (fire.get('fallback') or action == 'handoff'):
+            # A fallback or hand-off that cannot run must not leave the agent stuck silently.
+            self.escalate_failure(fleet, fire)
+
+    def escalate_failure(self, fleet, fire):
+        agent = {'id': fire['agentId'], 'name': fire['agentName']}
+        rule = {'name': fire['ruleName']}
+        record = dict(fire, evidence=fire['evidence'] + ' (' + fire['action'] + ' failed: ' + fire['detail'] + ')')
+        self.escalate(fleet, agent, rule, record)
+        fire['detail'] += ' Escalated instead.'
 
     def goal(self, fleet, agent):
         roles = [r for r in fleet.get('roles', []) if r['id'] in agent.get('roleIds', [])]
@@ -393,25 +446,40 @@ class Automation:
             body = body.replace('{' + key + '}', value)
         return MARKER + ' ' + rule['name'] + '\n\n' + body
 
-    def send(self, fleet, agent, message, fire, monitor):
-        preview = self.app.controls.preview({'fleetId': fleet['id'], 'agentIds': [agent['id']], 'action': 'message',
-                                             'message': message, 'automation': True, 'purpose': 'health-automation'})
-        receipt = self.app.controls.send(preview['id'])
+    def send(self, fleet, agent, message, fire):
+        """Start delivery. A recipient that is not ready yet leaves the fire held, not failed."""
+        from studio_control import AutomationHeld
+        try:
+            preview = self.app.controls.preview({'fleetId': fleet['id'], 'agentIds': [agent['id']], 'action': 'message',
+                                                 'message': message, 'automation': True, 'purpose': 'health-automation'})
+            receipt = self.app.controls.send(preview['id'])
+        except AutomationHeld as exc:
+            fire.update(status='held', detail=str(exc))
+            return
         fire.update(status='sending', controlId=receipt['id'], detail='Delivery started.')
+
+    def candidates(self, fleet, role_ids, exclude, monitor):
+        """Agents in the roles who can take work now: healthy, not paused and deliverable."""
+        found, reasons = [], []
+        for other in fleet['agents']:
+            if other['id'] == exclude or not other['enabled'] or not other.get('sessionId') or not set(role_ids) & set(other.get('roleIds', [])):
+                continue
+            health = self.app.health.get(fleet['id'], other['id']) or {}
+            reason = ('is ' + health['state'] if health.get('state') in PROBLEM_STATES else '') or self.paused_reason(fleet['id'], other) \
+                or self.app.triggers.hold_reason([other], monitor)
+            if reason:
+                reasons.append(other['name'] + ': ' + reason)
+                continue
+            found.append((health.get('state') != 'idle', bool(health.get('openWork')), other['name'], other))
+        return [c[3] for c in sorted(found, key=lambda c: c[:3])], reasons
 
     def handoff(self, fleet, rule, agent, health, fire, monitor):
         role_id = rule['handoffRoleId'] or (rule['roleId'] or next(iter(agent.get('roleIds', [])), ''))
-        candidates = []
-        for other in fleet['agents']:
-            if other['id'] == agent['id'] or not other['enabled'] or not other.get('sessionId') or role_id not in other.get('roleIds', []):
-                continue
-            other_health = self.app.health.get(fleet['id'], other['id']) or {}
-            if other_health.get('state') in PROBLEM_STATES or self.paused_reason(fleet['id'], other):
-                continue
-            candidates.append((other_health.get('state') != 'idle', bool(other_health.get('openWork')), other['name'], other))
-        if not candidates:
-            raise RuntimeError('No healthy agent in the handoff role can take over; escalating is recommended.')
-        recipient = sorted(candidates, key=lambda c: c[:3])[0][3]
+        found, reasons = self.candidates(fleet, [role_id], agent['id'], monitor)
+        # A retry keeps the recipient chosen first, so the work is not sprayed across agents.
+        recipient = next((a for a in found if a['id'] == fire.get('recipientId')), None) or (found[0] if found else None)
+        if not recipient:
+            raise RuntimeError('No agent in the hand-off role can take over now' + (' (' + '; '.join(reasons) + ')' if reasons else '') + '.')
         ticket = self.ticket(fleet, agent)
         recent = self.recent_steps(fleet['id'], agent['id'])
         message = (MARKER + ' Handoff: ' + rule['name'] + '\n\n'
@@ -420,12 +488,11 @@ class Automation:
                    + ('Ticket: ' + ticket + '\n' if ticket else '')
                    + ('Their last steps: ' + recent + '\n' if recent else '')
                    + 'Your goal: ' + self.goal(fleet, recipient) + '\n'
-                   + 'Read the ticket, avoid repeating the steps above, and take the next concrete action.')
+                   + 'Avoid repeating the steps above and take the next concrete action.')
         fire.update(recipientId=recipient['id'], recipientName=recipient['name'], ticket=ticket)
-        self.send(fleet, recipient, message, fire, monitor)
         if rule['parkSource']:
-            self.data['paused'][fleet['id'] + ':' + agent['id']] = self.clock() + rule['pauseMinutes'] * 60
-            fire['detail'] += ' ' + agent['name'] + ' parked for ' + str(rule['pauseMinutes']) + ' min.'
+            fire['parkMinutes'] = rule['pauseMinutes']
+        self.send(fleet, recipient, message, fire)
 
     def recent_steps(self, fleet_id, agent_id, count=6):
         turns = self.app.telemetry.turns(fleet_id, agent_id, limit=5)
@@ -455,11 +522,12 @@ class Automation:
     def track_outcomes(self, now):
         changed = False
         for fire in self.data['fires']:
-            if fire['outcome'] or fire['status'] not in ('sent',) or fire['action'] == 'escalate':
+            if fire['outcome'] or fire['status'] != 'sent' or fire['action'] not in ('reprompt', 'handoff'):
                 continue
             agent_id = fire.get('recipientId') or fire['agentId']
             health = self.app.health.get(fire['fleetId'], agent_id) or {}
-            if health.get('state') in ('productive',) and health.get('since', 0) >= fire['at']:
+            # Recovery means real work after the prompt, not just a reply to it.
+            if health.get('state') not in PROBLEM_STATES and (health.get('lastWorkAt') or 0) > fire['at']:
                 fire['outcome'] = 'recovered'
                 changed = True
             elif now - fire['at'] >= OUTCOME_SECONDS:
@@ -483,10 +551,13 @@ class Automation:
 
     def snapshot(self, fleet_id):
         now = self.clock()
-        with self.lock:
+        with self.lock, self.hold_lock:
             fires = [f for f in self.data['fires'] if f['fleetId'] == fleet_id][-200:]
             throttled = [{'agentId': key.split(':', 1)[1], 'since': since} for key, since in self.data['throttled'].items() if key.startswith(fleet_id + ':')]
             day = [t for t in self.data['throttleLog'] if t['fleetId'] == fleet_id and t['end'] >= now - 86400]
+            last = {}
+            for fire in fires:
+                last[fire['ruleId']] = {k: fire[k] for k in ('at', 'status', 'detail', 'action', 'agentName')}
             throttled_seconds = sum(t['end'] - max(t['start'], now - 86400) for t in day) + sum(now - max(t['since'], now - 86400) for t in throttled)
             return deepcopy({
                 'fires': fires[::-1],
@@ -496,5 +567,8 @@ class Automation:
                 'throttled': throttled,
                 'throttledSeconds24h': round(throttled_seconds),
                 'outcomes': {name: sum(f['outcome'] == name for f in fires) for name in ('recovered', 'changed', 'no-change')},
+                'delivered': sum(f['status'] == 'sent' and f['action'] in ('reprompt', 'handoff') for f in fires),
+                'lastFire': last,
+                'workflowPaused': self.app.deployments.data['paused'].get(fleet_id, False),
                 'presets': PRESETS,
             })

@@ -100,14 +100,14 @@ class ReviewRegressions(unittest.TestCase):
         row = next(a for a in app.deployments.overview(app.store.fleet(f['id']))['adoption'] if a['agentId'] == aid)
         self.assertFalse(row['acknowledged']); self.assertFalse(row['bindingMatches'])
         from workflow_client import instructions
-        with self.assertRaisesRegex(ValueError, 'no longer matches'):
+        with self.assertRaisesRegex(ValueError, 'binding changed'):
             instructions(f['id'], aid, self.root, f['agents'][0]['directory'])
 
     def test_claude_assignment_is_not_installed_as_a_codex_entrypoint(self):
         app, f = self.app(); state = app.store.snapshot()
         state['fleets'][0]['agents'][0]['backend'] = 'claude-code'; app.store.save(state)
         p = app.deployments.preview({'fleetId': f['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'}); app.deployments.apply(p['id'])
-        with self.assertRaisesRegex(ValueError, 'Codex only'):
+        with self.assertRaisesRegex(ValueError, 'Codex agents only'):
             app.entrypoints.preview({'fleetId': f['id'], 'revision': app.store.snapshot()['revision'], 'agentIds': [f['agents'][0]['id']]})
 
     def test_remote_folder_never_receives_a_local_entrypoint(self):

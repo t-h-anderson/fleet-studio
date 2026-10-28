@@ -20,23 +20,18 @@ class TriggerTests(unittest.TestCase):
     save_rules = fixtures.DesignTests.save_rules
     monitor = fixtures.DesignTests.monitor
     wait_controls = fixtures.DesignTests.wait_controls
+    busy = fixtures.DesignTests.busy
 
-    def test_deployed_handoff_waits_for_both_source_and_target_adoption(self):
+    def test_deployed_handoff_sends_without_adoption_acknowledgement(self):
+        # Adoption acknowledgements no longer gate automation; agents read their brief when it changes.
         app, f = self.app()
         f = self.save_rules(app, f, [self.rule(f, 'event')])
         preview = app.deployments.preview({'fleetId': f['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'})
         app.deployments.apply(preview['id'])
-        rid = app.deployments.data['active'][f['id']]
         monitor = self.monitor(f)
         app.monitor.update(monitor)
         with patch.object(app.controls, 'send') as send:
             app.triggers.report(self.payload(f))
-            send.assert_not_called()
-            app.deployments.acknowledge({'fleetId': f['id'], 'agentId': f['agents'][1]['id'], 'releaseId': rid})
-            app.triggers.tick(app.store.snapshot(), monitor)
-            send.assert_not_called()
-            app.deployments.acknowledge({'fleetId': f['id'], 'agentId': f['agents'][0]['id'], 'releaseId': rid})
-            app.triggers.tick(app.store.snapshot(), monitor)
             send.assert_called_once()
 
     def payload(self, fleet, event_id="ticket-one-head"):
@@ -102,6 +97,7 @@ class TriggerTests(unittest.TestCase):
         rule = self.rule(f, "idle")
         f = self.save_rules(app, f, [rule])
         monitor = self.monitor(f)
+        self.busy(app, app.store.fleet(f["id"]))
         target = monitor["sessions"][f["agents"][1]["sessionId"]]
         start = time.time()
         with patch("studio_control.subprocess.run", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")) as run:
@@ -134,6 +130,7 @@ class TriggerTests(unittest.TestCase):
         app.store.save(state)
         f = self.save_rules(app, f, [rule])
         monitor = self.monitor(f)
+        self.busy(app, app.store.fleet(f["id"]))
         monitor["sessions"][f["agents"][0]["sessionId"]]["status"] = "working"
         start = time.time()
         app.triggers.tick(app.store.snapshot(), monitor, start)
@@ -206,6 +203,7 @@ class TriggerTests(unittest.TestCase):
         rule = {**self.rule(f, "idle"), "minutes": 10}
         f = self.save_rules(app, f, [rule])
         monitor = self.monitor(f)
+        self.busy(app, app.store.fleet(f["id"]))
         started = time.time()
         original_send = app.controls.send
         def crash(preview_id):

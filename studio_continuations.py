@@ -128,8 +128,7 @@ def reconcile(triggers, state, monitor):
                 'The tracker dependencies now satisfy the deployed acceptance rule. This notification does not resume '
                 'a stopped goal, change scope or custody, or accept your work. Preserve all explicit stops and source permissions.\n'
                 'Task: ' + contract['taskUrl'] + '\nOriginal handoff: ' + original['id'] + '\n\n'
-                + contract['continuation']['message'] + '\n\nFleet handoff action ID: ' + action_id
-                + '. Report handoff-received with this ID and contractId ' + contract['id'] + '.')
+                + contract['continuation']['message'] + '\n\nHandoff ' + action_id[:8] + '.')
             before = deepcopy(triggers.data)
             triggers.data['actions'].append(action)
             triggers.data['continuations'][key] = {'actionId': action_id, 'originalId': original['id']}

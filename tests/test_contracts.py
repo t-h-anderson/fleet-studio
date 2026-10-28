@@ -59,7 +59,7 @@ class ContractTests(unittest.TestCase):
             send.assert_not_called()
         self.assertEqual(app.triggers.data, before)
         self.assertEqual(result['assignmentContract'], self.contract)
-        self.assertIn('Assignment contract', result['messages'][0])
+        self.assertIn('Assignment ', result['messages'][0]); self.assertIn('Done means:', result['messages'][0])
         self.assertEqual(validate(json.loads(json.dumps(self.contract)), app, fleet), self.contract)
         schema = json.loads((Path(__file__).resolve().parents[1] / 'workflows/assignment.schema.json').read_text())
         self.assertEqual(schema, SCHEMA)

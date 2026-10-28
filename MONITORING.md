@@ -26,6 +26,12 @@ missing or stale information must remain visible.
 | Goal recovery audit | Reviewed complete/cancel/resume intent, ticket evidence and verified or uncertain outcome. Native usage is preserved for status changes; cancellation retains a Studio snapshot. No automatic retry. |
 | Receipt reconciliation | Operator-recorded acknowledgement evidence and source repair retain the original event identity and prior delivery state. They do not repeat delivery or confer technical acceptance. |
 
+| Agent health | Turn telemetry classifies each agent as looping, stalled, admin-heavy, burning, waiting, productive, idle or offline, with the evidence. State changes are recorded as `health` observations and used for automation backtests. |
+| Tool-call mix | Each tool call is classed as work, explore, admin, wait or other from its name and a short command or path signature. Outputs and contents are not stored. |
+| Wasted tokens | Fresh tokens (input, output and cache writes) in repeated, admin and polling calls, aborted turns and Studio reprompts that produced no work. These are estimates, split by each turn's call mix. |
+| Automation outcomes | Each automatic reprompt, hand-off, pause or escalation, with its delivery result and whether the agent recovered within 30 minutes. |
+| Throttled time | Time automatic sends waited because of concurrency or token-per-hour limits. |
+
 ## Recommended next measurements
 
 | Priority | Measurement | Decision it supports | Required evidence |

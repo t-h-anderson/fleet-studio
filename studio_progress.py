@@ -14,6 +14,8 @@ from studio_trackers import issue_prefix
 
 KINDS = ('task-started', 'progress-updated', 'blocked', 'unblocked', 'handoff-received', 'work-finished', 'test-result')
 DEFAULTS = {'handoffMinutes': 30, 'quietMinutes': 60, 'retentionDays': 90}
+# Completed sends are needed only while their outcome is judged; keep a month for the timeline.
+RECEIPT_DAYS = 30
 
 
 def clean_settings(value=None):
@@ -355,8 +357,33 @@ class Progress:
                 break
         return {'items': result, 'nextBefore': result[-1]['id'] if len(result) == 100 else rows[-1]['id'] if len(rows) == 1000 else None}
 
+    def observe_receipts(self, fleets):
+        """A delivered handoff counts as received once the recipient starts a turn after it."""
+        telemetry = getattr(self.app, 'telemetry', None)
+        if not telemetry:
+            return
+        with self.lock, closing(self.connect()) as db, db:
+            for fleet in fleets:
+                for row in db.execute('SELECT id, data FROM handoffs WHERE fleet=?', (fleet['id'],)).fetchall():
+                    handoff = json.loads(row['data'])
+                    if handoff.get('receivedAt') or handoff.get('status') != 'queued' or not handoff.get('targetAgentId'):
+                        continue
+                    if self.clock() - handoff.get('createdAt', 0) > 86400:
+                        continue  # Too old to infer a receipt from; stop re-checking it every tick.
+                    turns = telemetry.turns(fleet['id'], handoff['targetAgentId'], since=handoff['createdAt'], limit=20, calls=False)
+                    # Only a Studio-delivered prompt on the recipient's own session shows the hand-off was read.
+                    session = session_key({'sessionId': handoff.get('targetSessionId', ''), **(handoff.get('targetRuntime') or {})})
+                    started = min((t['startedAt'] for t in turns if (t.get('startedAt') or 0) >= handoff['createdAt']
+                                   and t.get('fromStudio') and not t.get('partial') and t.get('session') == session), default=None)
+                    if started is None:
+                        continue
+                    handoff.update(receivedAt=started, receiptSource='observed-turn')
+                    db.execute('UPDATE handoffs SET data=? WHERE fleet=? AND id=?', (json.dumps(handoff), fleet['id'], row['id']))
+                    self.record(db, fleet['id'], 'handoff', row['id'] + ':received', started, handoff)
+
     def tick(self, state, monitor):
         self.observe_handoffs(monitor.get('automation', {}).get('actions', []))
+        self.observe_receipts(state['fleets'])
         self.observe_sessions(state['fleets'], monitor)
         self.app.goals.observe(state['fleets'], monitor)
         self.metrics.observe_tokens(state['fleets'], monitor)
@@ -366,11 +393,14 @@ class Progress:
             self.metrics.ci_snapshot(fleet)
         now = self.clock()
         if now - self.last_prune >= 3600:
+            self.app.controls.prune(now - RECEIPT_DAYS * 86400)
             with self.lock, closing(self.connect()) as db, db:
                 for f in state['fleets']:
                     cutoff = now - clean_settings(f.get('progress'))['retentionDays'] * 86400
                     db.execute('DELETE FROM observations WHERE fleet=? AND at<?', (f['id'], cutoff))
                     self.metrics.prune(db, f['id'], cutoff)
+                    self.app.telemetry.prune(db, f['id'], cutoff, agents=f['agents'])
+                    self.app.health.prune(db, f)
                     for row in db.execute('SELECT * FROM handoffs WHERE fleet=?', (f['id'],)).fetchall():
                         h = json.loads(row['data'])
                         if not h.get('assignmentContract') and (h.get('receivedAt') or h.get('status') == 'dismissed') and h['createdAt'] < cutoff:
@@ -439,7 +469,7 @@ class Progress:
                 reason = 'Goal is ' + observed['goalStatus'] + '. ' + (blocked_report['reason'] if blocked_report else 'No current structured blocker reason; inspect activity and task evidence. Preserve the stop.')
                 attention.append({'kind':'goal-stop','agentId':agent['id'],'at':None,'message':agent['name'] + ': ' + reason})
             else:
-                reason = ('Workflow automation is paused.' if deployment['paused'] else '') or self.app.triggers.hold_reason([agent], monitor, idle_only=True) or self.app.deployments.adoption_hold(fleet_id,[agent['id']])
+                reason = ('Workflow automation is paused.' if deployment['paused'] else '') or self.app.triggers.hold_reason([agent], monitor, idle_only=True)
             availability = {'state':'held' if stopped else 'busy' if observed.get('status') == 'working' else 'held' if reason else 'eligible',
                             'reason':reason or 'Eligible for an idle workflow check; task scope still applies.'}
             if observed['stale']:
@@ -464,9 +494,13 @@ class Progress:
             t['blockerCategory'] = blocker_category(t, t['url'] in execution)
             if t['blockerCategory'] == 'execution' and t['url'] not in execution:
                 attention.append({'kind':'tracker-blocked','taskUrl':t['url'],'at':t.get('stageObservedAt'),'message':'Claimed work is blocked in the tracker; inspect the current blocker reason.'})
+        for e in self.app.automation.snapshot(fleet_id)['escalations']:
+            attention.append({'kind': 'escalation', 'agentId': e['agentId'], 'at': e['at'], 'escalationId': e['id'],
+                              'message': e['agentName'] + ' · ' + e['ruleName'] + ': ' + e['message']})
+        # Acknowledgements are optional, so only a binding that no longer matches the release needs attention.
         for a in deployment['adoption']:
-            if a['required'] and (not a['acknowledged'] or not a['bindingMatches'] or a['entryPoint'] != 'installed'):
-                attention.append({'kind':'adoption','agentId':a['agentId'],'at':None,'message':'Workflow adoption needs attention: ' + a['name']})
+            if a['required'] and not a['bindingMatches']:
+                attention.append({'kind':'adoption','agentId':a['agentId'],'at':None,'message':'Agent binding differs from the deployed workflow: ' + a['name']})
         completed = [(r['at'], json.loads(r['data'])) for r in changes]
         completed = [(at,d) for at,d in completed if d.get('closed') and d.get('sourceKey') == source]
         roles = []

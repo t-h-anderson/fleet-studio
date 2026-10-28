@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from studio_bindings import runtime_binding, same_binding, host_config
+from studio_agents import NotReady
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -17,8 +18,8 @@ class AutomationHeld(ValueError):
     """A final availability check deferred delivery before any native effect."""
 
 
-def rename_session(codex, session_id, name):
-    """Set persisted metadata through app-server; never load/resume a thread."""
+def app_server(codex, method, params):
+    """Make one request through Codex's app-server; never load or write native state directly."""
     process = subprocess.Popen([codex, "app-server", "--stdio"], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                text=True, encoding="utf-8", creationflags=CREATE_NO_WINDOW)
@@ -41,19 +42,19 @@ def rename_session(codex, session_id, name):
         while time.monotonic() < deadline:
             value = responses.get(timeout=max(.1, deadline - time.monotonic()))
             if value is None:
-                raise RuntimeError("Codex app-server closed before acknowledging the rename.")
+                raise RuntimeError("Codex app-server closed before answering " + method + ".")
             if value.get("id") == request_id:
                 if "error" in value:
-                    raise RuntimeError(value["error"].get("message", "Codex rejected the rename."))
+                    raise RuntimeError(value["error"].get("message", "Codex rejected " + method + "."))
                 return value.get("result")
-        raise TimeoutError("Codex did not acknowledge the rename.")
+        raise TimeoutError("Codex did not answer " + method + ".")
     try:
         send({"id": 1, "method": "initialize", "params": {"clientInfo": {
             "name": "fleet_studio", "title": "Fleet Studio", "version": "2.0.0"}}})
         response(1)
         send({"method": "initialized", "params": {}})
-        send({"id": 2, "method": "thread/name/set", "params": {"threadId": session_id, "name": name}})
-        response(2)
+        send({"id": 2, "method": method, "params": params})
+        return response(2)
     finally:
         if process.stdin:
             process.stdin.close()
@@ -64,6 +65,11 @@ def rename_session(codex, session_id, name):
             process.wait(timeout=3)
         if process.stdout:
             process.stdout.close()
+
+
+def rename_session(codex, session_id, name):
+    """Set persisted metadata through app-server; never load/resume a thread."""
+    app_server(codex, "thread/name/set", {"threadId": session_id, "name": name})
 
 
 def assignment_text(fleet, agent):
@@ -86,29 +92,9 @@ def assignment_text(fleet, agent):
             raise ValueError(role["name"] + " has unpublished policy edits. Prepare/reconcile the policy proposal before applying this role.")
         lines += ["Role: " + role["name"], "Responsibilities: " + role["responsibilities"],
                   "Authority and handoff: " + role["authority"], ""]
-    if agent.get("notes"):
-        lines += ["Agent-specific assignment:", agent["notes"], ""]
-    outgoing = [link for link in fleet.get("roleLinks", []) if link["source"] in agent.get("roleIds", [])]
-    role_names = {role["id"]: role["name"] for role in fleet.get("roles", [])}
-    if outgoing:
-        lines.append("Designed handoffs (task routing remains subject to current policy and custody):")
-        for link in outgoing:
-            lines.append("- " + link["label"] + " -> " + role_names[link["target"]] +
-                         "; when: " + (link.get("trigger") or "as agreed") +
-                         "; deliver: " + (link.get("artifact") or "as agreed") +
-                         "; condition: " + (link.get("condition") or "current project policy"))
-    events = [rule for rule in fleet.get("triggers", []) if rule["kind"] == "event" and rule["sourceRoleId"] in agent.get("roleIds", [])]
-    if events:
-        helper = Path(__file__).resolve().parent / "fleet_event.py"
-        lines += ["", "Formal handoff events configured for these roles:",
-                  "Report an event only after its stated condition is satisfied. Use a stable event ID such as ticket plus reviewed commit; reporting is not acceptance evidence."]
-        for rule in events:
-            lines.append("Event: " + rule["eventName"] + "; trigger: " + rule["name"])
-        lines.append("Command: python " + str(helper) + " --agent " + agent["id"] +
-                     " --fleet " + fleet["id"] + " --event <event-name> --id <stable-handoff-id>" +
-                     " --to <recipient-name-or-id> --ticket <ticket-or-comment-URL> --artifact <exact-head-and-evidence> --context <bounded-next-action>")
-    lines += ["", "Acknowledge the assignment and identify any conflict before changing active ownership or scope."]
-    return "\n".join(lines)
+    # The checks above keep committed policy authoritative; the message itself is the agent's brief.
+    from workflow_spec import brief_document, export_spec
+    return "[Fleet Studio] Your brief (draft, not yet deployed):\n\n" + brief_document(fleet, export_spec(fleet), agent, "draft", Path(__file__).resolve().parent)
 
 
 class Controls:
@@ -137,6 +123,14 @@ class Controls:
             if preview:
                 self.previews.pop(preview_id, None)
             return None
+    def prune(self, cutoff):
+        """Drop finished sends older than the cutoff, whatever their outcome; the file is rewritten on every send."""
+        with self.lock:
+            old = [key for key, receipt in self.receipts.items() if receipt["status"] != "sending" and receipt.get("createdAt", 0) < cutoff]
+            for key in old:
+                del self.receipts[key]
+            if old:
+                self.persist()
     def persist(self):
         from fleet_studio import atomic_json
         self.receipt_path.parent.mkdir(exist_ok=True)
@@ -179,7 +173,8 @@ class Controls:
                             "effect": 'Starts a headless Claude turn after the session is closed; this is execution, not queued delivery.' if agent.get('backend') == 'claude-code' else 'Queues a message for the existing Codex session.'})
         preview = {"id": uuid.uuid4().hex, "fleetId": fleet["id"], "action": action,
                    "revision": state["revision"], "createdAt": time.time(), "targets": targets,
-                   **({"deploymentId": payload["deploymentId"], "automation": payload.get("automation", False), "sourceAgentId": payload.get("sourceAgentId"), "idleOnly": payload.get("idleOnly", False), "purpose": payload.get("purpose", "")} if payload.get("deploymentId") else {})}
+                   **({"deploymentId": payload["deploymentId"], "automation": payload.get("automation", False), "sourceAgentId": payload.get("sourceAgentId"), "idleOnly": payload.get("idleOnly", False), "purpose": payload.get("purpose", "")} if payload.get("deploymentId") else
+                      {"automation": True, "purpose": payload.get("purpose", "")} if payload.get("automation") is True else {})}
         if 'assignmentContract' in payload:
             from studio_contracts import validate, delivery_hold
             contract = validate(payload['assignmentContract'], self.app, fleet, check_base=True, revalidated=True)
@@ -289,8 +284,11 @@ class Controls:
         # are needed here, and our own waiting receipt is excluded.
         with self.app.lock:
             monitor = deepcopy(self.app.monitor)
-        ids = [a["id"] for a in agents] + ([preview["sourceAgentId"]] if preview.get("sourceAgentId") else [])
-        return self.app.deployments.adoption_hold(fleet["id"], ids) or self.app.triggers.hold_reason(agents, monitor, preview.get("idleOnly", False), preview["id"])
+        # Adoption acknowledgements no longer gate automation: agents read their brief when it changes.
+        # Workflow deliveries and new-work automation sends are throttled; recovery sends are not.
+        new_work = preview.get("purpose") == "automation-new-work" or bool(preview.get("deploymentId")) and not preview.get("purpose")
+        return (self.app.triggers.hold_reason(agents, monitor, preview.get("idleOnly", False), preview["id"])
+                or self.app.automation.hold(fleet["id"], agents, monitor, throttle=new_work))
 
     def _dispatch(self, preview):
         for index, target in enumerate(preview["targets"]):
@@ -323,7 +321,7 @@ class Controls:
                         status, detail = backend.rename(target['sessionId'], target['text'])
                     else:
                         status, detail = backend.send(target['sessionId'], target['text'], target['directory'])
-            except AutomationHeld as exc:
+            except (AutomationHeld, NotReady) as exc:
                 status, detail = "held", str(exc)
             except (subprocess.TimeoutExpired, TimeoutError, queue.Empty):
                 status, detail = "unknown", "No acknowledgement received. Check the session before retrying; the message may have been accepted."

@@ -1,6 +1,6 @@
 # Reviewed delivery
 
-Workflow example-delivery / 1.0.0 / SHA-256 600cb7f69b468666ff55e750204b2ae3ea7c438669c2766e02d5fc215dd82f3e
+Workflow example-delivery / 1.0.0 / SHA-256 76393f0ced863b55ffe46f7e52e10c80fd5d082a717483de2b394b24618a2cf9
 
 Generated from workflow.json. Edit the workflow in Fleet Studio, then review and deploy a new release.
 
@@ -14,6 +14,8 @@ Prose guards and ticket transitions are agent responsibilities. Studio evaluates
 
 Kind: agent
 
+Goal: Keep every writer on the most valuable ready ticket, with nothing blocked for long.
+
 Set bounded work, assign owners and resolve blockers.
 
 Authority: Own scope and assignments.
@@ -21,6 +23,8 @@ Authority: Own scope and assignments.
 ## Role: Writer [writer]
 
 Kind: agent
+
+Goal: Turn assigned tickets into small, tested, reviewed changes.
 
 Implement assigned work, verify it and resolve review findings.
 
@@ -37,6 +41,8 @@ Authority: Read-only review; implementation stays with the parent.
 ## Role: Integrator [integrator]
 
 Kind: agent
+
+Goal: Merge reviewed work quickly without breaking the main branch.
 
 Integrate reviewed work and complete delivery.
 
@@ -130,7 +136,7 @@ Required guard: Ordinary acceptance and merge remain with Integrator
 
 ### Meaningful progress reports [progress-reporting]
 
-At task start, meaningful progress, blocker changes, handoff receipt and work completion, report a structured milestone with the canonical tracker evidence link. Tracker records remain authoritative. Reported completion is not technical acceptance. Do not produce repeated no-change updates.
+Studio observes sessions; report only done, blocked, unblocked and hand-offs with workflow_client.py report. Do not post repeated or no-change updates.
 
 ## Trigger templates
 
@@ -138,40 +144,19 @@ At task start, meaningful progress, blocker changes, handoff receipt and work co
 
 event; event=handoff-9e32e493; condition=turn-completed; interval=30 minutes; delivery=automatic; recipients=single
 
-Workflow action: Assign scoped packet
-From: Coordinator
-To: Writer
-When: An eligible, unclaimed packet is ready
-Required artifact: Ticket with source, file scope and unit acceptance
-Required condition: One writer per owned file
-
-Read the reported ticket and current handoff before acting. Confirm named custody, scope, evidence and explicit stops. A reported event is a notification, not proof of acceptance. Record work in the existing ticket/MR; do not invent missing assignments or transfer another agent's runtime.
+Pick up: Assign scoped packet. Take the next concrete step toward your goal.
 
 ### Submit reviewed packet [submit-reviewed-packet]
 
 event; event=handoff-8253bbf2; condition=turn-completed; interval=30 minutes; delivery=automatic; recipients=single
 
-Workflow action: Submit reviewed packet
-From: Writer
-To: Integrator
-When: Reviewed packet is AI Awaiting Merge
-Required artifact: Exact head, unit/Analyzer evidence and usable drafts
-Required condition: Integrator checks evidence and records bundle ownership
-
-Read the reported ticket and current handoff before acting. Confirm named custody, scope, evidence and explicit stops. A reported event is a notification, not proof of acceptance. Record work in the existing ticket/MR; do not invent missing assignments or transfer another agent's runtime.
+Pick up: Submit reviewed packet. Take the next concrete step toward your goal.
 
 ### Escalate scope exception [escalate-scope-exception]
 
 event; event=handoff-4709c619; condition=turn-completed; interval=30 minutes; delivery=automatic; recipients=single
 
-Workflow action: Escalate scope exception
-From: Integrator
-To: Coordinator
-When: A cross-bundle or acceptance exception remains
-Required artifact: Concrete conflict, evidence and requested decision
-Required condition: Ordinary acceptance and merge remain with Integrator
-
-Read the reported ticket and current handoff before acting. Confirm named custody, scope, evidence and explicit stops. A reported event is a notification, not proof of acceptance. Record work in the existing ticket/MR; do not invent missing assignments or transfer another agent's runtime.
+Pick up: Escalate scope exception. Take the next concrete step toward your goal.
 
 ## Mapping gaps
 

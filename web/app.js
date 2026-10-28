@@ -5,7 +5,7 @@ grid:'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z',nodes:'M9 3h6v5H9zM2 1
 terminal:'M3 4h18v16H3zM7 9l3 3-3 3M13 15h4',plus:'M12 5v14M5 12h14',minus:'M5 12h14',search:'M21 21l-5-5M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0',play:'M8 4l12 8-12 8z',more:'M5 12h.01M12 12h.01M19 12h.01',
 agents:'M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M19 8a4 4 0 0 1 0 8M22 21v-2a4 4 0 0 0-3-3M12 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0',activity:'M2 12h5l3-8 4 16 3-8h5',shield:'M12 3l8 4v5c0 5-8 9-8 9s-8-4-8-9V7zM8 12l3 3 5-6',
 settings:'M12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1z',refresh:'M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-2l2 3M4 16l2 3a7 7 0 0 0 12-2',close:'M6 6l12 12M6 18L18 6',edit:'M15 4l5 5M4 20l5-1L21 7l-5-5L4 14z',
-link:'M10 13a5 5 0 0 0 7 0l4-4a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7 0l-4 4a5 5 0 0 0 7 7l2-2',upload:'M12 16V3M7 8l5-5 5 5M4 16v5h16v-5',download:'M12 3v13M7 11l5 5 5-5M4 17v4h16v-4',folder:'M3 5h6l2 3h10v12H3z',arrow:'M5 12h14M14 7l5 5-5 5',trash:'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7'};
+link:'M10 13a5 5 0 0 0 7 0l4-4a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7 0l-4 4a5 5 0 0 0 7 7l2-2',upload:'M12 16V3M7 8l5-5 5 5M4 16v5h16v-5',download:'M12 3v13M7 11l5 5 5-5M4 17v4h16v-4',folder:'M3 5h6l2 3h10v12H3z',arrow:'M5 12h14M14 7l5 5-5 5',heart:'M12 21s-8-5-8-11a4 4 0 0 1 8-2 4 4 0 0 1 8 2c0 6-8 11-8 11z',rules:'M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2',chart:'M4 20V10M10 20V4M16 20v-7M22 20H2',flag:'M5 21V4h11l-2 4 2 4H5',user:'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0',workflow:'M4 5h6v4H4zM14 15h6v4h-6zM7 9v4a2 2 0 0 0 2 2h5',trash:'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7'};
 function icon(name){return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="'+(paths[name]||paths.grid)+'"></path></svg>';}
 function icons(){document.querySelectorAll('[data-icon]').forEach((n)=>n.innerHTML=icon(n.dataset.icon));}
 function esc(value){return String(value??'').replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -13,8 +13,8 @@ function uid(){return crypto.randomUUID();}
 function clone(value){return structuredClone(value);}
 const labels={working:'Working',idle:'Open & idle',closed:'Closed',attention:'Needs attention',unknown:'Unknown',draft:'Not linked'};
 let state=null,token='',monitor={sessions:{},events:[],jobs:[]},catalogue=[];
-let activeId=localStorage.getItem('fleet-active')||'',view=localStorage.getItem('fleet-view')||'progress';
-if(!['roster','board','sessions','roles','triggers','backlog','activity','workflow','progress'].includes(view))view='progress';
+let activeId=localStorage.getItem('fleet-active')||'',view=localStorage.getItem('fleet-view')||'health';
+if(!['roster','board','sessions','roles','triggers','backlog','activity','workflow','progress','health','automation','throughput'].includes(view))view='health';
 let query='',filter='all',selected=new Set(),editing=null,zoom=1,drag=null,pendingJob=null,stopped=false,saveQueue=Promise.resolve();
 function current(){return state.fleets.find((f)=>f.id===activeId)||state.fleets[0];}
 function sessionKey(a){const sid=a.sessionId??a.id??'',host=a.hostId||'local',backend=a.backend||'codex';return host==='local'&&backend==='codex'?sid:[host,backend,sid].join(':');}
@@ -31,6 +31,13 @@ function statusLabel(a){const s=statusOf(a),p=sessionFor(a).pids||[];return '<sp
 function toast(message,error=false){const n=document.createElement('div');n.className='toast'+(error?' error':'');n.textContent=message;const b=document.createElement('button');b.textContent='×';b.setAttribute('aria-label','Dismiss');b.onclick=()=>n.remove();n.append(b);$('toasts').append(n);while($('toasts').children.length>3)$('toasts').firstElementChild.remove();setTimeout(()=>n.remove(),error?13000:6000);}
 async function api(path,body){const options={headers:{}};if(body!==undefined){options.method='POST';options.headers={'Content-Type':'application/json','X-Fleet-Token':token};options.body=JSON.stringify(body);}const r=await fetch(path,options),data=await r.json();if(!r.ok)throw new Error(data.error||'Request failed.');return data;}
 function mutate(change,message){const op=saveQueue.catch(()=>{}).then(async()=>{const next=clone(state);change(next);state=(await api('/api/state',next)).state;if(!state.fleets.some((f)=>f.id===activeId))activeId=state.defaultFleetId;renderAll();if(message)toast(message);return state;});saveQueue=op;return op;}
+// Rules and limits that name a removed role or agent go with it; the server rejects dangling references.
+// A rule scoped to a removed role or agent is removed, never widened to the whole fleet.
+function forgetRole(f,roleId){
+ f.automations=(f.automations||[]).filter(r=>r.roleId!==roleId).map(r=>r.handoffRoleId===roleId?{...r,handoffRoleId:''}:r);
+ if(f.throttles?.roleTokensPerHour){delete f.throttles.roleTokensPerHour[roleId];if(!Object.keys(f.throttles.roleTokensPerHour).length)delete f.throttles.roleTokensPerHour;}
+}
+function forgetAgent(f,agentId){f.automations=(f.automations||[]).filter(r=>r.agentId!==agentId);}
 function updateFleet(next,change){change(next.fleets.find((f)=>f.id===activeId));}
 function filteredAgents(){return current().agents.filter((a)=>(a.name+' '+displayedRole(a)+' '+a.directory).toLowerCase().includes(query.toLowerCase())&&(filter==='all'||(filter==='disabled'?!a.enabled:statusOf(a)===filter)));}
 function setView(v){view=v;localStorage.setItem('fleet-view',v);query='';filter='all';$('search').value='';$('status-filter').value='all';selected.clear();renderAll();}
@@ -108,12 +115,19 @@ function renderInsights(){
  $('activity-list').innerHTML=events.length?events.map((e)=>'<div class="activity-item"><span class="event-dot"></span><div><div class="event-title">'+esc(e.title)+'</div><div class="event-detail">'+esc(e.detail)+'</div><div class="event-time">'+ago(e.time)+'</div></div></div>').join(''):'<div class="activity-empty">Fleet changes and session status will appear here.</div>';
 }
 
+// Focus anywhere in a form counts as editing, so a click on its button is not lost to a redraw;
+// so do typed values not yet saved, even after focus moves elsewhere.
+function editingContent(){
+ if(document.activeElement?.closest('#content input,#content textarea,#content select,#content form'))return true;
+ return [...document.querySelectorAll('#content form input,#content form textarea')].some(n=>n.type==='checkbox'||n.type==='radio'?n.checked!==n.defaultChecked:n.value!==n.defaultValue);
+}
 async function refresh(full=false){
  if(stopped)return;
  try{
   monitor=await api('/api/status');if(full||!catalogue.length||view==='sessions')catalogue=(await api('/api/sessions')).sessions;
   if(pendingJob){const j=(monitor.jobs||[]).find((j)=>j.id===pendingJob);if(j&&j.status!=='running'){pendingJob=null;toast(j.message,j.status==='failed');}}
-  renderMetrics();renderContent();renderInsights();
+  // A timed refresh must not redraw a form someone is filling in; saves and navigation still do.
+  renderMetrics();if(!(['health','automation','throughput'].includes(view)&&editingContent()))renderContent();renderInsights();
  }catch(error){$('live-pill').innerHTML='<span class="status-dot attention"></span><span>Disconnected</span>';$('monitor-banner').textContent='The local app is not responding. Use the Fleet Studio shortcut to reopen it.';$('monitor-banner').classList.remove('hidden');}
 }
 async function launch(ids){
@@ -183,7 +197,7 @@ async function deleteItem(){
  if(!window.confirm(prompt))return;
  try{await mutate((next)=>{
   if(action.type==='fleet'){next.fleets=next.fleets.filter((f)=>f.id!==action.id);if(next.defaultFleetId===action.id)next.defaultFleetId=next.fleets[0].id;}
-  else updateFleet(next,(f)=>{if(action.type==='agent'){f.agents=f.agents.filter((a)=>a.id!==action.id);f.links=f.links.filter((l)=>l.source!==action.id&&l.target!==action.id);}else f.links=f.links.filter((l)=>l.id!==action.id);});
+  else updateFleet(next,(f)=>{if(action.type==='agent'){f.agents=f.agents.filter((a)=>a.id!==action.id);f.links=f.links.filter((l)=>l.source!==action.id&&l.target!==action.id);forgetAgent(f,action.id);}else f.links=f.links.filter((l)=>l.id!==action.id);});
  },'Removed from the fleet.');$('editor').close();editing=null;selected.delete(action.id);}catch(e){toast(e.message,true);}
 }
 function exportFleet(){const blob=new Blob([JSON.stringify(current(),null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=current().windowName+'.json';a.click();URL.revokeObjectURL(url);}
@@ -212,7 +226,9 @@ function wireEvents(){
  };
  $('content').onchange=(e)=>{
   const t=e.target;if(t.dataset.select){if(t.checked)selected.add(t.dataset.select);else selected.delete(t.dataset.select);}
-  if(t.id==='select-all')filteredAgents().filter(launchable).forEach((a)=>t.checked?selected.add(a.id):selected.delete(a.id));renderContent();
+  if(t.id==='select-all')filteredAgents().filter(launchable).forEach((a)=>t.checked?selected.add(a.id):selected.delete(a.id));
+  // Only selection changes need a redraw; redrawing on any input's change rebuilt forms before their submit click landed.
+  if(t.dataset.select||t.id==='select-all')renderContent();
  };
  $('editor-form').onsubmit=saveEditor;$('delete-item').onclick=deleteItem;
  const close=()=>{$('editor').close();editing=null;};$('close-editor').onclick=close;$('cancel-editor').onclick=close;
@@ -254,7 +270,7 @@ function wireEvents(){
 }
 async function start(){
  icons();wireEvents();
- try{const d=await api('/api/bootstrap');state=d.state;token=d.token;monitor=d.status;catalogue=d.sessions;if(!state.fleets.some((f)=>f.id===activeId))activeId=state.defaultFleetId;renderAll();setInterval(()=>refresh(),5000);setTimeout(()=>refresh(true),1000);}
+ try{const d=await api('/api/bootstrap');state=d.state;token=d.token;monitor=d.status;catalogue=d.sessions;if(!state.fleets.some((f)=>f.id===activeId))activeId=state.defaultFleetId;if(!localStorage.getItem('fleet-view')&&!current().agents.length)view='roster';renderAll();setInterval(()=>refresh(),5000);setTimeout(()=>refresh(true),1000);}
  catch(e){$('content').innerHTML=empty('Could not open Fleet Studio',e.message,false);toast(e.message,true);}
 }
 document.addEventListener('DOMContentLoaded',start,{once:true});

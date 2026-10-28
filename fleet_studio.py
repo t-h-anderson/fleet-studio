@@ -30,6 +30,11 @@ from studio_workflow import populate_roles, populate_triggers, contract_problem
 from studio_backlog import Backlog, clean_config
 from studio_activity import activity
 from studio_progress import Progress, clean_settings
+from studio_telemetry import Telemetry
+from studio_health import Health, clean_health_settings
+from studio_reports import Reports
+from studio_dispatch import Dispatch, clean_dispatch
+from studio_automation import Automation, backtest, clean_alerts, clean_automations, clean_throttles, watches
 from studio_reconciliation import Reconciliation
 from studio_goals import Goals
 from studio_agents import Runtimes, clean_binding, clean_hosts, tmux_launch, LOCAL_HOST
@@ -150,10 +155,17 @@ def validate_fleets(value, host_ids=()):
             design = clean_design(raw, agents)
             triggers = validate_triggers(raw.get("triggers", []), {r["id"] for r in design["roles"]}, agent_ids)
             backlog = clean_config(raw.get("backlog"), agent_ids, design.get("roleSource"))
+            health = clean_health_settings(raw.get("health"))
+            role_ids = {r["id"] for r in design["roles"]}
+            automations = clean_automations(raw.get("automations"), role_ids, agent_ids)
+            throttles = clean_throttles(raw.get("throttles"), role_ids)
+            alerts = clean_alerts(raw.get("alerts"))
+            dispatch = clean_dispatch(raw.get("dispatch"), [s["id"] for s in (raw.get("workflow") or {}).get("states", [])])
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise ValidationError(str(exc)) from None
         candidate = {
             **design, "triggers": triggers, "backlog": backlog, "progress": clean_settings(raw.get("progress")),
+            "health": health, "automations": automations, "throttles": throttles, "alerts": alerts, "dispatch": dispatch,
             "id": fid, "name": text(raw.get("name"), "Fleet name", 80),
             "description": text(raw.get("description", ""), "Description", 600, required=False),
             "windowName": window_name, "agents": agents, "links": links,
@@ -312,6 +324,11 @@ class Application:
         self.controls = Controls(self)
         self.triggers = Triggers(self)
         self.progress = Progress(self)
+        self.telemetry = Telemetry(self)
+        self.health = Health(self)
+        self.automation = Automation(self)
+        self.reports = Reports(self)
+        self.dispatch = Dispatch(self)
         self.goals = Goals(self)
         self.reconciliation = Reconciliation(self)
         from studio_context import CurrentContext
@@ -342,19 +359,38 @@ class Application:
                 with self.lock:
                     previous = self.monitor["sessions"]
                     self.monitor = latest
-                self.triggers.tick(state, self.status())
-                self.progress.tick(state, self.status())
+                failures = self.run_steps(state, latest)
                 for fleet in state["fleets"]:
                     for agent in fleet["agents"]:
                         sid = session_key(agent)
                         before, after = previous.get(sid), latest["sessions"].get(sid)
                         if before and after and before["status"] != after["status"]:
                             self.event(agent["name"] + " · " + after["status"], fleet["name"], fleet["id"])
+                if failures:
+                    with self.lock:
+                        self.monitor["errors"] = self.monitor["errors"] + failures
             except Exception as exc:
                 logging.exception("Monitor refresh failed")
                 with self.lock:
                     self.monitor["errors"] = ["Status refresh failed: " + str(exc)]
             self.stop.wait(5)
+
+    def run_steps(self, state, latest):
+        """Run each monitoring step independently so one failure cannot stop the others."""
+        steps = (("Telemetry", lambda: self.telemetry.tick(state)),
+                 ("Health", lambda: self.health.tick(state, latest)),
+                 ("Automations", lambda: self.automation.tick(state, latest)),
+                 ("Dispatch", lambda: self.dispatch.tick(state, latest)),
+                 ("Triggers", lambda: self.triggers.tick(state, self.status())),
+                 ("Progress", lambda: self.progress.tick(state, self.status())))
+        failures = []
+        for name, step in steps:
+            try:
+                step()
+            except Exception as exc:
+                logging.exception("%s refresh failed", name)
+                failures.append(name + " refresh failed: " + str(exc))
+        return failures
 
     def status(self):
         with self.lock:
@@ -534,12 +570,32 @@ class Handler(BaseHTTPRequestHandler):
                 if path.endswith("history"):
                     return self.json(200, app.progress.history(fid, query.get("taskUrl", [None])[0], query.get("agentId", [None])[0], query.get("before", [None])[0]))
                 return self.json(200, app.progress.snapshot(fid))
+            if path == "/api/telemetry/turns":
+                query = parse_qs(urlsplit(self.path).query)
+                fleet = app.store.fleet(query.get("fleetId", [None])[0])
+                agent_id = query.get("agentId", [None])[0]
+                return self.json(200, {"turns": app.telemetry.turns(fleet["id"], agent_id, limit=100)})
+            if path == "/api/health/agents":
+                fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
+                return self.json(200, app.health.snapshot(fleet_id))
+            if path == "/api/flow":
+                fleet = app.store.fleet(parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0])
+                from studio_rules import flow
+                return self.json(200, flow(app, fleet))
+            if path == "/api/rules":
+                fleet = app.store.fleet(parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0])
+                from studio_rules import list_rules, timeline
+                return self.json(200, {**list_rules(app, fleet), "timeline": timeline(app, fleet["id"])})
+            if path == "/api/automation":
+                fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
+                app.store.fleet(fleet_id)
+                return self.json(200, app.automation.snapshot(fleet_id))
             if path == "/api/backlog":
                 fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
                 return self.json(200, app.backlog.snapshot(fleet_id))
             if path == "/api/sessions":
                 return self.json(200, {"sessions": app.catalogue()})
-            if path in ("/", "/app.js", "/roles.js", "/layout.js", "/backlog.js", "/activity.js", "/workflow.js", "/progress.js", "/metrics.js", "/reconciliation.js", "/goals.js", "/app.css", "/icon.svg"):
+            if path in ("/", "/app.js", "/roles.js", "/layout.js", "/backlog.js", "/activity.js", "/workflow.js", "/progress.js", "/metrics.js", "/reconciliation.js", "/goals.js", "/health.js", "/automation.js", "/flow.js", "/app.css", "/icon.svg"):
                 name = "index.html" if path == "/" else path[1:]
                 mime = {".html": "text/html", ".js": "application/javascript",
                         ".css": "text/css", ".svg": "image/svg+xml"}[Path(name).suffix]
@@ -578,6 +634,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, app.context.preview_retirement(payload))
             if path == '/api/context/retire/apply':
                 return self.json(200, app.context.retire(payload.get('previewId')))
+            if path == "/api/report":
+                return self.json(200, app.reports.report(payload))
+            if path == "/api/automation/acknowledge":
+                return self.json(200, app.automation.acknowledge(payload.get("fleetId"), payload.get("escalationId")))
+            if path == "/api/automation/resume":
+                fleet = app.store.fleet(payload.get("fleetId"))
+                app.automation.resume(fleet["id"], payload.get("agentId"))
+                return self.json(200, app.automation.snapshot(fleet["id"]))
+            if path == "/api/automation/backtest":
+                fleet = app.store.fleet(payload.get("fleetId"))
+                role_ids = {r["id"] for r in fleet.get("roles", [])}
+                try:
+                    [rule] = clean_automations([payload.get("rule")], role_ids)
+                except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                    raise ValidationError(str(exc)) from None
+                hours = payload.get("hours", 24)
+                if type(hours) is not int or not 1 <= hours <= 720:
+                    raise ValidationError("Backtest window must be 1 to 720 hours.")
+                agents = [a["id"] for a in fleet["agents"] if watches(rule, a)]
+                history = [h for h in app.health.history(fleet["id"], time.time() - hours * 3600 - 86400) if h["agentId"] in agents]
+                return self.json(200, backtest(rule, history, time.time(), hours))
             if path == "/api/progress/report":
                 app.progress.observe_handoffs(app.triggers.snapshot().get("actions", []))
                 return self.json(200, app.progress.report(payload))
@@ -596,7 +673,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/workflow/preview":
                 return self.json(200, app.deployments.preview(payload))
             if path == "/api/workflow/apply":
-                return self.json(200, app.deployments.apply(payload.get("previewId")))
+                preview = app.deployments.previews.get(payload.get("previewId")) or {}
+                result = app.deployments.apply(payload.get("previewId"))
+                if result.get("release") and preview.get("fleetId"):
+                    # Agents get their brief straight away, and dispatch then offers them work.
+                    result["notified"] = bool(app.dispatch.on_deploy(preview["fleetId"]))
+                return self.json(200, result)
             if path == "/api/workflow/pause":
                 return self.json(200, app.deployments.pause(payload))
             if path == "/api/workflow/notify":

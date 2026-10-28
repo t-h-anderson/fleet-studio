@@ -16,15 +16,17 @@ const url='http://127.0.0.1:'+port;
 const server=spawn(python,[path.join(root,'fleet_studio.py'),'--data-root',dataRoot,'--port',String(port),'--no-launch','--backlog-fixture',path.join(dataRoot,'issues.json')],{cwd:root,windowsHide:true,stdio:['ignore','pipe','pipe']});
 let serverOutput='';server.stderr.on('data',x=>serverOutput+=x);let browser;const errors=[];const checks=[];
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+// A stub that was unrouted while it awaited route.fetch() finds its request already continued; that is harmless.
+async function fulfillStub(route,options){try{await route.fulfill(options);}catch(error){if(!/already handled/.test(error.message))throw error;}}
 async function until(test,message){const deadline=Date.now()+15000;while(Date.now()<deadline){if(await test())return;await sleep(100);}throw new Error(message+' '+serverOutput);}
 try{
  await until(async()=>{try{return (await fetch(url+'/api/health')).ok;}catch{return false;}},'Server failed to start');
- browser=await chromium.launch({channel:'msedge',headless:true});
+ browser=await chromium.launch({...(process.env.FLEET_BROWSER_CHANNEL?{channel:process.env.FLEET_BROWSER_CHANNEL}:{}),headless:true});
  const page=await browser.newPage({viewport:{width:1500,height:1050}});page.on('pageerror',e=>errors.push(e.message));
  const bootstrap=async()=>await (await fetch(url+'/api/bootstrap')).json();
  const initial=await bootstrap();const token=initial.token;
  const post=async(endpoint,body)=>{const r=await fetch(url+endpoint,{method:'POST',headers:{'Content-Type':'application/json','X-Fleet-Token':token},body:JSON.stringify(body)});const d=await r.json();assert.ok(r.ok,JSON.stringify(d));return d;};
- await page.goto(url);await page.locator('.progress-metrics').waitFor();
+ await page.goto(url);await page.locator('.health-summary').waitFor();await page.locator('#nav-progress').click();await page.locator('.progress-metrics').waitFor();
  await until(async()=>(await page.locator('.progress-attention-list').innerText()).includes('Waiting for reviewed input'),'Missing blocker');
  assert.equal(await page.locator('#fleet-title').innerText(),'Progress');
  assert.match(await page.locator('.progress-metrics').innerText(),/Awaiting handoff receipt/);
@@ -40,7 +42,7 @@ try{
  const cardBounds=await writerCard.boundingBox();
  assert.ok(cardBounds.x>=0&&cardBounds.x+cardBounds.width<=390,'Assignment cards must fit a narrow viewport');
  await page.setViewportSize({width:1500,height:1050});
- await page.route('**/api/progress?**',async route=>{const response=await route.fetch();const data=await response.json();const a=data.agents.find(a=>a.id===fixture.writerId);a.assignments[0].contract={id:'module-one-v1',deliverable:'Module <script>window.contractInjected=true</script>',scope:['src/module_one'],requirements:[{id:'tests',description:'Module tests pass',evidenceUrl:''}],missingRequirements:['tests'],baseRevision:'',candidateRevision:'a'.repeat(40)};await route.fulfill({response,json:data});});
+ await page.route('**/api/progress?**',async route=>{const response=await route.fetch();const data=await response.json();const a=data.agents.find(a=>a.id===fixture.writerId);a.assignments[0].contract={id:'module-one-v1',deliverable:'Module <script>window.contractInjected=true</script>',scope:['src/module_one'],requirements:[{id:'tests',description:'Module tests pass',evidenceUrl:''}],missingRequirements:['tests'],baseRevision:'',candidateRevision:'a'.repeat(40)};await fulfillStub(route,{response,json:data});});
  await page.evaluate(()=>loadProgress(true));
  assert.match(await writerCard.locator('.assignment-contract').innerText(),/Module tests pass.*Evidence needed/s);
  assert.equal(await page.evaluate(()=>window.contractInjected),undefined);
@@ -52,7 +54,7 @@ try{
  assert.equal(await page.evaluate(()=>window.injected),undefined);
  await page.locator('[data-current-context="'+fixture.writerId+'"]').click();
  await page.locator('.context-text').waitFor({state:'visible'});
- assert.match(await page.locator('#progress-detail-body').innerText(),/complete deployed instructions/);
+ assert.match(await page.locator('#progress-detail-body').innerText(),/Your brief has your goal/);
  assert.match(await page.locator('#progress-detail-body').innerText(),/Preserve explicit stops/);
  assert.equal(await page.evaluate(()=>window.injected),undefined);
  await page.locator('#close-progress-detail').click();
@@ -79,7 +81,7 @@ try{
   const response=await route.fetch(),data=await response.json(),now=Date.now()/1000;
   data.metrics.backlogTrend=[{at:now-3600,open:5,partial:false},{at:now,open:3,partial:false}];
   data.metrics.ci={...data.metrics.ci,label:'GitHub CI',provider:'github',observedAt:now,pipelines:[{id:7,status:'success',ref:'main',sha:'a'.repeat(40),web_url:'https://github.com/o/r/actions/runs/7',duration:20,queued_duration:3}],testSummary:{total_count:12,success_count:12,failed_count:0,error_count:0,skipped_count:0}};
-  await route.fulfill({response,json:data});
+  await fulfillStub(route,{response,json:data});
  });
  await page.evaluate(()=>loadProgress(true));
  assert.match(await page.locator('.monitoring-view').innerText(),/Published tests for pipeline #7/);
@@ -98,7 +100,7 @@ try{
  await page.locator('#reconcile-form button[type="submit"]').click();
  await page.locator('#apply-reconciliation').click();
  await page.locator('#progress-detail').waitFor({state:'hidden'});
- assert.match(await page.locator('#content').innerText(),/Receipt reconciled/);
+ await until(async()=>/Receipt reconciled/.test(await page.locator('#content').innerText()),'Reconciled receipt not shown');
  checks.push('External receipt reconciliation preserves the event and does not send instructions');
  assert.match(await page.locator('#content').innerText(),/No agent receipt/);
  await page.locator('[data-progress-handoff="synthetic-handoff"]').click();
@@ -131,7 +133,7 @@ try{
  assert.match(await page.locator('#workflow-review-body').innerText(),/progress-reporting/);
  await page.locator('#workflow-apply').click();await page.locator('#workflow-review').waitFor({state:'hidden'});
  await page.locator('#nav-progress').click();await page.evaluate(()=>loadProgress(true));
- assert.match(await page.locator('.progress-release').innerText(),/0\/3 agents acknowledged/);
+ assert.match(await page.locator('.progress-release').innerText(),/0\/3 agents have their brief/);
  checks.push('Deployed graph links roles and contracts; reviewed deployment resets adoption');
  const current=await bootstrap();const inspect=await post('/api/workflow/inspect',{fleetId:fixture.fleetId});
  const recipient=current.state.fleets[0].agents.find(a=>a.id===fixture.integratorId);
@@ -143,7 +145,7 @@ try{
  // Synthetic goal projection and mocked action responses; never mutate a native goal.
  const goal={id:'synthetic-goal',objective:'Deliver <script>window.goalInjected=true</script>',status:'blocked',createdAt:100,updatedAt:200,tokensUsed:500,tokenBudget:2000};
  await page.route('**/api/progress?**',async route=>{const response=await route.fetch(),d=await response.json(),a=d.agents.find(a=>a.id===fixture.writerId);a.session.goal=goal;a.session.goalKnown=true;
-  d.goals={records:[{native:goal,agentId:a.id,agentName:a.name,sessionId:a.session.sessionId,current:true,bindingCurrent:true,observationFresh:true,staleGoal:true,taskUrl:fixture.payload.taskUrl,evidenceUrl:fixture.payload.evidenceUrl,completionCriteria:'Reviewed packet received',blocker:{blockerCategory:'dependency',blockerOwner:'Coordinator',reason:'Input pending',resumeCondition:'Input approved',nextAction:'Review input',dependsOn:[]}}],actions:[]};await route.fulfill({response,json:d});});
+  d.goals={records:[{native:goal,agentId:a.id,agentName:a.name,sessionId:a.session.sessionId,current:true,bindingCurrent:true,observationFresh:true,staleGoal:true,taskUrl:fixture.payload.taskUrl,evidenceUrl:fixture.payload.evidenceUrl,completionCriteria:'Reviewed packet received',blocker:{blockerCategory:'dependency',blockerOwner:'Coordinator',reason:'Input pending',resumeCondition:'Input approved',nextAction:'Review input',dependsOn:[]}}],actions:[]};await fulfillStub(route,{response,json:d});});
  await page.evaluate(()=>loadProgress(true));await page.locator('[data-progress-tab="goals"]').click();
  assert.match(await page.locator('.goal-view').innerText(),/Needs evidence review/);
  assert.match(await page.locator('.goal-view').innerText(),/Owner: Coordinator/);
@@ -166,7 +168,7 @@ try{
  assert.equal(await page.locator('#goal-apply').count(),0);await page.locator('#close-progress-detail').click();
  await page.unroute('**/api/goals/preview');await page.unroute('**/api/goals/apply');await page.unroute('**/api/progress?**');
  checks.push('Goal evidence, blockers, escaping and explicit reviewed actions; uncertain outcomes have no retry button (synthetic controls only)');
- await page.route('**/api/progress?**',async route=>{const response=await route.fetch();const data=await response.json();data.tracker.stale=true;data.tracker.error='Synthetic tracker outage';await route.fulfill({response,json:data});});
+ await page.route('**/api/progress?**',async route=>{const response=await route.fetch();const data=await response.json();data.tracker.stale=true;data.tracker.error='Synthetic tracker outage';await fulfillStub(route,{response,json:data});});
  await page.evaluate(()=>loadProgress(true));assert.match(await page.locator('.backlog-notice').innerText(),/Synthetic tracker outage/);
  assert.match(await page.locator('.backlog-notice').innerText(),/observations are stale.*Last successful tracker read/);
  await page.unroute('**/api/progress?**');await page.evaluate(()=>loadProgress(true));
@@ -182,7 +184,7 @@ try{
  await page.locator('#backlog-settings-form button[type="submit"]').click();
  await until(async()=>(await bootstrap()).state.fleets[0].backlog.recoverLocalProxy===false,'Proxy recovery did not disable');
  await page.locator('#backlog-dialog').waitFor({state:'hidden'});
- await page.route('**/api/progress?**',async route=>{const response=await route.fetch();const data=await response.json();data.tracker.observedAt=null;data.tracker.error='Synthetic first-read failure';await route.fulfill({response,json:data});});
+ await page.route('**/api/progress?**',async route=>{const response=await route.fetch();const data=await response.json();data.tracker.observedAt=null;data.tracker.error='Synthetic first-read failure';await fulfillStub(route,{response,json:data});});
  await page.evaluate(()=>loadProgress(true));
  assert.match(await page.locator('.backlog-notice').innerText(),/No successful tracker read yet/);
  assert.match(await page.locator('.progress-metrics').innerText(),/Open tracker tasks\s+Unknown/);
@@ -215,6 +217,7 @@ try{
                  {id:sameId,name:'Local Claude',backend:'claude-code',hostId:'local',directory:'/local/claude'},
                  {id:sameId,name:'Remote Codex',backend:'codex',hostId:'test-node',directory:'/remote/codex'}];
  await page.route('**/api/sessions',route=>route.fulfill({json:{sessions}}));
+ const savedHosts=await page.evaluate(()=>state.hosts);
  await page.evaluate(()=>{state.hosts=[{id:'test-node',name:'Test node'}];openEditor('agent');});
  await page.locator('[data-pick-session="local:claude-code:'+sameId+'"]').click();
  assert.equal(await page.locator('#f-backend').inputValue(),'claude-code');
@@ -227,8 +230,106 @@ try{
  await page.locator('#f-host').selectOption('local');
  assert.equal(await page.locator('#selected-session').innerText(),'');
  await page.locator('#cancel-editor').click();
+ // The synthetic host is client-only and invalid to save; later checks save state.
+ await page.evaluate(hosts=>{state.hosts=hosts;},savedHosts);
  assert.deepEqual(errors,[]);
  checks.push('Same session UUID on multiple backends and hosts remains independently selectable; runtime changes unlink the old session');
+ await page.setViewportSize({width:1500,height:1050});
+ await page.locator('#nav-health').click();await page.locator('.health-table').waitFor();
+ await until(async()=>(await page.locator('.health-table').innerText()).includes('Looping'),'Writer is not shown as looping');
+ assert.match(await page.locator('.health-table').innerText(),/pytest tests\/test_contract\.py/);
+ // The integrator's session is closed with open work, which outranks its admin-heavy signal.
+ assert.match(await page.locator('.health-table').innerText(),/session is closed with open work/);
+ await page.locator('[data-health-expand="'+fixture.integratorId+'"]').click();
+ await until(async()=>/Admin-heavy/.test(await page.locator('.health-detail').innerText()),'Admin-heavy signal missing');
+ await page.locator('[data-health-expand="'+fixture.writerId+'"]').click();
+ await until(async()=>(await page.locator('.turn-timeline').count())>0,'Turn timeline missing');
+ assert.match(await page.locator('.turn-timeline').innerText(),/pytest tests\/test_contract\.py/);
+ await page.screenshot({path:path.join(root,'tests/health.png'),fullPage:true});
+ await page.locator('#nav-automation').click();await page.locator('.automation-card').first().waitFor();
+ assert.equal(await page.locator('.automation-card').count(),4);
+ assert.match(await page.locator('.automation-card').first().innerText(),/At most 2 time/);
+ await page.locator('[data-automation-backtest]').first().click();
+ await until(async()=>(await page.locator('.automation-card').first().innerText()).includes('Backtest: would have acted'),'Backtest result missing');
+ assert.match(await page.locator('#content').innerText(),/recovered/);
+ await page.locator('#f-maxWorkingAgents').fill('3');
+ await sleep(6500);
+ assert.equal(await page.locator('#f-maxWorkingAgents').inputValue(),'3','Throttle form lost typed input on refresh');
+ // Clicking the button blurs the input first; the form must still be there to submit.
+ await page.locator('#throttle-form button[type="submit"]').click();
+ await until(async()=>(await bootstrap()).state.fleets[0].throttles?.maxWorkingAgents===3,'Save limits did not save');
+ // A backtest that finishes while someone types must not redraw the form under them.
+ await page.locator('[data-automation-backtest]').nth(1).click();
+ await page.locator('#f-fleetTokensPerHour').fill('5000');
+ await sleep(1500);
+ assert.equal(await page.locator('#f-fleetTokensPerHour').inputValue(),'5000','A finished backtest wiped typed input');
+ await page.locator('#f-fleetTokensPerHour').fill('');
+ assert.match(await page.locator('.automation-card').first().innerText(),/Has not acted yet|Last:/);
+ await post('/api/workflow/pause',{fleetId:fixture.fleetId,paused:true});
+ await page.locator('#nav-health').click();await page.locator('#nav-automation').click();
+ await until(async()=>(await page.locator('#content').innerText()).includes('these automations are paused too'),'Paused banner missing');
+ await post('/api/workflow/pause',{fleetId:fixture.fleetId,paused:false});
+ await page.screenshot({path:path.join(root,'tests/automation.png'),fullPage:true});
+ await page.locator('#nav-throughput').click();
+ await until(async()=>(await page.locator('#content').innerText()).includes('Estimated waste'),'Throughput missing');
+ assert.match(await page.locator('#content').innerText(),/repeated steps/);
+ await page.screenshot({path:path.join(root,'tests/throughput.png'),fullPage:true});
+ await page.locator('#nav-board').click();
+ await until(async()=>(await page.locator('.stuck-badge').count())>0,'Stuck badge missing on the design board');
+ await page.screenshot({path:path.join(root,'tests/board-health.png'),fullPage:true});
+ await page.locator('#nav-roles').click();
+ await page.evaluate(id=>openEditor('role',state.fleets[0].agents.find(a=>a.id===id).roleIds[0]),fixture.writerId);
+ assert.match(await page.locator('#f-goal').inputValue(),/tested, reviewed changes/);
+ await page.locator('#cancel-editor').click();
+ assert.deepEqual(errors,[]);assert.equal((await bootstrap()).status.controls.length,0,'Tests must never send to agents');
+ checks.push('Agent health shows loops and admin share with turn timelines; automations list, backtest and outcomes; throughput waste; stuck roles on the board; role goals editable');
+ await page.locator('#nav-health').click();await page.locator('.health-table').waitFor();
+ await page.locator('.threshold-panel summary').click();
+ await page.locator('#f-h-stallMinutes').fill('45');
+ await page.locator('#threshold-form button[type="submit"]').click();
+ await until(async()=>(await bootstrap()).state.fleets[0].health?.stallMinutes===45,'Thresholds were not saved');
+ await until(async()=>!(await page.locator('#deploy-banner').isHidden())&&(await page.locator('#deploy-banner').innerText()).includes('Undeployed changes'),'Undeployed banner missing');
+ assert.ok(await page.locator('#nav-workflow.has-badge').count(),'Workflow nav has no undeployed badge');
+ await page.locator('#nav-board').click();
+ await until(async()=>(await page.locator('[data-role-node] .live-stats').count())>0,'Live counts missing on the board');
+ assert.match(await page.locator('[data-role-node] .live-stats').first().innerText(),/waiting/);
+ assert.match(await page.locator('#live-edges').innerText(),/Hand-offs in flight/);
+ await page.locator('#nav-automation').click();
+ await until(async()=>/Routing[\s\S]*Dispatch[\s\S]*Timeline/.test(await page.locator('#content').innerText()),'Rules sections missing');
+ await until(async()=>(await page.locator('#content').innerText()).includes('OUTCOME'),'Timeline did not load');
+ await page.locator('#nav-health').click();
+ await until(async()=>(await page.locator('.setup-checklist').count())>0,'Setup checklist missing');
+ assert.match(await page.locator('.setup-checklist').innerText(),/Deploy the workflow/);
+ assert.deepEqual(errors,[]);assert.equal((await bootstrap()).status.controls.length,0,'Tests must never send to agents');
+ checks.push('Thresholds save from Agent health; undeployed banner and badge; live counts on the board; Rules shows routing, dispatch and timeline; setup checklist');
+ // The rule editor offers only agents in the chosen role.
+ await page.locator('#nav-automation').click();await page.locator('.automation-card').first().waitFor();
+ const writerRole=await page.evaluate(id=>state.fleets[0].agents.find(a=>a.id===id).roleIds[0],fixture.writerId);
+ await page.evaluate(()=>openEditor('automation'));
+ await page.locator('#f-auto-role').selectOption(writerRole);
+ const offered=await page.locator('#f-auto-agent option').evaluateAll(options=>options.map(o=>o.value).filter(Boolean));
+ assert.deepEqual(offered,[fixture.writerId]);
+ await page.locator('#cancel-editor').click();
+ // A role that a rule and a token limit refer to can still be removed; both references go with it.
+ const tempRole=await page.evaluate(async()=>{
+  const id=crypto.randomUUID();
+  await mutate(next=>updateFleet(next,f=>{
+   const base=f.roles[0];
+   const role={...structuredClone(base),id,key:'temp-role',name:'Temp role',baseline:null};delete role.specId;f.roles.push(role);
+   f.automations.push({...structuredClone(f.automations[0]),id:crypto.randomUUID(),roleId:id,name:'Temp rule'});
+   f.throttles={...(f.throttles||{}),roleTokensPerHour:{[id]:5000}};
+  }));
+  return id;
+ });
+ page.once('dialog',dialog=>dialog.accept());
+ await page.evaluate(id=>openEditor('role',id),tempRole);
+ await page.locator('#delete-item').click();
+ await until(async()=>!(await bootstrap()).state.fleets[0].roles.some(r=>r.id===tempRole),'Role with references could not be removed');
+ const afterRemove=(await bootstrap()).state.fleets[0];
+ assert.ok(!afterRemove.automations.some(r=>r.roleId===tempRole),'Rule scoped to the removed role remains');
+ assert.ok(!afterRemove.throttles?.roleTokensPerHour?.[tempRole],'Token limit of the removed role remains');
+ assert.deepEqual(errors,[]);
+ checks.push('Rule editor offers only agents in the chosen role; removing a role takes its rules and limits with it');
  console.log(JSON.stringify({passed:true,checks},null,2));
 }finally{
  if(browser)await browser.close();

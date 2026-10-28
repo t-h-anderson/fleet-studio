@@ -50,7 +50,7 @@ def project_assignments(agent, reports, handoffs, tasks, tracker, release_id, no
                         stale=now - report['at'] > quiet_seconds)
             if report.get('blockedSince'):
                 item.update(waitingObservedSeconds=report.get('waitingObservedSeconds'),
-                            waitingObservationGap=report.get('waitingObservationGap', True) or now - report['at'] > 180)
+                            waitingObservationGap=report.get('waitingObservationGap', True))
         elif handoff:
             item.update(source='Handoff receipt' if handoff.get('receivedAt') else 'Handoff delivery',
                         evidenceAt=handoff.get('receivedAt') or handoff['createdAt'],
@@ -58,8 +58,7 @@ def project_assignments(agent, reports, handoffs, tasks, tracker, release_id, no
                         state='received' if handoff.get('receivedAt') else 'assigned' if handoff['status'] == 'queued' else 'waiting',
                         reason=handoff.get('detail') or ('Recipient has not reported receipt.' if not handoff.get('receivedAt') else ''),
                         owner=agent['name'] if handoff['status'] == 'queued' or handoff.get('receivedAt') else 'Workflow operator',
-                        nextAction='Read the task and report receipt.' if handoff['status'] == 'queued' and not handoff.get('receivedAt') else
-                        'Confirm current scope before starting.' if handoff.get('receivedAt') else 'Inspect delivery evidence before retrying.',
+                        nextAction='Work the ticket.' if handoff['status'] == 'queued' or handoff.get('receivedAt') else 'Inspect delivery evidence before retrying.',
                         stale=now - (handoff.get('receivedAt') or handoff['createdAt']) > quiet_seconds)
             if handoff['status'] in ('sending', 'needs-attention') and not handoff.get('receivedAt'):
                 item.update(state='unknown', reason='Delivery outcome needs reconciliation. ' + item['reason'])
@@ -105,13 +104,18 @@ def project_assignments(agent, reports, handoffs, tasks, tracker, release_id, no
 
 
 def waiting_observation(previous, data, now):
-    """Accumulate only short intervals bounded by matching blocker reports."""
+    """Accumulate waiting time between matching blocker reports.
+
+    A blocker stays in force until it is cleared, so agents never need to repeat
+    an unchanged blocked report. Only a changed reason, owner or dependency
+    restarts the count.
+    """
     seconds, gap = 0, False
     if previous.get('blockedSince'):
         seconds = previous.get('waitingObservedSeconds', 0)
         elapsed = now - previous['at']
         matching = all(data.get(k) == previous.get(k) for k in ('reason', 'blockerOwner', 'dependsOn'))
-        gap = previous.get('waitingObservationGap', False) or not matching or not 0 <= elapsed <= 180
-        if matching and 0 <= elapsed <= 180:
+        gap = previous.get('waitingObservationGap', False) or not matching or elapsed < 0
+        if matching and elapsed >= 0:
             seconds += elapsed
     return seconds, gap

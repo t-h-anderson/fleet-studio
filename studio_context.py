@@ -47,7 +47,7 @@ class CurrentContext:
                   'goalIdentity': {k: (observed.get('goal') or {}).get(k) for k in ('id', 'createdAt')},
                   'goalObjectiveDigest': fingerprint((observed.get('goal') or {}).get('objective')),
                   'policyDocument': str(app.root / 'workflow-releases' / rid / 'agents' / (aid + '.md')),
-                  'instructions': 'Read the complete deployed instructions at the policy document above. This context supplements them. '
+                  'instructions': 'Your brief has your goal and how to report. This context lists your current obligations. '
                                   'Preserve explicit stops, scope, custody and source permissions. Unknown or stale observations never authorize resuming work.'}
         with app.progress.lock, closing(app.progress.connect()) as db:
             handoffs = [json.loads(r['data']) for r in db.execute('SELECT data FROM handoffs WHERE fleet=?', (fid,))]

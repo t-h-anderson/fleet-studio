@@ -126,6 +126,10 @@ class Triggers:
             raise ValueError("No agents are assigned to the target role.")
         return agents
 
+    def has_open_work(self, fleet, agent):
+        health = self.app.health.get(fleet["id"], agent["id"]) if hasattr(self.app, "health") else None
+        return bool(health and health.get("openWork"))
+
     def hold_reason(self, agents, monitor, idle_only=False, ignore_control_id=None):
         if not agents:
             return "No agents are assigned to the target role."
@@ -144,6 +148,20 @@ class Triggers:
                 return agent["name"] + " has stale session observations."
             if not agent["enabled"]:
                 return agent["name"] + " is excluded from automatic delivery."
+            if agent.get("backend", "codex") == "claude-code":
+                # Claude Code has no queue: Studio resumes a closed session for one headless turn.
+                if item.get("status") == "working":
+                    return agent["name"] + " is mid-turn; waiting for it to finish."
+                if item.get("status") == "idle" or item.get("pids"):
+                    return agent["name"] + " is open in a Claude Code client; Studio cannot start a turn alongside it."
+                if item.get("status") != "closed" or not item.get("livenessKnown"):
+                    return agent["name"] + " has unknown process ownership on this host."
+                from studio_agents import ClaudeCodeBackend
+                if time.time() - ((item.get("session") or {}).get("updatedAt") or 0) < ClaudeCodeBackend.active_seconds:
+                    return agent["name"] + " finished a turn moments ago; waiting for it to settle."
+                if idle_only and item.get("status") not in ("idle", "closed"):
+                    return agent["name"] + " is working; waiting for idle."
+                continue
             if item.get("status") not in ("idle", "working") or not item.get("pids"):
                 return agent["name"] + " is closed or needs attention; open/review the session first."
             if agent.get("backend", "codex") != "codex":
@@ -162,11 +180,11 @@ class Triggers:
 
     @staticmethod
     def message(rule, cause, event=None):
-        text = ("Automated Fleet Studio trigger: " + rule["name"] + ".\nCause: " + cause + ".\n"
-                "Respect explicit pauses/stops, current task scope, custody, source restrictions and approval requirements. "
-                "Read your active Fleet Studio assignment at this safe boundary. Record substantive work and handoffs in the normal ticket/MR.\n\n" + rule["message"])
+        # Periodic checks carry their own marker so their replies never count as an agent looping.
+        marker = "[Fleet Studio · check] " if rule["kind"] in ("idle", "timer") else "[Fleet Studio] "
+        text = marker + rule["name"] + " (" + cause + ")\n\n" + rule["message"]
         if event:
-            text += "\n\nReported handoff (verify against the current ticket):\nFrom: " + event["agent"]
+            text += "\n\nHand-off from " + event["agent"] + ":"
             for key in ("eventId", "ticket", "artifact", "context"):
                 if event.get(key):
                     text += "\n" + key + ": " + event[key]
@@ -205,7 +223,8 @@ class Triggers:
                       "sourceAgentId": event.get("agentId") if event else None, "deploymentId": rule.get("deploymentId"),
                       **({"eventId": event["eventId"], "ticket": event.get("ticket", ""), "eventKey": event["key"]} if event else {}),
                       **({'assignmentContract': deepcopy(event['assignmentContract'])} if event and event.get('assignmentContract') else {})}
-            action["message"] += "\n\nFleet handoff action ID: " + action["id"] + ". Report handoff-received with this ID after reading the task evidence.\n" if event else ""
+            # Receipt is observed from the recipient's next turn; no report is requested.
+            action["message"] += "\n\nHandoff " + action["id"][:8] + "." if event else ""
             self.data["actions"].append(action)
             actions.append(action)
         if dispatch:
@@ -272,7 +291,7 @@ class Triggers:
         if rule["kind"] == "event" and not source_ids and rule.get("deploymentId"):
             action.update(status="needs-attention", detail="Legacy handoff has no source identity. Reconcile existing recipient evidence or repair the original unsent event before considering delivery.")
             return
-        reason = contract_problem(fleet, rule) or self.app.deployments.adoption_hold(fleet["id"], source_ids + [a["id"] for a in agents]) or self.hold_reason(agents, monitor, rule["kind"] == "idle")
+        reason = contract_problem(fleet, rule) or self.hold_reason(agents, monitor, rule["kind"] == "idle")
         if reason:
             action.update(status="held", detail=reason)
             return
@@ -340,7 +359,8 @@ class Triggers:
                         agents = [a for a in fleet["agents"] if rule["targetRoleId"] in a.get("roleIds", [])]
                         for agent in agents:
                             schedule = current.setdefault("agents", {}).setdefault(agent["id"], {"nextDue": now})
-                            schedule["detail"] = self.app.deployments.adoption_hold(fleet["id"], [agent["id"]]) or self.hold_reason([agent], monitor, idle_only=True)
+                            schedule["detail"] = self.hold_reason([agent], monitor, idle_only=True) or (
+                                "" if self.has_open_work(fleet, agent) else agent["name"] + " has no open work; dispatch offers new tickets instead.")
                             idle_key = (rule["id"], agent["id"])
                             if schedule["detail"]:
                                 self.idle_since.pop(idle_key, None)
@@ -354,7 +374,9 @@ class Triggers:
                     elif rule["kind"] == "timer" and now >= current["nextDue"]:
                         current["nextDue"] = now + rule["minutes"] * 60
                         self.persist()
-                        self.fire(fleet, rule, "timer elapsed", monitor)
+                        # A timer only reaches a role that has something to do; dispatch hands out new work.
+                        if any(self.has_open_work(fleet, a) for a in fleet["agents"] if rule["targetRoleId"] in a.get("roleIds", [])):
+                            self.fire(fleet, rule, "timer elapsed", monitor)
                     elif rule["kind"] == "condition":
                         if not monitor.get("observedAt") or time.time() - monitor["observedAt"] > 20:
                             self.observed.pop(rule["id"], None)

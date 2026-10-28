@@ -54,7 +54,7 @@ class SpecificationTests(unittest.TestCase):
         self.assertEqual(after['agents'],f['agents']);self.assertEqual(after['triggers'],f['triggers'])
         self.assertTrue(app.deployments.data['paused'][f['id']])
         doc=Path(result['release']['directory'],'agents',f['agents'][0]['id']+'.md').read_text(encoding='utf-8')
-        self.assertIn('## Progress reports',doc);self.assertIn('handoff-received',doc)
+        self.assertIn('## Reporting',doc);self.assertIn('report done',doc);self.assertNotIn('handoff-received',doc)
         with self.assertRaisesRegex(ValueError,'already deployed'):
             app.deployments.preview({'fleetId':f['id'],'revision':app.store.snapshot()['revision'],'kind':'reporting'})
 
@@ -112,6 +112,8 @@ class SpecificationTests(unittest.TestCase):
         f["triggers"][0].update(enabled=True,kind="timer",mode="review",minutes=1)
         # A timer linked to a handoff keeps the same source role by design.
         app.store.save(state);first=self.deploy(app)
+        for a in f["agents"]:
+            app.health.current[(f["id"],a["id"])]={"state":"idle","since":0,"signals":[],"openWork":True}
         app.triggers.tick(app.store.snapshot(),{},now=100)
         app.triggers.tick(app.store.snapshot(),{},now=161)
         action=app.triggers.snapshot()["actions"][0]
@@ -141,7 +143,9 @@ class SpecificationTests(unittest.TestCase):
         self.assertIn("workflow_client.py",preview["targets"][0]["text"])
         for target in preview["targets"]:
             self.assertIn("--agent "+target["agentId"],target["text"])
-            self.assertIn(target["agentId"]+".md",target["text"])
+            # Short briefs arrive inline, so the agent need not run anything to read them.
+            self.assertIn("## Reporting",target["text"])
+            self.assertNotIn("' acknowledge",target["text"])
             self.assertNotIn("<your-agent-id>",target["text"])
         self.assertEqual(preview,app.controls.existing_preview(preview["id"]))
         self.assertEqual(app.deployments.overview(f)["acks"],[])
@@ -208,9 +212,9 @@ class SpecificationTests(unittest.TestCase):
         self.assertEqual(installed["installed"],[str(entry)])
         self.assertIn("instructions --fleet",entry.read_text(encoding="utf-8"))
         self.assertIn("Writer A",instructions(f["id"],aid,self.root,self.root))
-        self.assertIn("fleet_event.py", instructions(f["id"],aid,self.root,self.root))
-        self.assertIn("stable event ID", instructions(f["id"],aid,self.root,self.root))
-        with self.assertRaisesRegex(ValueError,"no longer matches"):
+        self.assertIn("report handoff", instructions(f["id"],aid,self.root,self.root))
+        self.assertIn("## Hand-offs", instructions(f["id"],aid,self.root,self.root))
+        with self.assertRaisesRegex(ValueError,"belongs to"):
             instructions(f["id"],aid,self.root,self.root.parent)
         state=app.store.snapshot();state["fleets"][0]["roles"][1]["responsibilities"]="Redeployed role";app.store.save(state);self.deploy(app)
         self.assertIn("Redeployed role",instructions(f["id"],aid,self.root,self.root))
@@ -230,17 +234,21 @@ class SpecificationTests(unittest.TestCase):
         for a in f["agents"]:
             self.assertIn(a["name"],preview["changes"][0]["after"])
             self.assertIn("--agent "+a["id"],preview["changes"][0]["after"])
-        self.assertIn("--directory (Get-Location).Path",preview["changes"][0]["after"])
+        self.assertIn("instructions --fleet",preview["changes"][0]["after"])
+        self.assertNotIn("Get-Location",preview["changes"][0]["after"])  # The command is shell-neutral.
         self.assertIn("different or nested checkout",preview["changes"][0]["after"])
         app.launch_enabled=True
         installed=app.entrypoints.apply(preview["id"])
         f=installed["state"]["fleets"][0]
         self.assertTrue(all(a["entryPoint"]=="installed" for a in app.deployments.overview(f)["adoption"]))
         child=self.root/"child";child.mkdir()
-        with self.assertRaisesRegex(ValueError,"no longer matches"):
+        # A subfolder of the agent's workspace still reads the brief; a nested checkout does not.
+        self.assertIn("## Reporting",instructions(f["id"],f["agents"][0]["id"],self.root,child))
+        (child/".git").mkdir()
+        with self.assertRaisesRegex(ValueError,"separate checkout"):
             instructions(f["id"],f["agents"][0]["id"],self.root,child)
         for a in f["agents"]:
-            self.assertIn("# Assignment: "+a["name"],instructions(f["id"],a["id"],self.root,self.root))
+            self.assertIn("# "+a["name"]+" — ",instructions(f["id"],a["id"],self.root,self.root))
             app.deployments.acknowledge({"fleetId":f["id"],"agentId":a["id"],"releaseId":result["release"]["id"]})
         self.assertTrue(app.deployments.overview(f)["migrationComplete"])
         entry=self.root/"AGENTS.override.md"

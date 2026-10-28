@@ -1,4 +1,6 @@
-"""Read public transcript messages and supplied reasoning summaries, without tools."""
+"""Read public transcript messages and supplied reasoning summaries, without tools.
+
+Tool-call metadata is recorded separately by studio_telemetry."""
 from contextlib import closing
 import hashlib
 import json
@@ -42,6 +44,18 @@ def public_messages(rows):
         messages.append({'id': identity, 'kind': kind, 'text': text[:16000], 'truncated': len(text) > 16000,
                          'timestamp': stamp})
     return messages[-100:]
+
+
+def rollout_path(root, session_id):
+    """The session's rollout file when it lies inside the Codex session folder."""
+    with closing(connect(root, 'state_5.sqlite')) as db:
+        row = db.execute('SELECT rollout_path FROM threads WHERE id=?', (session_id,)).fetchone()
+    if not row or not row['rollout_path']:
+        return None
+    path = Path(normalize_path(row['rollout_path'])).resolve()
+    if not path.is_relative_to(root.resolve()) or path.suffix != '.jsonl':
+        return None
+    return path
 
 
 def activity(root, session_id, fixture=None):

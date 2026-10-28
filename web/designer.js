@@ -9,11 +9,20 @@ function updateDesignTabs(){
  if(!tabs){
   tabs=document.createElement('div');tabs.id='design-tabs';tabs.className='design-tabs';tabs.setAttribute('role','tablist');
   $('board-toolbar').insertAdjacentElement('beforebegin',tabs);
-  tabs.addEventListener('click',e=>{const tab=e.target.closest('[data-design-tab]');if(tab)setView(tab.dataset.designTab);});
+  tabs.addEventListener('click',e=>{
+   const tab=e.target.closest('[data-design-tab]');if(tab)setView(tab.dataset.designTab);
+   if(e.target.closest('#design-deploy'))openDeployReview();
+  });
  }
  tabs.classList.toggle('hidden',!DESIGN_VIEWS[view]);
  tabs.innerHTML=Object.entries(DESIGN_VIEWS).map(([id,label])=>
-  '<button class="button small '+(view===id?'primary':'')+'" role="tab" aria-selected="'+(view===id)+'" data-design-tab="'+id+'">'+label+'</button>').join('');
+  '<button class="button small '+(view===id?'primary':'')+'" role="tab" aria-selected="'+(view===id)+'" data-design-tab="'+id+'">'+label+'</button>').join('')+deployBar();
+}
+// The workflow's deploy state, next to the tabs on every one of them.
+function deployBar(){
+ const status=typeof deploymentStatus==='function'?deploymentStatus():null;
+ const text=!status?'Checking deployment…':!status.active?'Not deployed yet: agents have no brief.':status.draftChanged?'Undeployed changes: agents still follow the last deploy.':'Deployed and up to date.';
+ return '<span class="design-deploy"><span id="design-deploy-status">'+esc(text)+'</span><button class="button small primary" id="design-deploy"'+(status?.active&&!status.draftChanged?' disabled':'')+'>Review &amp; deploy</button></span>';
 }
 
 // The inspector: what is selected on the board, edited in place.
@@ -109,6 +118,9 @@ $('content').addEventListener('click',e=>{
 
 const designOriginalRenderBoard=renderBoard;
 renderBoard=function(){designOriginalRenderBoard();addInspector();};
+// Deployment status arrives with health; keep the bar current without redrawing the view.
+const designOriginalLoadHealth=loadHealth;
+loadHealth=async function(){await designOriginalLoadHealth();if(state&&DESIGN_VIEWS[view])updateDesignTabs();};
 const designOriginalRenderAll=renderAll;
 renderAll=function(){
  designOriginalRenderAll();

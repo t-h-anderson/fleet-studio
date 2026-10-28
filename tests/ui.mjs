@@ -364,6 +364,15 @@ try{
  assert.ok(await page.locator('#nav-workflow.active').count(),'Workflow nav not highlighted on the Roles tab');
  assert.deepEqual(errors,[]);
  checks.push('One Workflow screen: tabs; the inspector edits a hand-off\'s delivery and a role\'s goal in place, and the trigger follows');
+ // Deploy bar on every tab; the review counts hand-off delivery; Advanced lists triggers not tied to a hand-off.
+ await until(async()=>/Undeployed changes/.test(await page.locator('#design-deploy-status').innerText()),'Deploy bar does not show the undeployed change');
+ await page.locator('#design-deploy').click();await page.locator('#workflow-review').waitFor();
+ await until(async()=>/Hand-offs:.*need review/.test(await page.locator('#workflow-review-body').innerText()),'Deploy review has no delivery summary');
+ await page.locator('#close-workflow-review').click();
+ await page.locator('[data-design-tab="workflow"]').click();await page.locator('[data-workflow-section="advanced"]').click();
+ await until(async()=>/Hand-offs are delivered from the Design tab/.test(await page.locator('#content').innerText()),'Advanced section missing');
+ assert.deepEqual(errors,[]);
+ checks.push('Deploy bar on the Workflow tabs; deploy review counts hand-off delivery; Advanced lists other triggers');
  console.log(JSON.stringify({passed:true,checks},null,2));
 }finally{
  if(browser)await browser.close();

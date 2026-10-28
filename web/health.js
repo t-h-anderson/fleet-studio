@@ -180,7 +180,7 @@ let renderForced=false;
 renderContent=function(){
  if(!state||drag)return;
  // Background refreshes must not redraw a form someone is typing in; navigation and saves (renderAll) still do.
- if(!renderForced&&['health','automation','throughput'].includes(view)&&editingContent())return;
+ if(!renderForced&&EDITABLE_VIEWS.includes(view)&&editingContent())return;
  if(view==='health')return renderHealth();
  if(view==='automation')return renderAutomation();
  if(view==='throughput')return renderThroughput();
@@ -193,7 +193,7 @@ renderAll=function(){
  if(!state)return;
  const views={
   health:['Agent health','Where agents are stuck, what they spend tokens on, and quick tweaks.','Agents'],
-  automation:['Rules','Everything that messages an agent: routing work between roles, recovering stuck agents, and dispatching tickets.','Rules'],
+  automation:['Rules','Recovering stuck agents, dispatching tickets and limits. Hand-offs between roles are set on the Workflow screen.','Rules'],
   throughput:['Throughput','Work delivered, tokens spent, waste and throttling.','Flow and waste'],
  };
  if(!views[view])return;

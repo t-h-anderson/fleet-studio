@@ -26,6 +26,7 @@ def routing_rule(fleet, runtime, trigger):
     return {'id': trigger['id'], 'section': 'routing', 'name': trigger['name'], 'when': when,
             'to': names.get(trigger['targetRoleId'], 'Missing role'), 'kind': trigger['kind'], 'mode': trigger['mode'],
             'enabled': trigger['enabled'], 'running': bool(deployed and deployed['enabled']),
+            'linkId': trigger.get('workflowLinkId', ''),
             'periodic': trigger['kind'] in ('idle', 'timer'),
             'note': '' if deployed else 'Draft only: deploy the workflow to start it.'}
 
@@ -49,7 +50,7 @@ def timeline(app, fleet_id, limit=100):
             continue
         rows.append({'at': action['createdAt'], 'source': 'routing', 'rule': action['name'], 'agent': action.get('targetName', ''),
                      'action': 'hand-off' if action.get('eventId') else 'message', 'status': action['status'],
-                     'detail': action.get('detail', ''), 'cause': action.get('cause', ''), 'outcome': None})
+                     'detail': action.get('detail', ''), 'cause': action.get('cause', ''), 'outcome': None, 'actionId': action['id']})
     for fire in app.automation.snapshot(fleet_id)['fires']:
         source = 'dispatch' if fire['ruleId'] in ('dispatch', 'blocked-notify', 'unblock-wake', 'agent-handoff') else 'recovery'
         rows.append({'at': fire['at'], 'source': source, 'rule': fire['ruleName'],

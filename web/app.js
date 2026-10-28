@@ -14,7 +14,9 @@ function clone(value){return structuredClone(value);}
 const labels={working:'Working',idle:'Open & idle',closed:'Closed',attention:'Needs attention',unknown:'Unknown',draft:'Not linked'};
 let state=null,token='',monitor={sessions:{},events:[],jobs:[]},catalogue=[];
 let activeId=localStorage.getItem('fleet-active')||'',view=localStorage.getItem('fleet-view')||'health';
-if(!['roster','board','sessions','roles','triggers','backlog','activity','workflow','progress','health','automation','throughput'].includes(view))view='health';
+// The old Triggers view is now part of the Workflow screen.
+if(view==='triggers')view='board';
+if(!['roster','board','sessions','roles','backlog','activity','workflow','progress','health','automation','throughput'].includes(view))view='health';
 let query='',filter='all',selected=new Set(),editing=null,zoom=1,drag=null,pendingJob=null,stopped=false,saveQueue=Promise.resolve();
 function current(){return state.fleets.find((f)=>f.id===activeId)||state.fleets[0];}
 function sessionKey(a){const sid=a.sessionId??a.id??'',host=a.hostId||'local',backend=a.backend||'codex';return host==='local'&&backend==='codex'?sid:[host,backend,sid].join(':');}
@@ -50,7 +52,7 @@ function renderAll(){
  $('fleet-description').textContent=view==='sessions'?'Find a saved conversation and bring it into your fleet.':f.description||'A workspace for your agents.';
  $('view-eyebrow').textContent={roster:'FLEET OVERVIEW',board:'FLEET DESIGN',sessions:'LOCAL CONVERSATIONS',roles:'SHARED RESPONSIBILITIES',triggers:'WORKFLOW AUTOMATION',backlog:'WORK THROUGH THE FLEET',activity:'LIVE CONVERSATIONS'}[view];
  $('panel-title').textContent={roster:'Your agents',board:'Design board',sessions:'Saved sessions',roles:'Role definitions',triggers:'Triggers & actions',backlog:'Project backlog',activity:'Agent activity'}[view];
- $('board-toolbar').classList.toggle('hidden',view!=='board');$('status-filter').classList.toggle('hidden',['sessions','roles','triggers','backlog','activity','workflow'].includes(view));$('workspace-layout').classList.toggle('board-layout',view==='board');
+ $('board-toolbar').classList.toggle('hidden',view!=='board');$('status-filter').classList.toggle('hidden',['sessions','roles','backlog','activity','workflow'].includes(view));$('workspace-layout').classList.toggle('board-layout',view==='board');
  $('search').placeholder=view==='sessions'?'Find a session…':'Find an agent…';
  $('panel-footer-text').textContent=view==='board'?'Positions and handoffs are saved automatically.':'Live status refreshes every 5 seconds';
  renderMetrics();renderContent();renderInsights();
@@ -64,7 +66,7 @@ function renderMetrics(){
  const errors=monitor.errors||[];$('monitor-banner').classList.toggle('hidden',!errors.length&&!old);$('monitor-banner').textContent=errors.length?errors.join(' · '):old?'Status is delayed. Displayed observations may be out of date.':'';
 }
 function renderContent(){
- if(!state||drag)return;const focused=document.activeElement?.dataset.node;if(view==='board')renderBoard();else if(view==='sessions')renderSessions();else if(view==='roles')renderRoles();else if(view==='triggers')renderTriggers();else if(view==='backlog')renderBacklog();else if(view==='activity')renderAgentActivity();else if(view==='workflow')renderWorkflow();else if(view==='progress')renderProgress();else renderTable();
+ if(!state||drag)return;const focused=document.activeElement?.dataset.node;if(view==='board')renderBoard();else if(view==='sessions')renderSessions();else if(view==='roles')renderRoles();else if(view==='backlog')renderBacklog();else if(view==='activity')renderAgentActivity();else if(view==='workflow')renderWorkflow();else if(view==='progress')renderProgress();else renderTable();
  if(focused)document.querySelector('[data-node="'+focused+'"]')?.focus({preventScroll:true});
  const valid=new Set(current().agents.map((a)=>a.id));selected=new Set([...selected].filter((id)=>valid.has(id)));$('selection-bar').classList.toggle('hidden',!selected.size||view!=='roster');$('selection-count').textContent=selected.size+' selected';
 }
@@ -116,18 +118,22 @@ function renderInsights(){
 }
 
 // Focus anywhere in a form counts as editing, so a click on its button is not lost to a redraw;
-// so do typed values not yet saved, even after focus moves elsewhere.
+// so do typed values not yet saved, even after focus moves elsewhere (the Workflow inspector counts as a form).
 function editingContent(){
  if(document.activeElement?.closest('#content input,#content textarea,#content select,#content form'))return true;
- return [...document.querySelectorAll('#content form input,#content form textarea')].some(n=>n.type==='checkbox'||n.type==='radio'?n.checked!==n.defaultChecked:n.value!==n.defaultValue);
+ const fields='#content form input,#content form textarea,#design-inspector input,#design-inspector textarea';
+ return [...document.querySelectorAll(fields)].some(n=>n.type==='checkbox'||n.type==='radio'?n.checked!==n.defaultChecked:n.value!==n.defaultValue)||
+  [...document.querySelectorAll('#design-inspector select')].some(n=>[...n.options].some(o=>o.selected!==o.defaultSelected));
 }
+// Views whose timed redraws wait while someone is editing on them.
+const EDITABLE_VIEWS=['health','automation','throughput','board'];
 async function refresh(full=false){
  if(stopped)return;
  try{
   monitor=await api('/api/status');if(full||!catalogue.length||view==='sessions')catalogue=(await api('/api/sessions')).sessions;
   if(pendingJob){const j=(monitor.jobs||[]).find((j)=>j.id===pendingJob);if(j&&j.status!=='running'){pendingJob=null;toast(j.message,j.status==='failed');}}
   // A timed refresh must not redraw a form someone is filling in; saves and navigation still do.
-  renderMetrics();if(!(['health','automation','throughput'].includes(view)&&editingContent()))renderContent();renderInsights();
+  renderMetrics();if(!(EDITABLE_VIEWS.includes(view)&&editingContent()))renderContent();renderInsights();
  }catch(error){$('live-pill').innerHTML='<span class="status-dot attention"></span><span>Disconnected</span>';$('monitor-banner').textContent='The local app is not responding. Use the Fleet Studio shortcut to reopen it.';$('monitor-banner').classList.remove('hidden');}
 }
 async function launch(ids){

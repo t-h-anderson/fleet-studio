@@ -26,6 +26,13 @@ class SpecificationTests(unittest.TestCase):
         app.store.save(state)
         return app
 
+    @staticmethod
+    def deliver(f, delivery="automatic", **trigger):
+        """Switch the first linked hand-off on; its routing trigger follows on save."""
+        t = next(t for t in f["triggers"] if t.get("workflowLinkId"))
+        next(l for l in f["roleLinks"] if l["id"] == t["workflowLinkId"])["delivery"] = delivery
+        t.update(trigger)
+
     def deploy(self, app):
         state = app.store.snapshot()
         p = app.deployments.preview({"fleetId": state["fleets"][0]["id"], "revision": state["revision"], "kind": "deploy"})
@@ -65,7 +72,11 @@ class SpecificationTests(unittest.TestCase):
         self.assertEqual(next_fleet["agents"], f["agents"])
         self.assertEqual([r["position"] for r in next_fleet["roles"]], [r["position"] for r in f["roles"]])
         self.assertEqual([r["id"] for r in next_fleet["roles"]], [r["id"] for r in f["roles"]])
-        self.assertEqual(export_spec(validate_fleets([next_fleet])[0]), spec)
+        renamed = export_spec(validate_fleets([next_fleet])[0])
+        # Generated hand-off instructions follow the rename; everything else round-trips unchanged.
+        self.assertEqual({k: v for k, v in renamed.items() if k != "triggers"}, {k: v for k, v in spec.items() if k != "triggers"})
+        self.assertTrue(any("Renamed role" in t["message"] for t in renamed["triggers"]))
+        self.assertEqual(export_spec(validate_fleets([apply_spec(f, renamed)])[0]), renamed)
         encoded = json.dumps(spec)
         for a in f["agents"]:
             self.assertNotIn(a["sessionId"], encoded);self.assertNotIn(a["directory"], encoded)
@@ -97,7 +108,7 @@ class SpecificationTests(unittest.TestCase):
         self.assertNotIn("New draft responsibilities", (Path(result["release"]["directory"])/"WORKFLOW.md").read_text(encoding="utf-8"))
 
     def test_session_rebinding_and_pause_stop_automatic_delivery(self):
-        app=self.app();state=app.store.snapshot();state["fleets"][0]["triggers"][0]["enabled"]=True;app.store.save(state)
+        app=self.app();state=app.store.snapshot();self.deliver(state["fleets"][0]);app.store.save(state)
         result=self.deploy(app);fid=result["state"]["fleets"][0]["id"]
         self.assertTrue(app.runtime_fleet(app.store.fleet(fid))["triggers"][0]["enabled"])
         state=app.store.snapshot();state["fleets"][0]["agents"][0]["sessionId"]="";app.store.save(state)
@@ -109,7 +120,7 @@ class SpecificationTests(unittest.TestCase):
 
     def test_release_rebaseline_and_pending_action_invalidated(self):
         app=self.app();state=app.store.snapshot();f=state["fleets"][0]
-        f["triggers"][0].update(enabled=True,kind="timer",mode="review",minutes=1)
+        self.deliver(f,"review",kind="timer",minutes=1)
         # A timer linked to a handoff keeps the same source role by design.
         app.store.save(state);first=self.deploy(app)
         for a in f["agents"]:
@@ -126,7 +137,7 @@ class SpecificationTests(unittest.TestCase):
         self.assertNotEqual(first["release"]["id"],second["release"]["id"])
 
     def test_import_keeps_active_release_and_disables_new_draft(self):
-        app=self.app();state=app.store.snapshot();f=state["fleets"][0];f["triggers"][0]["enabled"]=True;app.store.save(state)
+        app=self.app();state=app.store.snapshot();f=state["fleets"][0];self.deliver(f);app.store.save(state)
         self.deploy(app);state=app.store.snapshot();f=state["fleets"][0];before=app.runtime_fleet(f)
         spec=export_spec(f);spec["roles"][0]["name"]="New name"
         p=app.deployments.preview({"fleetId":f["id"],"revision":state["revision"],"kind":"import","spec":spec})
@@ -173,16 +184,16 @@ class SpecificationTests(unittest.TestCase):
         renamed=deepcopy(spec);renamed['roles'][0]['name']='Renamed owner'
         self.assertNotEqual(digest(spec),digest(renamed))
 
-    def test_contract_staleness_survives_export_import(self):
+    def test_import_refreshes_a_changed_handoff_contract(self):
+        # The hand-off is the source of truth: an import carries its change into the trigger instead of keeping it stale.
         from studio_workflow import contract_problem
         app=self.app();f=app.store.snapshot()["fleets"][0]
         t=next(t for t in f["triggers"] if t.get("workflowLinkId"))
         h=next(h for h in f["roleLinks"] if h["id"]==t["workflowLinkId"])
         h["condition"]="Changed acceptance guard"
-        spec=export_spec(f)
-        imported=apply_spec(f,spec)
-        self.assertTrue(contract_problem(imported, imported["triggers"][0]))
-        self.assertEqual(export_spec(imported),spec)
+        imported=apply_spec(f,export_spec(f))
+        self.assertFalse(any(contract_problem(imported, x) for x in imported["triggers"]))
+        self.assertEqual(export_spec(apply_spec(imported,export_spec(imported))),export_spec(imported))
 
     def test_overlapping_notification_previews_reserve_each_recipient_once(self):
         app=self.app();result=self.deploy(app);f=result["state"]["fleets"][0]

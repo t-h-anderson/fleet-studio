@@ -33,7 +33,8 @@ class FlowTests(unittest.TestCase):
         result=populate_triggers(f)
         self.assertTrue(result['created'])
         self.assertTrue(result['skippedInternal'])
-        self.assertTrue(all(not t['enabled'] and t['mode']=='automatic' for t in f['triggers']))
+        # Populating gives each hand-off automatic delivery; nothing is sent until the workflow is deployed.
+        self.assertTrue(all(t['enabled'] and t['mode']=='automatic' for t in f['triggers']))
         self.assertTrue(all(not contract_problem(f,t) for t in f['triggers']))
         f['triggers'][0]['message']='User edited instruction'
         saved=deepcopy(f['triggers'])
@@ -42,16 +43,27 @@ class FlowTests(unittest.TestCase):
         link=next(l for l in f['roleLinks'] if l['id']==f['triggers'][0]['workflowLinkId'])
         link['condition']='New custody condition'
         self.assertIn('changed',contract_problem(f,f['triggers'][0]))
+        # A save carries the change into the trigger, keeping the edited instruction.
+        from studio_workflow import sync_handoff_triggers
+        f['triggers']=sync_handoff_triggers(f['roles'],f['roleLinks'],f['triggers'])
+        self.assertFalse(contract_problem(f,f['triggers'][0]))
+        self.assertEqual(f['triggers'][0]['message'],'User edited instruction')
 
     def test_changed_contract_cannot_automatically_dispatch(self):
         app=Application(self.root,launch_enabled=False)
         state=app.store.snapshot(); f=state['fleets'][0]
-        populate_triggers(f);f['triggers'][0]['enabled']=True
+        populate_triggers(f)
         link=next(l for l in f['roleLinks'] if l['id']==f['triggers'][0]['workflowLinkId'])
         link['label']='Changed action'
         app.store.save(state);f=app.store.fleet(f['id'])
-        with patch.object(app.controls,'send') as send:
-            app.triggers.fire(f,f['triggers'][0],'test event',{})
+        # Saving refreshed the trigger from its hand-off, so it is no longer stale.
+        self.assertFalse(contract_problem(f,f['triggers'][0]))
+        self.assertEqual(f['triggers'][0]['name'],'Changed action')
+        # A stale trigger that never went through a save (an old release, a raw edit) is still held.
+        stale=deepcopy(f);next(l for l in stale['roleLinks'] if l['id']==link['id'])['label']='Edited elsewhere'
+        with patch.object(app.controls,'send') as send, patch.object(app,'runtime_fleet',return_value=stale), \
+                patch.object(app.store,'fleet',return_value=stale):
+            app.triggers.fire(stale,stale['triggers'][0],'test event',{})
             send.assert_not_called()
         self.assertEqual(app.triggers.snapshot()['actions'][0]['status'],'held')
         self.assertIn('source workflow',app.triggers.snapshot()['actions'][0]['detail'])

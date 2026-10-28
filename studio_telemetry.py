@@ -160,11 +160,11 @@ SETUP_COMMAND = re.compile(r'^(cd|pushd|popd|set|export|source|\.|true|false|:|e
 KEYWORD = re.compile(r'^for\s+\w+(\s+in\b.*)?$|^(do|then|else|elif|if|while|until|!)\s+|^(done|fi|esac|\{|\})$')
 # Classification reads this much of a script; the rest of a huge command changes nothing.
 CLASSIFY_LIMIT = 4000
-SEPARATORS = ('&&', '||', ';', '|', '\n')
+SEPARATORS = ('&&', '||', ';', '\n')
 
 
-def shell_parts(script):
-    """Commands of a script split at &&, ||, ;, | and newlines outside quotes."""
+def shell_parts(script, separators=SEPARATORS):
+    """Commands of a script split at &&, ||, ; and newlines (or the given separators) outside quotes."""
     parts, current, quote, index = [], [], '', 0
     while index < len(script):
         char = script[index]
@@ -173,7 +173,7 @@ def shell_parts(script):
         elif char in '"\'':
             quote = char
         else:
-            separator = next((s for s in SEPARATORS if script.startswith(s, index)), None)
+            separator = next((s for s in separators if script.startswith(s, index)), None)
             if separator:
                 parts.append(''.join(current))
                 current, index = [], index + len(separator)
@@ -182,6 +182,15 @@ def shell_parts(script):
         index += 1
     parts.append(''.join(current))
     return [' '.join(part.split()) for part in parts if part.strip() and not part.strip().startswith('#')]
+
+
+def classify_pipeline(command):
+    """A pipeline is what its first command does (`grep x | sort` explores), unless a stage writes a file."""
+    stages = shell_parts(command, ('|',)) or [command]
+    if any(classify_command(stage) == 'work' and (re.match(r'(tee|cat\s*>)\b', stage) or WRITE_REDIRECT.search(unquoted(stage)))
+           for stage in stages):
+        return 'work'
+    return classify_command(stages[0])
 
 
 def classify_command(command):
@@ -213,7 +222,7 @@ def classify(tool, label, script=None):
         parts = [p for p in parts if p and not SETUP_COMMAND.match(p)]
         if not parts:
             return 'other'
-        found = {classify_command(part[:SIGNATURE_LIMIT * 4]) for part in parts[:50]}
+        found = {classify_pipeline(part[:SIGNATURE_LIMIT * 4]) for part in parts[:50]}
         return next(cls for cls in ('work', 'admin', 'wait', 'explore') if cls in found)
     return 'other'
 

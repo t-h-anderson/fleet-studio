@@ -115,8 +115,12 @@ function renderInsights(){
  $('activity-list').innerHTML=events.length?events.map((e)=>'<div class="activity-item"><span class="event-dot"></span><div><div class="event-title">'+esc(e.title)+'</div><div class="event-detail">'+esc(e.detail)+'</div><div class="event-time">'+ago(e.time)+'</div></div></div>').join(''):'<div class="activity-empty">Fleet changes and session status will appear here.</div>';
 }
 
-// Focus anywhere in a form counts as editing, so a click on its button is not lost to a redraw.
-function editingContent(){return !!document.activeElement?.closest('#content input,#content textarea,#content select,#content form');}
+// Focus anywhere in a form counts as editing, so a click on its button is not lost to a redraw;
+// so do typed values not yet saved, even after focus moves elsewhere.
+function editingContent(){
+ if(document.activeElement?.closest('#content input,#content textarea,#content select,#content form'))return true;
+ return [...document.querySelectorAll('#content form input,#content form textarea')].some(n=>n.type==='checkbox'||n.type==='radio'?n.checked!==n.defaultChecked:n.value!==n.defaultValue);
+}
 async function refresh(full=false){
  if(stopped)return;
  try{

@@ -165,6 +165,22 @@ class DispatchTests(unittest.TestCase):
             app.reports.report({'kind': 'handoff', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Yours', 'to': 'Integrator', 'ticket': url})
         claim = app.dispatch.claims(fleet['id'])[url]
         self.assertEqual((claim['agent'], claim['status']), (integrator['id'], 'offered'))
+        # A retried report reuses the delivery and must not leave the ticket unclaimed.
+        payload = {'kind': 'handoff', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Again', 'to': 'Integrator', 'ticket': url, 'retryId': 'x'}
+        with patch.object(app.controls, 'send', return_value={'id': 'r2'}) as send:
+            app.reports.report(payload)
+            app.reports.report(payload)
+        self.assertEqual(send.call_count, 1)
+        claim = app.dispatch.claims(fleet['id'])[url]
+        self.assertEqual((claim['agent'], claim['status']), (integrator['id'], 'offered'))
+
+    def test_a_done_report_closes_every_claim_the_agent_held(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        for iid in (1, 2):
+            app.dispatch.claim(fleet['id'], ticket(iid)['url'], writer['id'])
+        app.reports.report({'kind': 'done', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Finished', 'ticket': ticket(2)['url']})
+        self.assertEqual({row['status'] for row in app.dispatch.claims(fleet['id']).values()}, {'done'})
 
     def test_stop_on_an_agent_with_no_running_turn_still_mutes_it(self):
         from studio_agents import NothingRunning

@@ -16,6 +16,8 @@ const url='http://127.0.0.1:'+port;
 const server=spawn(python,[path.join(root,'fleet_studio.py'),'--data-root',dataRoot,'--port',String(port),'--no-launch','--backlog-fixture',path.join(dataRoot,'issues.json')],{cwd:root,windowsHide:true,stdio:['ignore','pipe','pipe']});
 let serverOutput='';server.stderr.on('data',x=>serverOutput+=x);let browser;const errors=[];const checks=[];
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+// A stub that was unrouted while it awaited route.fetch() finds its request already continued; that is harmless.
+async function fulfillStub(route,options){try{await route.fulfill(options);}catch(error){if(!/already handled/.test(error.message))throw error;}}
 async function until(test,message){const deadline=Date.now()+15000;while(Date.now()<deadline){if(await test())return;await sleep(100);}throw new Error(message+' '+serverOutput);}
 try{
  await until(async()=>{try{return (await fetch(url+'/api/health')).ok;}catch{return false;}},'Server failed to start');
@@ -40,7 +42,7 @@ try{
  const cardBounds=await writerCard.boundingBox();
  assert.ok(cardBounds.x>=0&&cardBounds.x+cardBounds.width<=390,'Assignment cards must fit a narrow viewport');
  await page.setViewportSize({width:1500,height:1050});
- await page.route('**/api/progress?**',async route=>{const response=await route.fetch();const data=await response.json();const a=data.agents.find(a=>a.id===fixture.writerId);a.assignments[0].contract={id:'module-one-v1',deliverable:'Module <script>window.contractInjected=true</script>',scope:['src/module_one'],requirements:[{id:'tests',description:'Module tests pass',evidenceUrl:''}],missingRequirements:['tests'],baseRevision:'',candidateRevision:'a'.repeat(40)};await route.fulfill({response,json:data});});
+ await page.route('**/api/progress?**',async route=>{const response=await route.fetch();const data=await response.json();const a=data.agents.find(a=>a.id===fixture.writerId);a.assignments[0].contract={id:'module-one-v1',deliverable:'Module <script>window.contractInjected=true</script>',scope:['src/module_one'],requirements:[{id:'tests',description:'Module tests pass',evidenceUrl:''}],missingRequirements:['tests'],baseRevision:'',candidateRevision:'a'.repeat(40)};await fulfillStub(route,{response,json:data});});
  await page.evaluate(()=>loadProgress(true));
  assert.match(await writerCard.locator('.assignment-contract').innerText(),/Module tests pass.*Evidence needed/s);
  assert.equal(await page.evaluate(()=>window.contractInjected),undefined);
@@ -79,7 +81,7 @@ try{
   const response=await route.fetch(),data=await response.json(),now=Date.now()/1000;
   data.metrics.backlogTrend=[{at:now-3600,open:5,partial:false},{at:now,open:3,partial:false}];
   data.metrics.ci={...data.metrics.ci,label:'GitHub CI',provider:'github',observedAt:now,pipelines:[{id:7,status:'success',ref:'main',sha:'a'.repeat(40),web_url:'https://github.com/o/r/actions/runs/7',duration:20,queued_duration:3}],testSummary:{total_count:12,success_count:12,failed_count:0,error_count:0,skipped_count:0}};
-  await route.fulfill({response,json:data});
+  await fulfillStub(route,{response,json:data});
  });
  await page.evaluate(()=>loadProgress(true));
  assert.match(await page.locator('.monitoring-view').innerText(),/Published tests for pipeline #7/);
@@ -143,7 +145,7 @@ try{
  // Synthetic goal projection and mocked action responses; never mutate a native goal.
  const goal={id:'synthetic-goal',objective:'Deliver <script>window.goalInjected=true</script>',status:'blocked',createdAt:100,updatedAt:200,tokensUsed:500,tokenBudget:2000};
  await page.route('**/api/progress?**',async route=>{const response=await route.fetch(),d=await response.json(),a=d.agents.find(a=>a.id===fixture.writerId);a.session.goal=goal;a.session.goalKnown=true;
-  d.goals={records:[{native:goal,agentId:a.id,agentName:a.name,sessionId:a.session.sessionId,current:true,bindingCurrent:true,observationFresh:true,staleGoal:true,taskUrl:fixture.payload.taskUrl,evidenceUrl:fixture.payload.evidenceUrl,completionCriteria:'Reviewed packet received',blocker:{blockerCategory:'dependency',blockerOwner:'Coordinator',reason:'Input pending',resumeCondition:'Input approved',nextAction:'Review input',dependsOn:[]}}],actions:[]};await route.fulfill({response,json:d});});
+  d.goals={records:[{native:goal,agentId:a.id,agentName:a.name,sessionId:a.session.sessionId,current:true,bindingCurrent:true,observationFresh:true,staleGoal:true,taskUrl:fixture.payload.taskUrl,evidenceUrl:fixture.payload.evidenceUrl,completionCriteria:'Reviewed packet received',blocker:{blockerCategory:'dependency',blockerOwner:'Coordinator',reason:'Input pending',resumeCondition:'Input approved',nextAction:'Review input',dependsOn:[]}}],actions:[]};await fulfillStub(route,{response,json:d});});
  await page.evaluate(()=>loadProgress(true));await page.locator('[data-progress-tab="goals"]').click();
  assert.match(await page.locator('.goal-view').innerText(),/Needs evidence review/);
  assert.match(await page.locator('.goal-view').innerText(),/Owner: Coordinator/);
@@ -166,7 +168,7 @@ try{
  assert.equal(await page.locator('#goal-apply').count(),0);await page.locator('#close-progress-detail').click();
  await page.unroute('**/api/goals/preview');await page.unroute('**/api/goals/apply');await page.unroute('**/api/progress?**');
  checks.push('Goal evidence, blockers, escaping and explicit reviewed actions; uncertain outcomes have no retry button (synthetic controls only)');
- await page.route('**/api/progress?**',async route=>{const response=await route.fetch();const data=await response.json();data.tracker.stale=true;data.tracker.error='Synthetic tracker outage';await route.fulfill({response,json:data});});
+ await page.route('**/api/progress?**',async route=>{const response=await route.fetch();const data=await response.json();data.tracker.stale=true;data.tracker.error='Synthetic tracker outage';await fulfillStub(route,{response,json:data});});
  await page.evaluate(()=>loadProgress(true));assert.match(await page.locator('.backlog-notice').innerText(),/Synthetic tracker outage/);
  assert.match(await page.locator('.backlog-notice').innerText(),/observations are stale.*Last successful tracker read/);
  await page.unroute('**/api/progress?**');await page.evaluate(()=>loadProgress(true));
@@ -182,7 +184,7 @@ try{
  await page.locator('#backlog-settings-form button[type="submit"]').click();
  await until(async()=>(await bootstrap()).state.fleets[0].backlog.recoverLocalProxy===false,'Proxy recovery did not disable');
  await page.locator('#backlog-dialog').waitFor({state:'hidden'});
- await page.route('**/api/progress?**',async route=>{const response=await route.fetch();const data=await response.json();data.tracker.observedAt=null;data.tracker.error='Synthetic first-read failure';await route.fulfill({response,json:data});});
+ await page.route('**/api/progress?**',async route=>{const response=await route.fetch();const data=await response.json();data.tracker.observedAt=null;data.tracker.error='Synthetic first-read failure';await fulfillStub(route,{response,json:data});});
  await page.evaluate(()=>loadProgress(true));
  assert.match(await page.locator('.backlog-notice').innerText(),/No successful tracker read yet/);
  assert.match(await page.locator('.progress-metrics').innerText(),/Open tracker tasks\s+Unknown/);

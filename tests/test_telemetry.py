@@ -308,6 +308,11 @@ class AccuracyTests(unittest.TestCase):
         self.assertEqual(cls('for f in *.py; do echo $f; done'), 'explore')
         self.assertEqual(cls('while true; do gh pr checks 4; sleep 30; done'), 'wait')
         self.assertEqual(cls('grep -n "a; b" file'), 'explore')
+        # A pipeline is what its first command does, unless a stage writes a file.
+        for command in ('cat a.txt | sort | uniq -c', 'curl -s localhost:3000 | jq .', 'find . -name "*.py" | xargs grep foo', 'env | sort'):
+            self.assertEqual(cls(command), 'explore', command)
+        self.assertEqual(cls('pytest -q | tail -5'), 'work')
+        self.assertEqual(cls('git log | tee notes.txt'), 'work')
 
     def test_a_late_result_is_recorded_on_its_own_turn(self):
         # A late row of a finished message adds a call to that turn; its result must land there too.

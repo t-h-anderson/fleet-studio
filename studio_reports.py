@@ -40,10 +40,13 @@ class Reports:
         now = self.clock()
         record = {'kind': kind, 'note': note, 'ticket': ticket, 'at': now, 'agentId': agent['id'], 'agentName': agent['name']}
         dispatch = self.app.dispatch
-        if kind == 'handoff':
+        if kind in ('done', 'handoff'):
+            # A done or hand-off report closes everything the agent held, as health already counts it;
+            # a hand-off then claims its ticket again for the recipient.
+            dispatch.release(fleet['id'], agent_id=agent['id'])
             if ticket:
-                # Released first: the hand-off claims it again for the recipient.
                 dispatch.release(fleet['id'], ticket)
+        if kind == 'handoff':
             record.update(self.handoff(fleet, agent, payload.get('to'), note, ticket, payload.get('retryId')))
             record['next'] = 'Stop work on this; it is ' + (record.get('recipient') or 'theirs') + ' now.'
         elif kind == 'done':
@@ -115,6 +118,9 @@ class Reports:
         # Anything that may have reached the recipient, or still will, is the same hand-off.
         existing = next((f for f in self.app.automation.data['fires'] if f['id'] == key and f['status'] in LIVE_STATUSES), None)
         if existing:
+            if existing.get('ticket') and existing.get('recipientId'):
+                # The retry's report released the ticket; it is still the first recipient's.
+                self.app.dispatch.claim(fleet['id'], existing['ticket'], existing['recipientId'])
             return {'route': 'direct', 'recipient': existing['recipientName'], 'delivery': existing['status']}
         if any(f['id'] == key for f in self.app.automation.data['fires']):
             key += '-' + uuid.uuid4().hex[:6]

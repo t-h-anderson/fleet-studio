@@ -90,3 +90,13 @@ dialog{border:1px solid #dce5d8;padding:0;box-shadow:0 30px 100px #122b1c35;bord
 .threshold-panel{border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:0 22px 18px;font-size:12px}
 .threshold-panel summary{cursor:pointer;font-weight:600}.threshold-panel .form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:10px 0}
 .health-summary{grid-template-columns:repeat(auto-fit,minmax(110px,1fr))!important}
+
+.design-tabs{display:flex;gap:6px;padding:12px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.design-split{display:grid;grid-template-columns:minmax(0,1fr) 320px;align-items:start}
+.design-canvas{min-width:0}
+.design-inspector{border-left:1px solid var(--line);padding:16px 18px;max-height:760px;overflow:auto;font-size:12px}
+.design-inspector h3{margin:0 0 6px;font-size:14px}.design-inspector h4{margin:16px 0 6px;font-size:12px}
+.design-inspector textarea{min-height:64px}
+.inspector-actions{justify-content:flex-start;gap:6px;margin:12px 0}
+.inspector-links{list-style:none;margin:0;padding:0;display:grid;gap:6px}.inspector-links .text-button{text-align:left;font-size:11px}
+@media(max-width:1100px){.design-split{grid-template-columns:1fr}.design-inspector{border-left:0;border-top:1px solid var(--line);max-height:none}}

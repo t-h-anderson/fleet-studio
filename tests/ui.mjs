@@ -122,7 +122,7 @@ try{
  await page.locator('.progress-role').first().click();
  assert.match(await page.locator('#progress-detail-body').innerText(),/Communication contracts/);
  await page.locator('#close-progress-detail').click();
- await page.locator('#nav-workflow').click();
+ await page.locator('#nav-workflow').click();await page.locator('[data-design-tab="workflow"]').click();
  await page.locator('[data-workflow-section="policies"]').click();
  await page.locator('[data-workflow-edit="progress-reporting"]').click();
  await page.locator('#wf-text').fill('Report meaningful task boundaries with evidence links.');
@@ -147,7 +147,8 @@ try{
  await page.route('**/api/progress?**',async route=>{const response=await route.fetch(),d=await response.json(),a=d.agents.find(a=>a.id===fixture.writerId);a.session.goal=goal;a.session.goalKnown=true;
   d.goals={records:[{native:goal,agentId:a.id,agentName:a.name,sessionId:a.session.sessionId,current:true,bindingCurrent:true,observationFresh:true,staleGoal:true,taskUrl:fixture.payload.taskUrl,evidenceUrl:fixture.payload.evidenceUrl,completionCriteria:'Reviewed packet received',blocker:{blockerCategory:'dependency',blockerOwner:'Coordinator',reason:'Input pending',resumeCondition:'Input approved',nextAction:'Review input',dependsOn:[]}}],actions:[]};await fulfillStub(route,{response,json:d});});
  await page.evaluate(()=>loadProgress(true));await page.locator('[data-progress-tab="goals"]').click();
- assert.match(await page.locator('.goal-view').innerText(),/Needs evidence review/);
+ // The stubbed progress can lose a race with a refresh already in flight; wait for it rather than read once.
+ await until(async()=>/Needs evidence review/.test(await page.locator('.goal-view').innerText().catch(()=>'')),'Goal review state missing');
  assert.match(await page.locator('.goal-view').innerText(),/Owner: Coordinator/);
  assert.equal(await page.evaluate(()=>window.goalInjected),undefined);
  await page.locator('[data-goal-link]').click();
@@ -190,7 +191,7 @@ try{
  assert.match(await page.locator('.progress-metrics').innerText(),/Open tracker tasks\s+Unknown/);
  await page.unroute('**/api/progress?**');await page.evaluate(()=>loadProgress(true));
  checks.push('Tracker recovery is opt-in and persists; stale reads show last success and first-read failures keep counts unknown');
- await page.locator('#nav-workflow').click();
+ await page.locator('#nav-workflow').click();await page.locator('[data-design-tab="workflow"]').click();
  await page.locator('[data-workflow-section="states"]').click();
  await page.locator('[data-workflow-edit="closed"]').click();
  assert.equal(await page.locator('#wf-acceptsDelivery').isChecked(),false);
@@ -274,10 +275,10 @@ try{
  await until(async()=>(await page.locator('#content').innerText()).includes('Estimated waste'),'Throughput missing');
  assert.match(await page.locator('#content').innerText(),/repeated steps/);
  await page.screenshot({path:path.join(root,'tests/throughput.png'),fullPage:true});
- await page.locator('#nav-board').click();
+ await page.locator('#nav-workflow').click();
  await until(async()=>(await page.locator('.stuck-badge').count())>0,'Stuck badge missing on the design board');
  await page.screenshot({path:path.join(root,'tests/board-health.png'),fullPage:true});
- await page.locator('#nav-roles').click();
+ await page.locator('[data-design-tab="roles"]').click();
  await page.evaluate(id=>openEditor('role',state.fleets[0].agents.find(a=>a.id===id).roleIds[0]),fixture.writerId);
  assert.match(await page.locator('#f-goal').inputValue(),/tested, reviewed changes/);
  await page.locator('#cancel-editor').click();
@@ -290,7 +291,7 @@ try{
  await until(async()=>(await bootstrap()).state.fleets[0].health?.stallMinutes===45,'Thresholds were not saved');
  await until(async()=>!(await page.locator('#deploy-banner').isHidden())&&(await page.locator('#deploy-banner').innerText()).includes('Undeployed changes'),'Undeployed banner missing');
  assert.ok(await page.locator('#nav-workflow.has-badge').count(),'Workflow nav has no undeployed badge');
- await page.locator('#nav-board').click();
+ await page.locator('#nav-workflow').click();
  await until(async()=>(await page.locator('[data-role-node] .live-stats').count())>0,'Live counts missing on the board');
  assert.match(await page.locator('[data-role-node] .live-stats').first().innerText(),/waiting/);
  assert.match(await page.locator('#live-edges').innerText(),/Hand-offs in flight/);
@@ -336,13 +337,33 @@ try{
  assert.doesNotMatch(await page.locator('#content').innerText(),/reports "handoff-[0-9a-f]+"/);
  assert.match(await page.locator('#automation-presets').innerText(),/^Add recommended$/);
  assert.match(await page.locator('#throttle-form').innerText(),/waiting on a limit now/i);
- await page.locator('#nav-board').click();await page.locator('#board-draft-label').waitFor();
+ await page.locator('#nav-workflow').click();await page.locator('#board-draft-label').waitFor();
  await page.locator('#nav-health').click();await page.locator('.health-table').waitFor();
  await page.locator('[data-health-role]').first().click();
  assert.match(await page.locator('#editor-fields').innerText(),/Agents see the change after you deploy/);
  await page.locator('#cancel-editor').click();
  assert.deepEqual(errors,[]);
  checks.push('Routing rules read as hand-offs; presets add switched on; throttled agents listed; board labelled Draft; tweaks say they land on deploy');
+ // One Workflow screen: tabs, and the inspector edits roles and hand-offs in place.
+ await page.locator('#nav-workflow').click();await page.locator('#design-inspector').waitFor();
+ assert.deepEqual(await page.locator('[data-design-tab]').allInnerTexts(),['Design','Roles','Process & deploy']);
+ const linkId=await page.locator('[data-edit-role-link]').first().getAttribute('data-edit-role-link');
+ await page.locator('[data-edit-role-link="'+linkId+'"]').first().dispatchEvent('click');
+ await page.locator('#i-delivery').selectOption('review');
+ await page.locator('#inspector-save').click();
+ await until(async()=>(await bootstrap()).state.fleets[0].roleLinks.find(l=>l.id===linkId)?.delivery==='review','Hand-off delivery was not saved');
+ const synced=(await bootstrap()).state.fleets[0].triggers.find(t=>t.workflowLinkId===linkId);
+ assert.equal(synced?.mode,'review','The hand-off trigger did not follow its delivery');
+ assert.equal(await page.locator('#editor').evaluate(d=>d.open),false,'Selecting a hand-off opened a dialog');
+ const roleId=await page.locator('[data-edit-role]').first().getAttribute('data-edit-role');
+ await page.locator('[data-edit-role="'+roleId+'"]').first().click();
+ await page.locator('#i-goal').fill('Ship reviewed, tested changes every day');
+ await page.locator('#inspector-save').click();
+ await until(async()=>(await bootstrap()).state.fleets[0].roles.find(r=>r.id===roleId)?.goal==='Ship reviewed, tested changes every day','Role goal was not saved inline');
+ await page.locator('[data-design-tab="roles"]').click();await page.locator('.roles-grid').waitFor();
+ assert.ok(await page.locator('#nav-workflow.active').count(),'Workflow nav not highlighted on the Roles tab');
+ assert.deepEqual(errors,[]);
+ checks.push('One Workflow screen: tabs; the inspector edits a hand-off\'s delivery and a role\'s goal in place, and the trigger follows');
  console.log(JSON.stringify({passed:true,checks},null,2));
 }finally{
  if(browser)await browser.close();

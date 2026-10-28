@@ -107,9 +107,9 @@ try{
  assert.match(await page.locator('#progress-detail-body').innerText(),/Recovery:.*work:/s);
  assert.match(await page.locator('#progress-detail-body').innerText(),/queued/);
  await page.locator('[data-progress-edit-link]').click();
- await page.locator('#editor').waitFor({state:'visible'});
+ // The hand-off opens in the Workflow inspector, selected.
+ await page.locator('#design-inspector #f-i-label').waitFor({state:'visible'});
  assert.equal((await bootstrap()).state.revision,initial.state.revision,'Inspecting a handoff cannot change the workflow');
- await page.locator('#cancel-editor').click();
  await page.locator('#nav-progress').click();
  await page.locator('#progress-settings').click();
  await page.locator('#progress-handoffMinutes').fill('45');
@@ -296,7 +296,7 @@ try{
  assert.match(await page.locator('[data-role-node] .live-stats').first().innerText(),/waiting/);
  assert.match(await page.locator('#live-edges').innerText(),/Hand-offs in flight/);
  await page.locator('#nav-automation').click();
- await until(async()=>/Routing[\s\S]*Dispatch[\s\S]*Timeline/.test(await page.locator('#content').innerText()),'Rules sections missing');
+ await until(async()=>/Recovery[\s\S]*Dispatch[\s\S]*Timeline/.test(await page.locator('#content').innerText()),'Rules sections missing');
  await until(async()=>(await page.locator('#content').innerText()).includes('OUTCOME'),'Timeline did not load');
  await page.locator('#nav-health').click();
  await until(async()=>(await page.locator('.setup-checklist').count())>0,'Setup checklist missing');
@@ -333,7 +333,9 @@ try{
  checks.push('Rule editor offers only agents in the chosen role; removing a role takes its rules and limits with it');
  // Round 4: rules read as what happens, throttles and drafts are explicit, tweaks say when they land.
  await page.locator('#nav-automation').click();await page.locator('.automation-card').first().waitFor();
- await until(async()=>(await page.locator('#content').innerText()).includes('hands off'),'Routing rules still show generated event names');
+ // Hand-offs are set on the Workflow screen now; Rules has no Routing section.
+ await until(async()=>/Dispatch/.test(await page.locator('#content').innerText()),'Rules did not render');
+ assert.doesNotMatch(await page.locator('#content').innerText(),/\nRouting\n/);
  assert.doesNotMatch(await page.locator('#content').innerText(),/reports "handoff-[0-9a-f]+"/);
  assert.match(await page.locator('#automation-presets').innerText(),/^Add recommended$/);
  assert.match(await page.locator('#throttle-form').innerText(),/waiting on a limit now/i);
@@ -343,7 +345,7 @@ try{
  assert.match(await page.locator('#editor-fields').innerText(),/Agents see the change after you deploy/);
  await page.locator('#cancel-editor').click();
  assert.deepEqual(errors,[]);
- checks.push('Routing rules read as hand-offs; presets add switched on; throttled agents listed; board labelled Draft; tweaks say they land on deploy');
+ checks.push('Rules has no routing section; presets add switched on; throttled agents listed; board labelled Draft; tweaks say they land on deploy');
  // One Workflow screen: tabs, and the inspector edits roles and hand-offs in place.
  await page.locator('#nav-workflow').click();await page.locator('#design-inspector').waitFor();
  assert.deepEqual(await page.locator('[data-design-tab]').allInnerTexts(),['Design','Roles','Process & deploy']);

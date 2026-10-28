@@ -50,7 +50,7 @@ def timeline(app, fleet_id, limit=100):
             continue
         rows.append({'at': action['createdAt'], 'source': 'routing', 'rule': action['name'], 'agent': action.get('targetName', ''),
                      'action': 'hand-off' if action.get('eventId') else 'message', 'status': action['status'],
-                     'detail': action.get('detail', ''), 'cause': action.get('cause', ''), 'outcome': None})
+                     'detail': action.get('detail', ''), 'cause': action.get('cause', ''), 'outcome': None, 'actionId': action['id']})
     for fire in app.automation.snapshot(fleet_id)['fires']:
         source = 'dispatch' if fire['ruleId'] in ('dispatch', 'blocked-notify', 'unblock-wake', 'agent-handoff') else 'recovery'
         rows.append({'at': fire['at'], 'source': source, 'rule': fire['ruleName'],

@@ -26,7 +26,7 @@ from workflow_spec import export_spec, metadata, validate_node, ID, REFS
 from studio_roles import enrich_state, clean_design, refresh_roles, policy_proposal
 from studio_control import Controls
 from studio_triggers import Triggers, validate_triggers
-from studio_workflow import populate_roles, populate_triggers, contract_problem, sync_handoff_triggers
+from studio_workflow import populate_roles, contract_problem, sync_handoff_triggers
 from studio_backlog import Backlog, clean_config
 from studio_activity import activity
 from studio_progress import Progress, clean_settings
@@ -721,14 +721,15 @@ class Handler(BaseHTTPRequestHandler):
                 app.runtimes.configure(state.get("hosts", []))
                 app.event("Fleet configuration saved", str(len(state["fleets"])) + " fleet(s)", None)
                 return self.json(200, {"state": state})
-            if path in ("/api/workflow/populate", "/api/workflow/roles"):
+            if path == "/api/workflow/roles":
                 state = app.store.snapshot()
                 if payload.get("revision") != state["revision"]:
                     raise ConflictError("Fleet changed. Reload before populating the workflow.")
                 fleet = next((f for f in state["fleets"] if f["id"] == payload.get("fleetId")), None)
                 if not fleet:
                     raise ValidationError("Fleet not found.")
-                report = populate_triggers(fleet) if path.endswith("populate") else {"roles": populate_roles(fleet)}
+                # Hand-off triggers follow their hand-offs on every save; only roles are populated here.
+                report = {"roles": populate_roles(fleet)}
                 return self.json(200, {"state": app.store.save(state), "report": report})
             if path == "/api/backlog/refresh":
                 return self.json(200, app.backlog.snapshot(payload.get("fleetId"), force=True))

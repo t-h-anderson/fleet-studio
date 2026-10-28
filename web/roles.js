@@ -17,19 +17,6 @@ function renderRoles(){
  (f.roleSource&&!f.workflow?'<div class="policy-reference"><a href="'+esc(f.roleSource.url)+'" target="_blank" rel="noreferrer">Roles and responsibilities</a><span>Committed '+esc(f.roleSource.commit.slice(0,9))+' · edits remain drafts until published and refreshed</span></div>':'')+
  '<div class="roles-grid">'+roles.map(r=>'<article class="role-card"><div class="role-card-heading"><h3>'+esc(r.name)+'</h3>'+roleBadge(r)+'</div>'+(r.goal?'<p class="role-goal">'+esc(r.goal)+'</p>':'<p class="role-goal muted">No goal yet. Edit the role to say what outcome it exists for.</p>')+'<p>'+esc(r.responsibilities||'Add the shared responsibilities for this role.')+'</p><details><summary>Authority and handoff</summary><p>'+esc(r.authority||'Not defined yet.')+'</p></details><div class="assigned-chips">'+(assignedAgents(r).map(a=>'<span>'+esc(a.name)+'</span>').join('')||'<span class="muted">No agents assigned</span>')+'</div><div class="role-ticket-summary">'+roleTicketBadge(r.id)+'</div><div class="role-card-actions"><button class="button small" data-edit-role="'+r.id+'">Edit / assign</button><button class="button small" data-apply-role="'+r.id+'" '+(!assignedAgents(r).some(a=>a.sessionId)||roleDraft(r)&&!!f.roleSource&&!f.workflow?'disabled':'')+'>Send assignments</button></div></article>').join('')+'</div>';
 }
-function renderTriggers(){
- const f=current(),rules=(f.triggers||[]).filter(t=>(t.name+' '+t.message).toLowerCase().includes(query.toLowerCase()));
- const roleName=(id)=>f.roles.find(r=>r.id===id)?.name||'Unassigned';
- $('visible-count').textContent=rules.length;
- const automation=monitor.automation||{actions:[],states:{}};
- $('content').innerHTML='<div class="definition-toolbar"><div><strong>Events, conditions and timers</strong><p>Enabled automatic triggers queue instructions in existing sessions. Managed workflows use the deployed version; edits below are drafts until redeployed.</p></div><div><button class="button small" id="populate-triggers">Populate from workflow</button><button class="button small" id="new-trigger">'+icon('plus')+'New trigger</button></div></div>'+
- '<div class="trigger-list">'+(rules.length?rules.map(t=>{
- const schedule=automation.states[t.id]?.nextDue;
- return '<article class="trigger-card"><div><h3>'+esc(t.name)+'</h3><span class="role-state '+(!t.enabled?'draft':'')+'">'+(t.enabled?'Enabled · '+t.mode:'Disabled')+'</span></div><p><strong>'+esc({event:'Upstream event',condition:'Observed condition',timer:'Timer',idle:'Recurring idle check'}[t.kind])+'</strong> · '+esc(['timer','idle'].includes(t.kind)?'Every '+t.minutes+' minutes'+(t.kind==='idle'?' while idle':''):roleName(t.sourceRoleId)+' · '+(t.kind==='event'?t.eventName:t.condition))+' → '+esc(roleName(t.targetRoleId))+'</p><p>'+esc(t.message)+'</p>'+(['timer','idle'].includes(t.kind)&&t.enabled&&schedule?'<p class="field-hint">Next due '+esc(new Date(schedule*1000).toLocaleString())+'</p>':'')+(t.kind==='idle'?Object.entries(automation.states[t.id]?.agents||{}).map(([id,s])=>'<p class="field-hint">'+esc(f.agents.find(a=>a.id===id)?.name||id)+': '+esc(s.detail||(s.nextDue>Date.now()/1000?'Next check '+new Date(s.nextDue*1000).toLocaleTimeString():'Waiting for a fresh idle observation'))+'</p>').join(''):'')+(t.kind==='event'?'<p class="field-hint">'+(t.recipientMode==='all'?'Role broadcast; an explicit recipient can narrow it.':'One recipient; --to is required when several agents share this role.')+'</p>':'')+triggerContractMarkup(t)+'<button class="button small" data-edit-trigger="'+t.id+'">Edit trigger</button></article>';
- }).join(''):'<div class="activity-empty">Create a trigger and choose when it should send.</div>')+'</div>'+
- '<div class="actions-section"><h3>Handoffs and recent trigger actions</h3>'+(automation.actions.filter(a=>a.fleetId===activeId).map(a=>'<div class="action-row"><div><strong>'+esc(a.name)+'</strong><p>'+esc(a.status)+' · '+esc(a.cause)+(a.targetName?' &rarr; '+esc(a.targetName):'')+'</p><p>'+esc(a.ticket||'')+'</p><p>'+esc(a.detail||'')+'</p></div>'+(['pending','held','needs-attention'].includes(a.status)?'<button class="button small" data-review-trigger="'+a.id+'">Review / send</button><button class="text-button" data-dismiss-trigger="'+a.id+'">Dismiss</button>':'')+'</div>').join('')||'<p class="field-hint">No trigger has fired yet. The server runs triggers while the browser is closed. Held handoffs retry automatically; idle checks skip busy or stopped agents.</p>')+
- '<h3>Recent agent controls</h3>'+((monitor.controls||[]).filter(c=>c.fleetId===activeId).slice(-10).reverse().map(c=>'<div class="action-row"><div><strong>'+esc(c.action)+' · '+esc(c.status)+'</strong>'+c.targets.map(t=>'<p>'+esc(t.name)+': '+esc(t.status)+' — '+esc(t.detail||'')+'</p>').join('')+'</div></div>').join('')||'<p class="field-hint">No instructions have been sent from Fleet Studio.</p>')+'</div>';
-}
 const originalRenderAll=renderAll;
 renderAll=function(){
  originalRenderAll();
@@ -39,11 +26,11 @@ renderAll=function(){
  $('group-role-handoffs').checked=groupRoleHandoffs;
  $('group-handoffs-control').classList.toggle('hidden',boardMode!=='roles');
  $('internal-roles-control').classList.toggle('hidden',boardMode!=='roles');
- if(view==='roles'||view==='triggers'){
-  $('fleet-title').textContent=view==='roles'?'Roles':'Triggers & actions';
-  $('fleet-description').textContent=view==='roles'?'Shared definitions, project policy and agent assignments.':'Control when work moves through your fleet.';
-  $('search').placeholder=view==='roles'?'Find a role…':'Find a trigger…';
-  $('panel-footer-text').textContent=view==='roles'?'Role edits are saved as drafts. Managed workflow changes take effect after deployment.':'Automatic sends run only while Fleet Studio is running.';
+ if(view==='roles'){
+  $('fleet-title').textContent='Roles';
+  $('fleet-description').textContent='Shared definitions, project policy and agent assignments.';
+  $('search').placeholder='Find a role…';
+  $('panel-footer-text').textContent='Role edits are saved as drafts. Managed workflow changes take effect after deployment.';
   $('workspace-layout').classList.add('board-layout');
  }
 };
@@ -188,7 +175,7 @@ $('close-control').onclick=()=>$('control-dialog').close();
 $('send-control').onclick=async()=>{
  if(!controlPreview)return;
  $('send-control').disabled=true;
- try{await api('/api/control/send',{previewId:controlPreview.id});$('control-dialog').close();toast('Command submitted. Track acknowledgement in Triggers & actions.');refresh();}
+ try{await api('/api/control/send',{previewId:controlPreview.id});$('control-dialog').close();toast('Command submitted. Track it in Rules → Timeline.');refresh();}
  catch(e){toast(e.message,true);$('send-control').disabled=false;}
 };
 async function showPolicy(){

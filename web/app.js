@@ -14,7 +14,9 @@ function clone(value){return structuredClone(value);}
 const labels={working:'Working',idle:'Open & idle',closed:'Closed',attention:'Needs attention',unknown:'Unknown',draft:'Not linked'};
 let state=null,token='',monitor={sessions:{},events:[],jobs:[]},catalogue=[];
 let activeId=localStorage.getItem('fleet-active')||'',view=localStorage.getItem('fleet-view')||'health';
-if(!['roster','board','sessions','roles','triggers','backlog','activity','workflow','progress','health','automation','throughput'].includes(view))view='health';
+// The old Triggers view is now part of the Workflow screen.
+if(view==='triggers')view='board';
+if(!['roster','board','sessions','roles','backlog','activity','workflow','progress','health','automation','throughput'].includes(view))view='health';
 let query='',filter='all',selected=new Set(),editing=null,zoom=1,drag=null,pendingJob=null,stopped=false,saveQueue=Promise.resolve();
 function current(){return state.fleets.find((f)=>f.id===activeId)||state.fleets[0];}
 function sessionKey(a){const sid=a.sessionId??a.id??'',host=a.hostId||'local',backend=a.backend||'codex';return host==='local'&&backend==='codex'?sid:[host,backend,sid].join(':');}
@@ -50,7 +52,7 @@ function renderAll(){
  $('fleet-description').textContent=view==='sessions'?'Find a saved conversation and bring it into your fleet.':f.description||'A workspace for your agents.';
  $('view-eyebrow').textContent={roster:'FLEET OVERVIEW',board:'FLEET DESIGN',sessions:'LOCAL CONVERSATIONS',roles:'SHARED RESPONSIBILITIES',triggers:'WORKFLOW AUTOMATION',backlog:'WORK THROUGH THE FLEET',activity:'LIVE CONVERSATIONS'}[view];
  $('panel-title').textContent={roster:'Your agents',board:'Design board',sessions:'Saved sessions',roles:'Role definitions',triggers:'Triggers & actions',backlog:'Project backlog',activity:'Agent activity'}[view];
- $('board-toolbar').classList.toggle('hidden',view!=='board');$('status-filter').classList.toggle('hidden',['sessions','roles','triggers','backlog','activity','workflow'].includes(view));$('workspace-layout').classList.toggle('board-layout',view==='board');
+ $('board-toolbar').classList.toggle('hidden',view!=='board');$('status-filter').classList.toggle('hidden',['sessions','roles','backlog','activity','workflow'].includes(view));$('workspace-layout').classList.toggle('board-layout',view==='board');
  $('search').placeholder=view==='sessions'?'Find a session…':'Find an agent…';
  $('panel-footer-text').textContent=view==='board'?'Positions and handoffs are saved automatically.':'Live status refreshes every 5 seconds';
  renderMetrics();renderContent();renderInsights();
@@ -64,7 +66,7 @@ function renderMetrics(){
  const errors=monitor.errors||[];$('monitor-banner').classList.toggle('hidden',!errors.length&&!old);$('monitor-banner').textContent=errors.length?errors.join(' · '):old?'Status is delayed. Displayed observations may be out of date.':'';
 }
 function renderContent(){
- if(!state||drag)return;const focused=document.activeElement?.dataset.node;if(view==='board')renderBoard();else if(view==='sessions')renderSessions();else if(view==='roles')renderRoles();else if(view==='triggers')renderTriggers();else if(view==='backlog')renderBacklog();else if(view==='activity')renderAgentActivity();else if(view==='workflow')renderWorkflow();else if(view==='progress')renderProgress();else renderTable();
+ if(!state||drag)return;const focused=document.activeElement?.dataset.node;if(view==='board')renderBoard();else if(view==='sessions')renderSessions();else if(view==='roles')renderRoles();else if(view==='backlog')renderBacklog();else if(view==='activity')renderAgentActivity();else if(view==='workflow')renderWorkflow();else if(view==='progress')renderProgress();else renderTable();
  if(focused)document.querySelector('[data-node="'+focused+'"]')?.focus({preventScroll:true});
  const valid=new Set(current().agents.map((a)=>a.id));selected=new Set([...selected].filter((id)=>valid.has(id)));$('selection-bar').classList.toggle('hidden',!selected.size||view!=='roster');$('selection-count').textContent=selected.size+' selected';
 }

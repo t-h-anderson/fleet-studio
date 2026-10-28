@@ -162,7 +162,7 @@ async function progressClick(e){
   if(b.dataset.currentContext)await showCurrentContext(b.dataset.currentContext,b.dataset.contextCursor);
   if(b.dataset.retireContext)await previewContextRetirement(b.dataset.retireContext);
   if(b.dataset.progressEditRole){detailDialog.close();setView('roles');openEditor('role',b.dataset.progressEditRole);}
-  if(b.dataset.progressEditLink){detailDialog.close();setView('board');openEditor('rolelink',b.dataset.progressEditLink);}
+  if(b.dataset.progressEditLink){detailDialog.close();setView('board');selectDesign('rolelink',b.dataset.progressEditLink);}
   if(b.dataset.progressActivity){detailDialog.close();activityAgent=b.dataset.progressActivity;setView('activity');loadActivity();}
   if(b.dataset.progressMessage){detailDialog.close();await showControl('message',[b.dataset.progressMessage],'Inspect the current task evidence and report the next authorized action. Preserve existing stops and ownership.');}
   if(b.dataset.reviewProgressHandoff){const p=await api('/api/triggers/review',{actionId:b.dataset.reviewProgressHandoff});detailDialog.close();await showControl('message',p.targets.map(t=>t.agentId),'',p);}

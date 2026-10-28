@@ -118,7 +118,7 @@ renderAll=function(){
 const beforeBacklogRenderContent=renderContent;
 renderContent=function(){
  beforeBacklogRenderContent();if(!state||drag||roleDrag)return;
- if(['roster','roles','board','triggers'].includes(view))$('content').insertAdjacentHTML('beforeend',backlogSummary());
+ if(['roster','roles','board'].includes(view))$('content').insertAdjacentHTML('beforeend',backlogSummary());
  if(['roles','board'].includes(view)){
   const unmapped=current().agents.filter(a=>!(a.roleIds||[]).length);
   if(unmapped.length)$('content').insertAdjacentHTML('beforeend','<div class="unmapped-agents"><strong>Agents without shared roles</strong><p>'+unmapped.map(a=>'<button class="text-button" data-edit="'+a.id+'">'+esc(a.name)+' ('+esc(a.role)+')</button>').join(' ')+'</p><button class="button small" id="populate-agent-roles">Create roles from roster labels</button></div>');
@@ -145,8 +145,8 @@ $('content').addEventListener('click',async e=>{
  if(b.id==='backlog-next'){backlogPage++;renderContent();}
  if(b.id==='clear-backlog-role'){backlogRole='';backlogReferenceRole='';renderContent();}
  if(b.hasAttribute('data-more-tickets')){backlogLimit+=20;renderContent();}
- if(b.id==='populate-triggers'||b.id==='populate-agent-roles'){
-  b.disabled=true;try{const data=await api(b.id==='populate-triggers'?'/api/workflow/populate':'/api/workflow/roles',{fleetId:activeId,revision:state.revision});state=data.state;renderAll();toast(b.id==='populate-triggers'?data.report.created.length+' disabled trigger draft(s) added. Existing triggers kept.':data.report.roles.length+' local role definition(s) added.');}
+ if(b.id==='populate-agent-roles'){
+  b.disabled=true;try{const data=await api('/api/workflow/roles',{fleetId:activeId,revision:state.revision});state=data.state;renderAll();toast(data.report.roles.length+' local role definition(s) added.');}
   catch(error){toast(error.message,true);}finally{b.disabled=false;}
  }
  if(b.dataset.triggerEvent){

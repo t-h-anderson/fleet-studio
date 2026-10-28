@@ -58,19 +58,11 @@ function renderAutomation(){
   (data.presets?.length?'<label class="checkbox-field">For <select id="automation-preset-role" aria-label="Role for recommended automations"><option value="">all roles</option>'+current().roles.filter(r=>r.kind!=='subagent').map(r=>'<option value="'+r.id+'">'+esc(r.name)+'</option>').join('')+'</select></label><button class="button small" id="automation-presets">Add recommended</button>':'')+'<button class="button small" id="automation-new">'+icon('plus')+'New automation</button></div></div>'+
   '<h3>Recovery</h3>'+
   (rules.length?'<div class="roles-grid">'+rules.map(ruleCard).join('')+'</div>':'<p class="field-hint">No recovery rules yet. Add the recommended set to reprompt loops and stalls, refocus admin-heavy agents and escalate token burn.</p>')+
-  routingSection()+dispatchSection()+
+  dispatchSection()+
   throttleForm()+
   timelineSection(data);
 }
 
-function routingSection(){
- const r=rulesCache.get(activeId);
- const rows=(r?.routing||[]).filter(x=>(x.name+' '+x.when+' '+x.to).toLowerCase().includes(query.toLowerCase()));
- return '<h3>Routing</h3><p class="field-hint">Moves work between roles when an agent reports a hand-off. Routing belongs to the workflow, so changes reach agents\' briefs after you deploy. Timers and idle checks only reach agents that have open work; dispatch hands out new tickets.</p>'+
-  '<div class="table-wrap"><table><thead><tr><th>RULE</th><th>WHEN</th><th>TO</th><th>DELIVERY</th><th>STATE</th><th></th></tr></thead><tbody>'+
-  (rows.length?rows.map(x=>'<tr><td>'+esc(x.name)+'</td><td>'+esc(x.when)+'</td><td>'+esc(x.to)+'</td><td>'+(x.mode==='review'?'Waits for review':'Automatic')+'</td><td>'+(x.running?'Running':x.enabled?'On in draft':'Off')+(x.note?'<small>'+esc(x.note)+'</small>':'')+'</td><td><button class="button small" data-routing-edit="'+x.id+'" aria-label="Edit '+esc(x.name)+'">Edit</button></td></tr>').join(''):'<tr><td colspan="6" class="muted">No routing rules. Add hand-offs on the Design board, then create rules from them here.</td></tr>')+
-  '</tbody></table></div><div class="row-actions"><button class="button small" id="routing-new">'+icon('plus')+'New routing rule</button><button class="button small" id="routing-populate">Create from hand-offs</button></div>';
-}
 function dispatchSection(){
  const d=rulesCache.get(activeId)?.dispatch||current().dispatch||{enabled:true,onDeploy:true};
  return '<h3>Dispatch</h3><p class="field-hint">Gives agents their next piece of work: finished work moves to the next role, and an idle agent with nothing open is offered the oldest unclaimed ticket its role picks up. Nothing is sent when no ticket is waiting.</p>'+
@@ -81,7 +73,7 @@ function timelineSection(data){
  const rows=rulesCache.get(activeId)?.timeline;
  if(!rows)return '<h3>Timeline</h3><p class="field-hint">Loading…</p>';
  return '<h3>Timeline</h3><div class="table-wrap"><table><thead><tr><th>WHEN</th><th>FROM</th><th>AGENT</th><th>RULE</th><th>ACTION</th><th>DELIVERY</th><th>OUTCOME</th></tr></thead><tbody>'+
-  (rows.length?rows.slice(0,60).map(t=>'<tr><td>'+ago(t.at)+'</td><td>'+esc(t.source)+'</td><td>'+esc(t.agent)+'</td><td>'+esc(t.rule)+(t.cause?'<small>'+esc(t.cause)+'</small>':'')+'</td><td>'+esc(t.action)+'</td><td>'+esc(t.status)+(t.detail?'<small>'+esc(t.detail)+'</small>':'')+'</td><td>'+esc(t.outcome||'—')+'</td></tr>').join(''):'<tr><td colspan="7" class="muted">No rule has messaged an agent yet.</td></tr>')+'</tbody></table></div>';
+  (rows.length?rows.slice(0,60).map(t=>'<tr><td>'+ago(t.at)+'</td><td>'+esc(t.source)+'</td><td>'+esc(t.agent)+'</td><td>'+esc(t.rule)+(t.cause?'<small>'+esc(t.cause)+'</small>':'')+'</td><td>'+esc(t.action)+'</td><td>'+esc(t.status)+(t.detail?'<small>'+esc(t.detail)+'</small>':'')+(t.actionId&&['pending','held','needs-attention'].includes(t.status)?'<div class="row-actions"><button class="button small" data-review-trigger="'+esc(t.actionId)+'">Review</button><button class="button small" data-dismiss-trigger="'+esc(t.actionId)+'">Dismiss</button></div>':'')+'</td><td>'+esc(t.outcome||'—')+'</td></tr>').join(''):'<tr><td colspan="7" class="muted">No rule has messaged an agent yet.</td></tr>')+'</tbody></table></div>';
 }
 function wasteBar(waste){
  const kinds=['loop','admin','wait','aborted','nudge'],total=kinds.reduce((s,k)=>s+(waste[k]||0),0);
@@ -205,8 +197,6 @@ async function automationClick(e){
   if(b.hasAttribute('data-waste-agents')){healthSort='waste';setView('health');}
   if(b.dataset.roleHealth){setView('health');query=b.dataset.roleHealth;$('search').value=query;renderContent();}
   if(b.dataset.routingEdit)openEditor('trigger',b.dataset.routingEdit);
-  if(b.id==='routing-new')openEditor('trigger');
-  if(b.id==='routing-populate'){const data=await api('/api/workflow/populate',{fleetId:activeId,revision:state.revision});state=data.state;await loadHealth();renderAll();toast(data.report.created.length+' routing rule(s) created from hand-offs, switched off. Review and turn on the ones you want.');}
   if(b.dataset.escalationAck){await api('/api/automation/acknowledge',{fleetId:activeId,escalationId:b.dataset.escalationAck});await loadHealth();}
  }catch(error){toast(error.message,true);}
 }

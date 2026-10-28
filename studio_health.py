@@ -74,7 +74,7 @@ def repeated_cycle(steps, repeats):
         tail = steps[-period * repeats:]
         pattern = tail[-period:]
         if (all(tail[i]['sig'] == pattern[i % period]['sig'] for i in range(len(tail)))
-                and len({c['sig'] for c in pattern}) == period and all(c['cls'] != 'work' for c in pattern)):
+                and len({c['sig'] for c in pattern}) == period and all(c['cls'] not in ('work', 'other') for c in pattern)):
             return period
     return 0
 
@@ -128,7 +128,8 @@ def repeats_without_work(calls):
     """Most repeated non-work call since the last work-class call."""
     since_work = []
     for call in calls:
-        since_work = [] if call['cls'] == 'work' else since_work + [call]
+        # An unrecognised command may be work, so it never counts toward a loop on its own.
+        since_work = [] if call['cls'] in ('work', 'other') else since_work + [call]
     counts = Counter(call['sig'] for call in since_work if call['cls'] != 'wait')
     if not counts:
         return None

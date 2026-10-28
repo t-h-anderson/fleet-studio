@@ -232,10 +232,25 @@ class Store:
         self.legacy = json.loads((root / "fleet.json").read_text(encoding="utf-8-sig")) if (root / "fleet.json").exists() else {"version": 1, "windowName": "fleet-studio", "codexPath": shutil.which("codex") or "codex", "agents": []}
         self.state = json.loads(self.path.read_text(encoding="utf-8-sig")) if self.path.exists() else seed_state(self.legacy)
         upgraded = enrich_state(self.state)
+        upgraded = self.apply_recovery_defaults() or upgraded
         if upgraded and self.path.exists():
             self.state["revision"] += 1
         if upgraded or not self.path.exists():
             atomic_json(self.path, self.state)
+
+    def apply_recovery_defaults(self):
+        """Once per install: fleets saved before rules shipped switched on get the recommended ones.
+
+        Fleets created afterwards get them on creation; the marker stops a list a person
+        emptied on purpose from being filled again.
+        """
+        if self.state.get("recoveryDefaults"):
+            return False
+        for fleet in self.state.get("fleets", []):
+            if not fleet.get("automations"):
+                fleet["automations"] = clean_automations(default_automations(fleet["id"]), set())
+        self.state["recoveryDefaults"] = 1
+        return True
 
     def snapshot(self):
         with self.lock:
@@ -255,7 +270,7 @@ class Store:
             if payload.get("revision") != self.state["revision"]:
                 raise ConflictError("The fleet changed in another window. Reload before saving your changes.")
             state = {"version": 1, "revision": self.state["revision"] + 1,
-                     "defaultFleetId": default, "fleets": fleets, "hosts": hosts}
+                     "defaultFleetId": default, "fleets": fleets, "hosts": hosts, "recoveryDefaults": 1}
             # Keep the existing one-click launcher aligned with the default fleet.
             default_fleet = next(fleet for fleet in fleets if fleet["id"] == default)
             compatible = {

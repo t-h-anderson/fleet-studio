@@ -16,6 +16,27 @@ from studio_trackers import tracker_label
 ENTRY_FILES = {"codex": "AGENTS.override.md", "claude-code": "CLAUDE.local.md"}
 
 
+# CLAUDE.local.md is often someone's own notes, so Studio keeps its part between markers and leaves the rest.
+BLOCK_START, BLOCK_END = "<!-- fleet-studio:start -->", "<!-- fleet-studio:end -->"
+
+
+def merged(before, body):
+    """`before` with Studio's block replaced by (or, if absent, appended as) `body`."""
+    block = BLOCK_START + "\n" + body.rstrip("\n") + "\n" + BLOCK_END + "\n"
+    text = before or ""
+    if BLOCK_START in text and BLOCK_END in text.split(BLOCK_START, 1)[1]:
+        head, rest = text.split(BLOCK_START, 1)
+        return head + block + rest.split(BLOCK_END, 1)[1].lstrip("\n")
+    return text + ("\n" if text and not text.endswith("\n") else "") + ("\n" if text else "") + block
+
+
+def studio_part(text, backend):
+    """The part of an entry point Studio owns: the whole file for Codex, the marked block for Claude Code."""
+    if backend == "codex" or BLOCK_START not in text:
+        return text
+    return text.split(BLOCK_START, 1)[1].split(BLOCK_END, 1)[0]
+
+
 def backend_for(path):
     return next((backend for backend, name in ENTRY_FILES.items() if Path(path).name == name), "codex")
 
@@ -70,7 +91,9 @@ class EntryPoints:
             try:
                 target = self.target(Path(path).parent, backend_for(path))
                 if target.exists():
-                    status = "installed" if digest(target.read_text(encoding="utf-8")) == record["installedDigest"] else "changed"
+                    # Edits outside Studio's own block (someone's notes in CLAUDE.local.md) are not a change.
+                    current = studio_part(target.read_text(encoding="utf-8"), backend_for(path))
+                    status = "installed" if digest(current) == record["installedDigest"] else "changed"
             except (OSError, UnicodeError, ValueError):
                 status = "changed"
             result.append({"path": path, "agentId": record["agentId"], "agentIds": record.get("agentIds", [record["agentId"]]), "status": status})
@@ -110,7 +133,9 @@ class EntryPoints:
             before = target.read_bytes() if target.exists() else None
             if before is not None and len(before) > 100000:
                 raise ValueError("Existing entry point is too large to review here.")
-            after = self.content(fleet, members)
+            backend = members[0].get("backend", "codex")
+            body = self.content(fleet, members)
+            after = body if backend == "codex" else merged(before.decode("utf-8-sig") if before is not None else None, body)
             changes.append({"name": ", ".join(a["name"] for a in members), "agentId": members[0]["id"], "agentIds": [a["id"] for a in members], "path": str(target), "before": before.decode("utf-8-sig") if before is not None else None,
                             "beforeBytes": base64.b64encode(before).decode() if before is not None else None, "after": after})
         result = {"id": uuid.uuid4().hex, "fleetId": fleet["id"], "releaseId": rid, "revision": state["revision"], "createdAt": time.time(), "changes": changes}
@@ -148,7 +173,8 @@ class EntryPoints:
             records = deepcopy(self.records)
             for c in preview["changes"]:
                 records.setdefault(c["path"], {"originalBytes": c["beforeBytes"], "fleetId": preview["fleetId"], "agentId": c["agentId"]})
-                records[c["path"]].update(fleetId=preview["fleetId"], agentId=c["agentId"], agentIds=c["agentIds"], installedDigest=digest(c["after"]), installedAt=time.time())
+                records[c["path"]].update(fleetId=preview["fleetId"], agentId=c["agentId"], agentIds=c["agentIds"],
+                                          installedDigest=digest(studio_part(c["after"], backend_for(c["path"]))), installedAt=time.time())
             self.path.parent.mkdir(exist_ok=True)
             atomic_json(self.path, records)
             completed = []

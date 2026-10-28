@@ -256,7 +256,7 @@ class Dispatch:
                        + 'When it is sorted, report unblocked (with a note on what changed) so ' + agent['name'] + ' is woken.')
             self.deliver(fleet, recipient, message, '', 'blocked-notify', 'Blocked: ' + agent['name'], note, source=agent,
                          key='blocked-' + hashlib.sha256((agent['id'] + retry_id).encode()).hexdigest()[:24] if retry_id else None)
-            return {'waitingOn': recipient['id'], 'recipient': recipient['name'],
+            return {'waitingOn': recipient['id'], 'recipient': recipient['name'], 'wakeOn': 'related',
                     'next': 'Recorded; ' + recipient['name'] + ' has been told. Stop here; Studio will wake you when they report back.'}
         record = {'id': uuid.uuid4().hex, 'evidence': note, 'detail': '', 'wakeAgentId': agent['id']}
         self.app.automation.escalate(fleet, agent, {'name': 'Blocked report'}, record)
@@ -275,7 +275,8 @@ class Dispatch:
                 continue
             related = (kind == 'unblocked' or recipient_id == agent_id
                        or (kind == 'done' and ticket and note.get('ticket') and task_key(ticket) == task_key(note['ticket'])))
-            if not related:
+            # Owners told before targeted wake-ups were asked to "report unblocked or done", so any report wakes those.
+            if not related and note.get('wakeOn') == 'related':
                 continue
             agent = next((a for a in fleet['agents'] if a['id'] == agent_id), None)
             if not agent:

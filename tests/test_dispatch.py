@@ -436,3 +436,81 @@ class Round4Tests(unittest.TestCase):
             app.automation.acknowledge(fleet['id'], record['id'])
         text = app.controls.previews[send.call_args.args[0]]['targets'][0]['text']
         self.assertIn('You reported: No credentials', text)
+
+
+class Round4ReviewTests(unittest.TestCase):
+    """Regressions found reviewing round 4."""
+    setUp = fixtures.DesignTests.setUp
+    tearDown = fixtures.DesignTests.tearDown
+    app = fixtures.DesignTests.app
+    monitor = fixtures.DesignTests.monitor
+
+    def test_real_work_behind_paths_prefixes_and_wrappers_still_counts(self):
+        from studio_telemetry import call_metadata
+        for command in ('.venv/bin/python -m pytest -q', 'FOO=1 pytest', 'PYTHONPATH=. python -m pytest', 'timeout 600 pytest',
+                        'sudo make', 'coverage run -m pytest', 'pre-commit run -a', 'uv run pytest', 'docker exec app pytest',
+                        'Set-Content -Path a.txt -Value x', r'.\.venv\Scripts\python.exe -m pytest'):
+            self.assertEqual(call_metadata('Bash', {'command': command})['cls'], 'work', command)
+
+    def test_an_unrecognised_command_never_makes_a_busy_agent_look_stuck(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_health import NOW, call, turn
+        from studio_health import DEFAULTS, assess
+        calls = []
+        for i in range(4):
+            calls.append(call('Bash', {'command': 'internal-runner --check'}, NOW - 600 + i * 100))
+            calls.append(call('Bash', {'command': 'cat out.log'}, NOW - 590 + i * 100))
+        self.assertEqual(assess({'status': 'working'}, [turn(calls, NOW - 10, status='open')], NOW, DEFAULTS)['state'], 'productive')
+
+    def test_reminders_only_for_fresh_blockers_still_in_force(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        app.reports.report({'kind': 'blocked', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'No credentials'})
+        record = app.automation.data['escalations'][-1]
+        state = app.store.snapshot()
+        # Far past the window (an old escalation after an upgrade): no burst of reminders.
+        self.assertFalse(app.automation.remind(state, record['at'] + 10 * 3600))
+        # The agent reported since, so it is no longer blocked.
+        app.reports.report({'kind': 'unblocked', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Found them'})
+        self.assertFalse(app.automation.remind(state, record['at'] + 2000))
+
+    def test_blocks_reported_before_targeted_wakes_still_wake_on_done(self):
+        import json
+        from contextlib import closing
+        app, fleet = self.app()
+        writer, integrator = fleet['agents']
+        note = {'kind': 'blocked', 'note': 'Need the window', 'at': time.time() - 60, 'waitingOn': integrator['id'], 'ticket': ''}
+        with closing(app.progress.connect()) as db, db:
+            db.execute('INSERT OR REPLACE INTO agent_notes VALUES(?,?,?)', (fleet['id'], writer['id'], json.dumps(note)))
+        with patch.object(app.controls, 'send', return_value={'id': 'r1'}) as send:
+            app.dispatch.wake_waiting(fleet, integrator, 'done', 'https://gitlab.example/team/project/-/issues/5')
+        self.assertEqual(send.call_count, 1)
+
+    def test_claude_entry_point_keeps_the_persons_own_notes(self):
+        app, fleet = self.app()
+        state = app.store.snapshot()
+        state['fleets'][0]['agents'][0]['backend'] = 'claude-code'
+        app.store.save(state)
+        preview = app.deployments.preview({'fleetId': fleet['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'})
+        app.deployments.apply(preview['id'])
+        directory = Path(app.store.fleet(fleet['id'])['agents'][0]['directory'])
+        (directory / 'CLAUDE.local.md').write_text('# My notes\nUse the staging DB.\n', encoding='utf-8')
+        [change] = app.entrypoints.preview({'fleetId': fleet['id'], 'revision': app.store.snapshot()['revision'],
+                                            'agentIds': [fleet['agents'][0]['id']]})['changes']
+        self.assertTrue(change['after'].startswith('# My notes\nUse the staging DB.\n'))
+        self.assertIn('<!-- fleet-studio:start -->', change['after'])
+
+    def test_existing_fleets_get_the_defaults_once(self):
+        import json
+        from fleet_studio import Store
+        app, fleet = self.app()
+        path = app.store.path
+        saved = json.loads(path.read_text())
+        saved.pop('recoveryDefaults', None)
+        saved['fleets'][0]['automations'] = []
+        path.write_text(json.dumps(saved))
+        self.assertEqual(len(Store(app.root).snapshot()['fleets'][0]['automations']), 4)
+        upgraded = json.loads(path.read_text())
+        upgraded['fleets'][0]['automations'] = []
+        path.write_text(json.dumps(upgraded))
+        self.assertEqual(Store(app.root).snapshot()['fleets'][0]['automations'], [])

@@ -445,8 +445,11 @@ class Automation:
         fleets = {fleet['id']: fleet for fleet in state['fleets']}
         changed = False
         for record in self.data['escalations']:
+            # Only a fresh blocker: older ones were seen before (or predate reminders) and are not repeated.
             if (not record.get('wakeAgentId') or record['acknowledged'] or record.get('remindedAt')
-                    or now - record['at'] < REMIND_SECONDS or record['fleetId'] not in fleets):
+                    or not REMIND_SECONDS <= now - record['at'] <= 4 * REMIND_SECONDS or record['fleetId'] not in fleets):
+                continue
+            if not self.still_blocked(fleets[record['fleetId']], record):
                 continue
             record['remindedAt'] = now
             record['reported'] = record['message']
@@ -456,6 +459,18 @@ class Automation:
                 threading.Thread(target=self.notify, args=(url, record), daemon=True).start()
             changed = True
         return changed
+
+    def still_blocked(self, fleet, record):
+        """Whether the agent behind a blocked escalation is still in the fleet and has not reported since."""
+        agent = next((a for a in fleet['agents'] if a['id'] == record['wakeAgentId'] and a['enabled']), None)
+        if not agent:
+            return False
+        with self.app.progress.lock, closing(self.app.progress.connect()) as db:
+            if not db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_notes'").fetchone():
+                return True
+            row = db.execute('SELECT data FROM agent_notes WHERE fleet=? AND agent=?', (fleet['id'], agent['id'])).fetchone()
+        note = json.loads(row['data']) if row else None
+        return not note or (note.get('kind') == 'blocked' and note.get('at', 0) <= record['at'] + 60)
 
     def escalate_long_hold(self, fleet, fire, now, minutes):
         """Tell the operator once when a delivery has waited longer than its cooldown; it keeps retrying."""

@@ -226,7 +226,8 @@ class TriggerTests(unittest.TestCase):
         app, f = self.app()
         rule = self.rule(f, "event", "review")
         link = {"id": str(uuid.uuid4()), "source": rule["sourceRoleId"], "target": rule["targetRoleId"],
-                "label": "Send packet", "trigger": "Evidence ready", "artifact": "Reviewed head", "condition": "Scope recorded"}
+                "label": "Send packet", "trigger": "Evidence ready", "artifact": "Reviewed head", "condition": "Scope recorded",
+                "delivery": "review"}
         state = app.store.snapshot()
         state["fleets"][0]["roleLinks"].append(link)
         app.store.save(state)

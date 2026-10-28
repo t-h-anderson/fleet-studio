@@ -26,7 +26,7 @@ from workflow_spec import export_spec, metadata, validate_node, ID, REFS
 from studio_roles import enrich_state, clean_design, refresh_roles, policy_proposal
 from studio_control import Controls
 from studio_triggers import Triggers, validate_triggers
-from studio_workflow import populate_roles, populate_triggers, contract_problem
+from studio_workflow import populate_roles, populate_triggers, contract_problem, sync_handoff_triggers
 from studio_backlog import Backlog, clean_config
 from studio_activity import activity
 from studio_progress import Progress, clean_settings
@@ -154,6 +154,8 @@ def validate_fleets(value, host_ids=()):
         try:
             design = clean_design(raw, agents)
             triggers = validate_triggers(raw.get("triggers", []), {r["id"] for r in design["roles"]}, agent_ids)
+            # Hand-offs are the source of truth; their routing triggers follow them on every save.
+            triggers = sync_handoff_triggers(design["roles"], design["roleLinks"], triggers)
             backlog = clean_config(raw.get("backlog"), agent_ids, design.get("roleSource"))
             health = clean_health_settings(raw.get("health"))
             role_ids = {r["id"] for r in design["roles"]}
@@ -233,6 +235,7 @@ class Store:
         self.state = json.loads(self.path.read_text(encoding="utf-8-sig")) if self.path.exists() else seed_state(self.legacy)
         upgraded = enrich_state(self.state)
         upgraded = self.apply_recovery_defaults() or upgraded
+        upgraded = self.apply_handoff_delivery() or upgraded
         if upgraded and self.path.exists():
             self.state["revision"] += 1
         if upgraded or not self.path.exists():
@@ -251,6 +254,18 @@ class Store:
                 fleet["automations"] = clean_automations(default_automations(fleet["id"]), set())
         self.state["recoveryDefaults"] = 1
         return True
+
+    def apply_handoff_delivery(self):
+        """Give each hand-off saved before delivery existed the delivery its trigger already had; no trigger changes."""
+        from studio_workflow import link_delivery
+        changed = False
+        for fleet in self.state.get("fleets", []):
+            triggers = {t.get("workflowLinkId"): t for t in reversed(fleet.get("triggers", [])) if t.get("workflowLinkId")}
+            for link in fleet.get("roleLinks", []):
+                if "delivery" not in link:
+                    link["delivery"] = link_delivery(link, triggers.get(link["id"]))
+                    changed = True
+        return changed
 
     def snapshot(self):
         with self.lock:

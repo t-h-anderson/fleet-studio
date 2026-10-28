@@ -26,6 +26,7 @@ def routing_rule(fleet, runtime, trigger):
     return {'id': trigger['id'], 'section': 'routing', 'name': trigger['name'], 'when': when,
             'to': names.get(trigger['targetRoleId'], 'Missing role'), 'kind': trigger['kind'], 'mode': trigger['mode'],
             'enabled': trigger['enabled'], 'running': bool(deployed and deployed['enabled']),
+            'linkId': trigger.get('workflowLinkId', ''),
             'periodic': trigger['kind'] in ('idle', 'timer'),
             'note': '' if deployed else 'Draft only: deploy the workflow to start it.'}
 

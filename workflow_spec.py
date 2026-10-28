@@ -195,7 +195,7 @@ def export_spec(fleet):
 
 def apply_spec(fleet, spec):
     from studio_roles import key_for
-    from studio_workflow import signature
+    from studio_workflow import signature, sync_handoff_triggers
     spec = validate(spec)
     updated = deepcopy(fleet)
     def match(rows, incoming, prefix, name_field):
@@ -222,9 +222,12 @@ def apply_spec(fleet, spec):
     links = []
     for handoff in spec["handoffs"]:
         old = match(fleet["roleLinks"], handoff, "handoff", "label")
+        # Delivery is not part of the spec. An import switches every hand-off off, as imported triggers always
+        # have been, so nothing is delivered until someone reviews it and switches it on.
         links.append({"id": old["id"] if old else str(uuid.uuid4()), "specId": handoff["id"], "source": rmap[handoff["source"]],
                       "target": rmap[handoff["target"]], "label": handoff["action"], "trigger": handoff["when"],
-                      "artifact": handoff["artifact"], "condition": handoff["guard"], "sources": handoff["sources"]})
+                      "artifact": handoff["artifact"], "condition": handoff["guard"], "sources": handoff["sources"],
+                      "delivery": "off"})
     hmap = {h["specId"]: h for h in links}
     triggers = []
     for trigger in spec["triggers"]:
@@ -235,7 +238,7 @@ def apply_spec(fleet, spec):
             "eventName": trigger["event"], "condition": trigger["condition"], "minutes": trigger["minutes"],
             "message": trigger["message"], "mode": trigger["mode"], "enabled": False,
             **({"workflowLinkId": handoff["id"], "workflowSignature": (signature(handoff) if trigger["contract"] == contract_digest(next(h for h in spec["handoffs"] if h["id"] == trigger["handoff"])) else "0" * 64)} if handoff else {})})
-    updated.update(roles=roles, roleLinks=links, triggers=triggers, workflow=metadata(spec))
+    updated.update(roles=roles, roleLinks=links, triggers=sync_handoff_triggers(roles, links, triggers), workflow=metadata(spec))
     return updated
 
 

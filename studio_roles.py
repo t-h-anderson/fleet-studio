@@ -203,7 +203,9 @@ def clean_design(raw, agents):
         if lid in link_ids or link.get("source") not in ids or link.get("target") not in ids or link["source"] == link["target"]:
             raise ValueError("Workflow relationships need unique IDs and two distinct existing roles.")
         link_ids.add(lid)
-        links.append({**{k: deepcopy(link[k]) for k in ("specId", "sources") if k in link}, "id": lid, "source": link["source"], "target": link["target"],
+        if "delivery" in link and link["delivery"] not in ("automatic", "review", "off"):
+            raise ValueError("Hand-off delivery must be automatic, review or off.")
+        links.append({**{k: deepcopy(link[k]) for k in ("specId", "sources", "delivery") if k in link}, "id": lid, "source": link["source"], "target": link["target"],
                       "label": bounded(link.get("label"), "workflow action", 100, False),
                       **{key: bounded(link.get(key, ""), key, 2000) for key in ("trigger", "artifact", "condition")}})
     source = raw.get("roleSource")

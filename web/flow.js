@@ -39,22 +39,110 @@ async function loadFlow(){
  if(!state||stopped||view!=='board'||!liveBoard)return;
  try{flowCache.set(activeId,await api('/api/flow?fleetId='+encodeURIComponent(activeId)));decorateBoard();}catch(e){/* Shown by the status banner. */}
 }
+const LIVE_CLASSES=['live-pending','live-slow','live-attention','live-quiet','live-hot'];
+// One hand-off's or a group's live numbers, summed over its members.
+function liveLinkStats(data,ids){
+ const rows=ids.map(id=>data.links?.[id]).filter(Boolean);
+ const sum=key=>rows.reduce((total,row)=>total+row[key],0),oldest=rows.map(r=>r.oldestAt).filter(Boolean);
+ return {pending:sum('pending'),held:sum('held'),attention:sum('attention'),recent:sum('recent'),oldestAt:oldest.length?Math.min(...oldest):null,
+  items:rows.flatMap(r=>r.items).sort((a,b)=>a.at-b.at)};
+}
+function liveState(stats,data){
+ const waiting=stats.pending+stats.held+stats.attention;
+ if(stats.held||stats.attention)return 'live-attention';
+ if(!waiting)return 'live-quiet';
+ return Date.now()/1000-stats.oldestAt>=60*(data.hot?.slowMinutes||15)?'live-slow':'live-pending';
+}
+function liveTitle(stats){
+ const waiting=stats.pending+stats.held+stats.attention;
+ return (waiting?waiting+' waiting, oldest '+elapsed(stats.oldestAt)+(stats.held?'; '+stats.held+' held':'')+(stats.attention?'; '+stats.attention+' need attention':''):'Nothing waiting')+
+  '; '+stats.recent+' delivered in 24h';
+}
+function clearLive(){
+ document.querySelectorAll('#board-links [data-link-ids],[data-role-node]').forEach(n=>n.classList.remove(...LIVE_CLASSES));
+ document.querySelectorAll('.live-badge,.live-stats,#live-edges').forEach(n=>n.remove());
+ const legend=$('board-live-legend');if(legend)legend.classList.add('hidden');
+ const panel=$('inspector-live');if(panel)panel.innerHTML='';
+}
 function decorateBoard(){
- if(view!=='board'||!liveBoard)return;
- const data=flowCache.get(activeId);if(!data)return;
+ if(view!=='board')return;
+ const data=flowCache.get(activeId);
+ if(!liveBoard||!data)return clearLive();
+ $('board-live-legend')?.classList.remove('hidden');
+ decorateRoles(data);decorateLinks(data);decorateStrip(data);fillInspectorLive();
+}
+function decorateRoles(data){
  document.querySelectorAll('[data-role-node]').forEach(node=>{
   const stats=data.roles[node.dataset.roleNode];if(!stats)return;
   let box=node.querySelector('.live-stats');
   if(!box){box=document.createElement('div');box.className='live-stats';node.querySelector('.node-tickets')?.before(box);}
-  box.innerHTML=['waiting','claimed','working'].map(k=>'<span class="live-'+k+(stats[k]?' has':'')+'" title="'+{waiting:'Tickets waiting for this role',claimed:'Tickets being worked',working:'Agents working now'}[k]+'">'+stats[k]+' '+k+'</span>').join('');
+  const waste=stats.tokens24h?Math.round(100*stats.wasteTokens24h/stats.tokens24h):0;
+  const chips=['waiting','claimed','working'].map(k=>'<span class="live-'+k+(stats[k]?' has':'')+'" title="'+{waiting:'Tickets waiting for this role',claimed:'Tickets being worked',working:'Agents working now'}[k]+'">'+stats[k]+' '+k+'</span>');
+  // Problems only appear when they apply, so a healthy card stays quiet.
+  if(stats.throttled)chips.push('<span class="live-throttled has" title="Agents held back by a throttle now">'+stats.throttled+' throttled</span>');
+  if(waste)chips.push('<span class="live-waste'+(waste>=25?' has':'')+'" title="Estimated share of the last 24h\'s fresh tokens spent on loops, admin, polling and abandoned turns">'+waste+'% waste</span>');
+  box.innerHTML=chips.join('');
+  const hot=data.hot?.role===node.dataset.roleNode;
+  node.classList.toggle('live-hot',hot);
+  if(hot)node.title='Largest ticket queue right now';else node.removeAttribute('title');
  });
- const roles=Object.fromEntries((current().roles||[]).map(r=>[r.id,r.name]));
- const edges=Object.entries(data.edges).filter(([,e])=>e.pending);
+}
+function decorateLinks(data){
+ const svg=$('board-links');if(!svg)return;
+ svg.querySelectorAll('.live-badge').forEach(n=>n.remove());
+ svg.querySelectorAll('.workflow-label[data-link-ids]').forEach(label=>{
+  const state=liveState(liveLinkStats(data,label.dataset.linkIds.split(' ')),data);
+  label.classList.remove(...LIVE_CLASSES);label.classList.add(state);
+ });
+ svg.querySelectorAll('.workflow-connection[data-link-ids]').forEach(group=>{
+  const ids=group.dataset.linkIds.split(' '),stats=liveLinkStats(data,ids),state=liveState(stats,data);
+  group.classList.remove(...LIVE_CLASSES);group.classList.add(state);
+  // The slowest hand-off stands out even when the board is busy.
+  group.classList.toggle('live-hot',ids.includes(data.hot?.link));
+  const waiting=stats.pending+stats.held+stats.attention;if(!waiting)return;
+  const text=waiting+' · '+elapsed(stats.oldestAt),x=+group.dataset.badgeX,y=+group.dataset.badgeY,width=12+7*text.length;
+  const badge=document.createElementNS('http://www.w3.org/2000/svg','g');
+  badge.setAttribute('class','live-badge '+state);
+  badge.innerHTML='<title>'+esc(liveTitle(stats))+'</title><rect x="'+(x-width/2)+'" y="'+(y-11)+'" width="'+width+'" height="18" rx="9"></rect><text x="'+x+'" y="'+(y+2)+'" text-anchor="middle">'+esc(text)+'</text>';
+  svg.append(badge);
+ });
+}
+function decorateStrip(data){
+ const viewport=$('board-viewport');if(!viewport)return;
  let strip=$('live-edges');
- const viewport=$('board-viewport');
- if(!viewport)return;
  if(!strip){strip=document.createElement('div');strip.id='live-edges';strip.className='live-edges';viewport.insertAdjacentElement('afterend',strip);}
- strip.innerHTML='<strong>Hand-offs in flight</strong>'+(edges.length?edges.map(([key,e])=>{const [s,t]=key.split('>');return '<span>'+esc(roles[s]||'?')+' &rarr; '+esc(roles[t]||'?')+': '+e.pending+' waiting · oldest '+elapsed(e.oldestAt)+'</span>';}).join(''):'<span class="muted">None waiting</span>');
+ const f=current(),roles=Object.fromEntries((f.roles||[]).map(r=>[r.id,r.name]));
+ const busy=f.roleLinks.map(l=>({link:l,stats:liveLinkStats(data,[l.id])})).filter(r=>r.stats.items.length).sort((a,b)=>a.stats.oldestAt-b.stats.oldestAt);
+ // Deliveries no single hand-off explains still show, by role pair.
+ const explained=new Set(busy.map(r=>r.link.source+'>'+r.link.target));
+ const other=Object.entries(data.edges).filter(([key,e])=>e.pending&&!explained.has(key));
+ strip.innerHTML='<strong>Hand-offs in flight</strong>'+(busy.length||other.length?
+  busy.map(({link,stats})=>'<button class="text-button live-'+liveState(stats,data).slice(5)+'" data-live-link="'+link.id+'" title="'+esc(liveTitle(stats))+'">'+esc(roles[link.source]||'?')+' &rarr; '+esc(roles[link.target]||'?')+': '+stats.items.length+' waiting · oldest '+elapsed(stats.oldestAt)+'</button>').join('')+
+  other.map(([key,e])=>{const [s,t]=key.split('>');return '<span>'+esc(roles[s]||'?')+' &rarr; '+esc(roles[t]||'?')+': '+e.pending+' waiting · oldest '+elapsed(e.oldestAt)+'</span>';}).join(''):
+  '<span class="muted">None waiting</span>');
+}
+$('content').addEventListener('click',e=>{
+ const b=e.target.closest('[data-live-link]');
+ if(b&&typeof selectDesign==='function')selectDesign('rolelink',b.dataset.liveLink);
+ const health=e.target.closest('[data-live-health]');
+ if(health){setView('health');query=health.dataset.liveHealth;$('search').value=query;renderContent();}
+});
+// The inspector's live section sits outside its form fields, so refilling it never touches unsaved edits.
+function fillInspectorLive(){
+ const panel=$('inspector-live'),data=flowCache.get(activeId);if(!panel)return;
+ if(!liveBoard||!data||typeof designSelection==='undefined'||!designSelection){panel.innerHTML='';return;}
+ const note=deploymentStatus()?.draftChanged?'<p class="field-hint">Live numbers follow the deployed workflow; undeployed changes show after you deploy.</p>':'';
+ if(designSelection.type==='role'){
+  const stats=data.roles[designSelection.id];if(!stats){panel.innerHTML='';return;}
+  panel.innerHTML='<h4>Live</h4><p class="live-line">'+stats.waiting+' tickets waiting · '+stats.claimed+' claimed · '+stats.working+' agents working'+(stats.throttled?' · '+stats.throttled+' throttled':'')+'</p>'+
+   '<p class="live-line">24h: '+tokenCount(stats.tokens24h)+' fresh tokens'+(stats.tokens24h?', ≈'+Math.round(100*stats.wasteTokens24h/stats.tokens24h)+'% waste':'')+'</p>'+
+   (stats.agents.length?'<ul class="inspector-links">'+stats.agents.map(a=>'<li><span class="'+healthChipClass(a.id)+'">'+esc(a.name)+'</span> <button class="text-button" data-live-health="'+esc(a.name)+'">Agent health</button></li>').join('')+'</ul>':'')+note;
+  return;
+ }
+ const stats=liveLinkStats(data,[designSelection.id]);
+ panel.innerHTML='<h4>Live</h4><p class="live-line">'+esc(liveTitle(stats))+'.</p>'+
+  (stats.items.length?'<ul class="inspector-links live-items">'+stats.items.map(item=>'<li><span>'+esc(item.from||'?')+' &rarr; '+esc(item.to||'?')+' · '+esc(item.status)+' · '+elapsed(item.at)+'</span>'+
+   (item.actionId?' <button class="button small" data-review-trigger="'+esc(item.actionId)+'">Review</button><button class="button small" data-dismiss-trigger="'+esc(item.actionId)+'">Dismiss</button>':'')+'</li>').join('')+'</ul>':'')+note;
 }
 function boardLiveToggle(){
  const bar=$('board-toolbar');if(!bar||$('board-live'))return;
@@ -64,8 +152,11 @@ function boardLiveToggle(){
  const label=document.createElement('label');label.className='checkbox-field';
  label.innerHTML='<input type="checkbox" id="board-live">Live';
  bar.prepend(label);
+ const legend=document.createElement('span');legend.id='board-live-legend';legend.className='live-legend hidden';
+ legend.innerHTML='<span class="live-pending">waiting</span><span class="live-slow">slow</span><span class="live-attention">needs attention</span><span class="delivery-review">review</span><span class="delivery-off">off</span>';
+ label.after(legend);
  $('board-live').checked=liveBoard;
- $('board-live').onchange=()=>{liveBoard=$('board-live').checked;localStorage.setItem('fleet-live-board',String(liveBoard));if(liveBoard)loadFlow();else renderContent();};
+ $('board-live').onchange=()=>{liveBoard=$('board-live').checked;localStorage.setItem('fleet-live-board',String(liveBoard));if(liveBoard)loadFlow();else clearLive();};
 }
 
 const flowOriginalRenderAll=renderAll;

@@ -68,7 +68,7 @@ function renderProgress(){
  if(progressTab==='agents')body='<div class="assignment-grid">'+d.agents.filter(match).map(agentProgress).join('')+'</div>';
  if(progressTab==='handoffs')body='<div class="table-wrap"><table><thead><tr><th>HANDOFF</th><th>RECIPIENT</th><th>DELIVERY</th><th>AGENT RECEIPT</th></tr></thead><tbody>'+d.handoffs.filter(match).map(handoffProgress).join('')+'</tbody></table></div>';
  if(progressTab==='tasks')body='<div class="table-wrap"><table><thead><tr><th>TASK</th><th>TRACKER STAGE</th><th>OBSERVED TIME</th><th>TRACKER ASSIGNEES</th></tr></thead><tbody>'+d.tasks.filter(match).map(taskProgress).join('')+'</tbody></table></div>';
- if(progressTab==='workflow')body=(d.deployment.active?deployedGraph(d):'<p>Deploy a reviewed workflow to inspect its live queues.</p>');
+ if(progressTab==='workflow')body=(d.deployment.active?'<p class="field-hint">Deployed workflow: what agents are following now. Edit the draft on the Design board.</p>'+deployedGraph(d):'<p>Deploy a reviewed workflow to inspect its live queues.</p>');
  if(progressTab==='monitoring')body=metricsMarkup(d);
  if(progressTab==='goals')body=goalsMarkup(d);
  const focus=document.activeElement?.id;

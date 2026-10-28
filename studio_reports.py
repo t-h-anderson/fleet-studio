@@ -61,7 +61,7 @@ class Reports:
         record['milestone'] = self.milestone(fleet, agent, kind, note, ticket)
         self.app.event(agent['name'] + ' · ' + kind, note[:140], fleet['id'])
         if kind in ('done', 'unblocked', 'handoff'):
-            dispatch.wake_waiting(fleet, agent)
+            dispatch.wake_waiting(fleet, agent, kind, ticket, record.get('recipientId', ''))
         return {'recorded': True, 'kind': kind, 'ticket': ticket, **{k: record[k] for k in ('recipient', 'route', 'delivery', 'next') if k in record}}
 
     def milestone(self, fleet, agent, kind, note, ticket):
@@ -121,7 +121,7 @@ class Reports:
             if existing.get('ticket') and existing.get('recipientId'):
                 # The retry's report released the ticket; it is still the first recipient's.
                 self.app.dispatch.claim(fleet['id'], existing['ticket'], existing['recipientId'])
-            return {'route': 'direct', 'recipient': existing['recipientName'], 'delivery': existing['status']}
+            return {'route': 'direct', 'recipient': existing['recipientName'], 'recipientId': existing.get('recipientId', ''), 'delivery': existing['status']}
         if any(f['id'] == key for f in self.app.automation.data['fires']):
             key += '-' + uuid.uuid4().hex[:6]
         runtime = self.app.runtime_fleet(fleet)
@@ -167,7 +167,8 @@ class Reports:
                 self.app.dispatch.release(fleet['id'], ticket)
             self.app.automation.escalate_failure(fleet, fire)
         self.app.automation.persist()
-        return {'route': 'direct', 'recipient': recipient['name'], 'delivery': 'queued' if fire['status'] == 'sending' else fire['status']}
+        return {'route': 'direct', 'recipient': recipient['name'], 'recipientId': recipient['id'],
+                'delivery': 'queued' if fire['status'] == 'sending' else fire['status']}
 
     def pick(self, fleet, agent, role_ids):
         """The best agent to receive work now, or the healthiest member if none can receive yet."""

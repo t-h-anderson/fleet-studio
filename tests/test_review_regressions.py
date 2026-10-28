@@ -103,12 +103,15 @@ class ReviewRegressions(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'binding changed'):
             instructions(f['id'], aid, self.root, f['agents'][0]['directory'])
 
-    def test_claude_assignment_is_not_installed_as_a_codex_entrypoint(self):
+    def test_claude_assignment_gets_a_claude_local_entrypoint_not_a_codex_one(self):
         app, f = self.app(); state = app.store.snapshot()
         state['fleets'][0]['agents'][0]['backend'] = 'claude-code'; app.store.save(state)
         p = app.deployments.preview({'fleetId': f['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'}); app.deployments.apply(p['id'])
-        with self.assertRaisesRegex(ValueError, 'Codex agents only'):
-            app.entrypoints.preview({'fleetId': f['id'], 'revision': app.store.snapshot()['revision'], 'agentIds': [f['agents'][0]['id']]})
+        preview = app.entrypoints.preview({'fleetId': f['id'], 'revision': app.store.snapshot()['revision'], 'agentIds': [f['agents'][0]['id']]})
+        [change] = preview['changes']
+        self.assertTrue(change['path'].endswith('CLAUDE.local.md'))
+        self.assertIn('instructions --fleet', change['after'])
+        self.assertNotIn('takes the place of', change['after'])
 
     def test_remote_folder_never_receives_a_local_entrypoint(self):
         app, f = self.app(); p = app.deployments.preview({'fleetId': f['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'}); app.deployments.apply(p['id'])

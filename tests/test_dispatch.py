@@ -99,8 +99,12 @@ class DispatchTests(unittest.TestCase):
             result = app.reports.report({'kind': 'blocked', 'fleetId': fleet['id'], 'agentId': writer['id'],
                                          'note': 'Need the merge window', 'to': integrator['name']})
             self.assertIn(integrator['name'] + ' has been told', result['next'])
-            app.reports.report({'kind': 'done', 'fleetId': fleet['id'], 'agentId': integrator['id'], 'note': 'Window open'})
-            app.reports.report({'kind': 'done', 'fleetId': fleet['id'], 'agentId': integrator['id'], 'note': 'Again'})
+            # Finishing unrelated tickets does not wake the blocked agent; reporting the blocker sorted does, once.
+            app.reports.report({'kind': 'done', 'fleetId': fleet['id'], 'agentId': integrator['id'], 'note': 'Other work',
+                                'ticket': 'https://gitlab.example/team/project/-/issues/77'})
+            self.assertFalse(any('has reported back' in t['text'] for t in self.sent(app, send)))
+            app.reports.report({'kind': 'unblocked', 'fleetId': fleet['id'], 'agentId': integrator['id'], 'note': 'Window open'})
+            app.reports.report({'kind': 'unblocked', 'fleetId': fleet['id'], 'agentId': integrator['id'], 'note': 'Again'})
         texts = [t['text'] for t in self.sent(app, send)]
         self.assertIn('is blocked and needs you', texts[0])
         self.assertEqual(sum('has reported back' in t for t in texts), 1)
@@ -326,3 +330,187 @@ class RulesTests(unittest.TestCase):
         app.automation.alert_caps(fleet, now)
         app.automation.alert_caps(fleet, now + 60)
         self.assertEqual(len(app.automation.snapshot(fleet['id'])['escalations']), 1)
+
+
+class Round4Tests(unittest.TestCase):
+    """Studio acts by default and does not add waste of its own."""
+    setUp = fixtures.DesignTests.setUp
+    tearDown = fixtures.DesignTests.tearDown
+    app = fixtures.DesignTests.app
+    monitor = fixtures.DesignTests.monitor
+
+    def rule(self, **changes):
+        from studio_automation import clean_automations
+        [rule] = clean_automations([{'id': str(uuid.uuid4()), 'name': 'Rule', 'when': {'signal': 'any-problem'}, 'action': 'reprompt', **changes}], set())
+        return rule
+
+    def health(self, state='stalled', kind='idle-with-work'):
+        return {'state': state, 'since': 0, 'signals': [{'state': state, 'kind': kind, 'message': 'x'}]}
+
+    def test_an_unconfigured_fleet_recovers_by_default_but_an_emptied_one_stays_empty(self):
+        app, fleet = self.app()
+        rules = app.store.fleet(fleet['id'])['automations']
+        self.assertEqual(len(rules), 4)
+        self.assertTrue(all(r['enabled'] for r in rules))
+        state = app.store.snapshot()
+        state['fleets'][0]['automations'] = []
+        app.store.save(state)
+        self.assertEqual(app.store.fleet(fleet['id'])['automations'], [])
+
+    def test_unrecognised_commands_are_not_work(self):
+        from studio_telemetry import call_metadata
+        cls = lambda command: call_metadata('Bash', {'command': command})['cls']
+        self.assertEqual([cls('git fetch origin'), cls('jq .x f.json'), cls('some-tool --x')], ['other'] * 3)
+        self.assertEqual([cls('python -m pytest'), cls('npm test'), cls('matlab -batch "runtests"'), cls('./build.sh')], ['work'] * 4)
+
+    def test_an_agent_whose_turn_just_ended_gets_the_next_ticket_now(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        app.health.current[(fleet['id'], writer['id'])] = {'state': 'productive', 'since': time.time(), 'signals': [], 'openWork': False}
+        monitor = self.monitor(fleet)
+        self.assertTrue(app.dispatch.ready(fleet, writer, monitor, {}))
+        monitor['sessions'][writer['sessionId']]['status'] = 'working'
+        self.assertFalse(app.dispatch.ready(fleet, writer, monitor, {}))
+
+    def test_periodic_checks_skip_blocked_agents_and_timers_reach_only_busy_ones(self):
+        app, fleet = self.app()
+        writer, integrator = fleet['agents']
+        app.health.current[(fleet['id'], writer['id'])] = {'state': 'waiting', 'since': 0, 'signals': [], 'openWork': True}
+        self.assertFalse(app.triggers.has_open_work(fleet, writer))
+        app.health.current[(fleet['id'], writer['id'])] = {'state': 'idle', 'since': 0, 'signals': [], 'openWork': True}
+        self.assertTrue(app.triggers.has_open_work(fleet, writer))
+
+    def test_one_recovery_message_at_a_time_across_rules(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        first, second = self.rule(name='First'), self.rule(name='Second')
+        now = time.time()
+        with patch.object(app.controls, 'send', return_value={'id': 'r1'}):
+            self.assertTrue(app.automation.consider(fleet, first, writer, self.health(), self.monitor(fleet), now))
+            self.assertFalse(app.automation.consider(fleet, second, writer, self.health(), self.monitor(fleet), now + 60))
+
+    def test_reprompts_that_are_not_helping_escalate_instead(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        with patch.object(app.controls, 'send') as send:
+            app.automation.consider(fleet, self.rule(), writer, self.health('looping', 'nudge-loop'), self.monitor(fleet), time.time())
+        send.assert_not_called()
+        self.assertEqual(app.automation.data['fires'][-1]['action'], 'escalate')
+
+    def test_a_looping_turn_is_stopped_before_the_reprompt(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        calls = []
+        with patch.object(app.automation, 'stop_turn', side_effect=lambda a: calls.append('stop') or 'Stopped.'), \
+                patch.object(app.automation, 'send', side_effect=lambda *a: calls.append('send')):
+            app.automation.consider(fleet, self.rule(), writer, self.health('looping', 'failing-repeat'), self.monitor(fleet), time.time())
+        self.assertEqual(calls, ['stop', 'send'])
+
+    def test_a_delivery_held_by_an_open_claude_client_escalates_at_once(self):
+        from studio_triggers import CLIENT_OPEN
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        now = time.time()
+        fire = {'id': 'f', 'fleetId': fleet['id'], 'ruleId': 'r', 'ruleName': 'Restart', 'agentId': writer['id'], 'agentName': writer['name'],
+                'action': 'reprompt', 'at': now, 'status': 'held', 'evidence': 'Stalled', 'detail': writer['name'] + CLIENT_OPEN + '; Studio cannot start a turn.'}
+        self.assertTrue(app.automation.escalate_long_hold(fleet, fire, now, 20))
+        self.assertIn('Reply in the session', app.automation.data['escalations'][-1]['message'])
+
+    def test_the_brief_says_how_to_choose_the_next_role(self):
+        from workflow_spec import brief_document, export_spec
+        app, fleet = self.app()
+        text = brief_document(fleet, export_spec(fleet), fleet['agents'][0], 'a' * 32, Path('/studio'))
+        self.assertIn('report done --to <role>', text)
+
+    def test_the_operator_is_reminded_once_about_a_blocked_agent(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        app.reports.report({'kind': 'blocked', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'No credentials'})
+        record = app.automation.data['escalations'][-1]
+        state = app.store.snapshot()
+        self.assertFalse(app.automation.remind(state, record['at'] + 600))
+        self.assertTrue(app.automation.remind(state, record['at'] + 2000))
+        self.assertFalse(app.automation.remind(state, record['at'] + 4000))
+        self.assertIn('Still blocked', record['message'])
+        with patch.object(app.controls, 'send', return_value={'id': 'r1'}) as send:
+            app.automation.acknowledge(fleet['id'], record['id'])
+        text = app.controls.previews[send.call_args.args[0]]['targets'][0]['text']
+        self.assertIn('You reported: No credentials', text)
+
+
+class Round4ReviewTests(unittest.TestCase):
+    """Regressions found reviewing round 4."""
+    setUp = fixtures.DesignTests.setUp
+    tearDown = fixtures.DesignTests.tearDown
+    app = fixtures.DesignTests.app
+    monitor = fixtures.DesignTests.monitor
+
+    def test_real_work_behind_paths_prefixes_and_wrappers_still_counts(self):
+        from studio_telemetry import call_metadata
+        for command in ('.venv/bin/python -m pytest -q', 'FOO=1 pytest', 'PYTHONPATH=. python -m pytest', 'timeout 600 pytest',
+                        'sudo make', 'coverage run -m pytest', 'pre-commit run -a', 'uv run pytest', 'docker exec app pytest',
+                        'Set-Content -Path a.txt -Value x', r'.\.venv\Scripts\python.exe -m pytest'):
+            self.assertEqual(call_metadata('Bash', {'command': command})['cls'], 'work', command)
+
+    def test_an_unrecognised_command_never_makes_a_busy_agent_look_stuck(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_health import NOW, call, turn
+        from studio_health import DEFAULTS, assess
+        calls = []
+        for i in range(4):
+            calls.append(call('Bash', {'command': 'internal-runner --check'}, NOW - 600 + i * 100))
+            calls.append(call('Bash', {'command': 'cat out.log'}, NOW - 590 + i * 100))
+        self.assertEqual(assess({'status': 'working'}, [turn(calls, NOW - 10, status='open')], NOW, DEFAULTS)['state'], 'productive')
+
+    def test_reminders_only_for_fresh_blockers_still_in_force(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        app.reports.report({'kind': 'blocked', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'No credentials'})
+        record = app.automation.data['escalations'][-1]
+        state = app.store.snapshot()
+        # Far past the window (an old escalation after an upgrade): no burst of reminders.
+        self.assertFalse(app.automation.remind(state, record['at'] + 10 * 3600))
+        # The agent reported since, so it is no longer blocked.
+        app.reports.report({'kind': 'unblocked', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Found them'})
+        self.assertFalse(app.automation.remind(state, record['at'] + 2000))
+
+    def test_blocks_reported_before_targeted_wakes_still_wake_on_done(self):
+        import json
+        from contextlib import closing
+        app, fleet = self.app()
+        writer, integrator = fleet['agents']
+        note = {'kind': 'blocked', 'note': 'Need the window', 'at': time.time() - 60, 'waitingOn': integrator['id'], 'ticket': ''}
+        with closing(app.progress.connect()) as db, db:
+            db.execute('INSERT OR REPLACE INTO agent_notes VALUES(?,?,?)', (fleet['id'], writer['id'], json.dumps(note)))
+        with patch.object(app.controls, 'send', return_value={'id': 'r1'}) as send:
+            app.dispatch.wake_waiting(fleet, integrator, 'done', 'https://gitlab.example/team/project/-/issues/5')
+        self.assertEqual(send.call_count, 1)
+
+    def test_claude_entry_point_keeps_the_persons_own_notes(self):
+        app, fleet = self.app()
+        state = app.store.snapshot()
+        state['fleets'][0]['agents'][0]['backend'] = 'claude-code'
+        app.store.save(state)
+        preview = app.deployments.preview({'fleetId': fleet['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'})
+        app.deployments.apply(preview['id'])
+        directory = Path(app.store.fleet(fleet['id'])['agents'][0]['directory'])
+        (directory / 'CLAUDE.local.md').write_text('# My notes\nUse the staging DB.\n', encoding='utf-8')
+        [change] = app.entrypoints.preview({'fleetId': fleet['id'], 'revision': app.store.snapshot()['revision'],
+                                            'agentIds': [fleet['agents'][0]['id']]})['changes']
+        self.assertTrue(change['after'].startswith('# My notes\nUse the staging DB.\n'))
+        self.assertIn('<!-- fleet-studio:start -->', change['after'])
+
+    def test_existing_fleets_get_the_defaults_once(self):
+        import json
+        from fleet_studio import Store
+        app, fleet = self.app()
+        path = app.store.path
+        saved = json.loads(path.read_text())
+        saved.pop('recoveryDefaults', None)
+        saved['fleets'][0]['automations'] = []
+        path.write_text(json.dumps(saved))
+        self.assertEqual(len(Store(app.root).snapshot()['fleets'][0]['automations']), 4)
+        upgraded = json.loads(path.read_text())
+        upgraded['fleets'][0]['automations'] = []
+        path.write_text(json.dumps(upgraded))
+        self.assertEqual(Store(app.root).snapshot()['fleets'][0]['automations'], [])

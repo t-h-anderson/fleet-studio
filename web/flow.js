@@ -58,6 +58,9 @@ function decorateBoard(){
 }
 function boardLiveToggle(){
  const bar=$('board-toolbar');if(!bar||$('board-live'))return;
+ // The board edits the draft; the Progress view shows what is deployed.
+ const draft=document.createElement('span');draft.className='stage-tag';draft.id='board-draft-label';draft.textContent='Draft';
+ draft.title='The design board edits the draft. Progress shows the deployed workflow agents follow.';bar.prepend(draft);
  const label=document.createElement('label');label.className='checkbox-field';
  label.innerHTML='<input type="checkbox" id="board-live">Live';
  bar.prepend(label);

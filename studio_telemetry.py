@@ -45,6 +45,41 @@ EXPLORE_COMMAND = re.compile(
     r'|^kubectl\s+(get|describe|logs)\b|^(gh|glab)\s+(issue|pr|mr|repo)\s+(view|list|diff|status)\b'
     r'|^(gh|glab)\s+api\b(?!.*(-X|--method)\s*(POST|PATCH|PUT|DELETE))'
     r'|\bworkflow_client(\.py)?[\'"]?\s+instructions\b')
+# Commands that change files or run the project's code. Anything not recognised is `other`: neither progress
+# nor proof of it, so an agent cannot look productive by running `git fetch` or `jq` in a loop.
+WORK_COMMAND = re.compile(
+    r'^(python[0-9.]*|py|pytest|tox|nox|uv|poetry|pdm|hatch|pipenv|pip[0-9.]*\s+install|conda\s+(install|run)|pre-commit|coverage|behave|robot'
+    r'|node|deno|bun|npm|npx|pnpm|yarn|tsx|ts-node|jest|vitest|mocha|playwright|cypress|tsc|eslint|prettier|vite|webpack|rollup|esbuild|nx|turbo'
+    r'|black|ruff|flake8|mypy|pylint|isort|just|task|ctest|meson'
+    r'|go|cargo|rustc|zig|gcc|g\+\+|clang|make|cmake|ninja|bazel|mvn|mvnw|gradle|gradlew|dotnet|msbuild|swift|xcodebuild|flutter|dart'
+    r'|java|javac|sbt|kotlinc?|ruby|bundle|rake|rspec|mix|elixir|perl|php|composer|phpunit|Rscript|R|julia|matlab|octave'
+    r'|docker\s+(build|run|exec|compose)|docker-compose|podman\s+(build|run|exec)|kubectl\s+(apply|create|delete|rollout|scale|exec)'
+    r'|terraform|ansible-playbook|helm\s+(install|upgrade)'
+    r'|mkdir|cp|mv|rm|rmdir|touch|chmod|ln|patch|tar|unzip|sed\s+-i|perl\s+-p?i'
+    r'|git\s+(add|commit|push|pull|checkout|switch|merge|rebase|cherry-pick|restore|reset|stash|tag|apply|am|revert|rm|mv|worktree|clone|init)'
+    r'|gh\s+(pr\s+(create|merge)|release\s+create)|glab\s+mr\s+(create|merge)'
+    r'|(set|add)-content|out-file|new-item|remove-item|copy-item|move-item|rename-item|invoke-pester'
+    r'|(bash|sh|zsh|pwsh|powershell)\s+\S+|\S+\.(sh|py|js|ts|rb|pl|ps1)\b)(\s|$)', re.IGNORECASE)
+# Prefixes that say how a command runs, not what it is: env assignments and wrappers like `timeout 600`.
+COMMAND_PREFIX = re.compile(
+    r'^(\w+=\S*\s+|(sudo|time|nohup|command|exec|env|xvfb-run|caffeinate)\s+|timeout\s+(-\S+\s+)*\S+\s+|nice\s+(-n\s*)?-?\d*\s*'
+    r'|(uv|poetry|pdm|hatch|pipenv|conda)\s+run\s+(-\S+\s+)*|bundle\s+exec\s+|(pnpm|yarn)\s+(exec|dlx)\s+|npx\s+(-\S+\s+)*|coverage\s+run\s+(-m\s+)?|&\s+)')
+
+
+def command_name(command):
+    """The command with run prefixes removed and its program reduced to a bare name (.venv/bin/python -> python)."""
+    text = command.strip()
+    for _ in range(6):
+        stripped = COMMAND_PREFIX.sub('', text, count=1)
+        if stripped == text:
+            break
+        text = stripped
+    program, _, rest = text.partition(' ')
+    program = program.strip('\'"').replace('\\', '/').rsplit('/', 1)[-1]
+    program = re.sub(r'\.(exe|cmd|bat)$', '', program, flags=re.IGNORECASE)
+    return (program + ' ' + rest).strip()
+
+
 # Redirecting into a file is writing, whatever the command.
 WRITE_REDIRECT = re.compile(r'(^|[^0-9&>])>{1,2}\s*(?!&|/dev/null)\S|\btee\b')
 WORK_TOOLS = {'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'apply_patch', 'Task', 'Agent'}
@@ -202,7 +237,7 @@ def classify_command(command):
         return 'wait'
     if EXPLORE_COMMAND.search(command):
         return 'explore'
-    return 'work'
+    return 'work' if WORK_COMMAND.match(command_name(command)) else 'other'
 
 
 def classify(tool, label, script=None):
@@ -223,7 +258,7 @@ def classify(tool, label, script=None):
         if not parts:
             return 'other'
         found = {classify_pipeline(part[:SIGNATURE_LIMIT * 4]) for part in parts[:50]}
-        return next(cls for cls in ('work', 'admin', 'wait', 'explore') if cls in found)
+        return next(cls for cls in ('work', 'admin', 'wait', 'explore', 'other') if cls in found)
     return 'other'
 
 

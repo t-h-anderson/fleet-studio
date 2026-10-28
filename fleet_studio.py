@@ -34,7 +34,7 @@ from studio_telemetry import Telemetry
 from studio_health import Health, clean_health_settings
 from studio_reports import Reports
 from studio_dispatch import Dispatch, clean_dispatch
-from studio_automation import Automation, backtest, clean_alerts, clean_automations, clean_throttles, watches
+from studio_automation import Automation, backtest, clean_alerts, clean_automations, clean_throttles, default_automations, watches
 from studio_reconciliation import Reconciliation
 from studio_goals import Goals
 from studio_agents import Runtimes, clean_binding, clean_hosts, tmux_launch, LOCAL_HOST
@@ -157,7 +157,8 @@ def validate_fleets(value, host_ids=()):
             backlog = clean_config(raw.get("backlog"), agent_ids, design.get("roleSource"))
             health = clean_health_settings(raw.get("health"))
             role_ids = {r["id"] for r in design["roles"]}
-            automations = clean_automations(raw.get("automations"), role_ids, agent_ids)
+            # A fleet that never configured rules gets the recommended ones, switched on; an empty list stays empty.
+            automations = clean_automations(raw["automations"] if "automations" in raw else default_automations(fid), role_ids, agent_ids)
             throttles = clean_throttles(raw.get("throttles"), role_ids)
             alerts = clean_alerts(raw.get("alerts"))
             dispatch = clean_dispatch(raw.get("dispatch"), [s["id"] for s in (raw.get("workflow") or {}).get("states", [])])
@@ -231,10 +232,25 @@ class Store:
         self.legacy = json.loads((root / "fleet.json").read_text(encoding="utf-8-sig")) if (root / "fleet.json").exists() else {"version": 1, "windowName": "fleet-studio", "codexPath": shutil.which("codex") or "codex", "agents": []}
         self.state = json.loads(self.path.read_text(encoding="utf-8-sig")) if self.path.exists() else seed_state(self.legacy)
         upgraded = enrich_state(self.state)
+        upgraded = self.apply_recovery_defaults() or upgraded
         if upgraded and self.path.exists():
             self.state["revision"] += 1
         if upgraded or not self.path.exists():
             atomic_json(self.path, self.state)
+
+    def apply_recovery_defaults(self):
+        """Once per install: fleets saved before rules shipped switched on get the recommended ones.
+
+        Fleets created afterwards get them on creation; the marker stops a list a person
+        emptied on purpose from being filled again.
+        """
+        if self.state.get("recoveryDefaults"):
+            return False
+        for fleet in self.state.get("fleets", []):
+            if not fleet.get("automations"):
+                fleet["automations"] = clean_automations(default_automations(fleet["id"]), set())
+        self.state["recoveryDefaults"] = 1
+        return True
 
     def snapshot(self):
         with self.lock:
@@ -254,7 +270,7 @@ class Store:
             if payload.get("revision") != self.state["revision"]:
                 raise ConflictError("The fleet changed in another window. Reload before saving your changes.")
             state = {"version": 1, "revision": self.state["revision"] + 1,
-                     "defaultFleetId": default, "fleets": fleets, "hosts": hosts}
+                     "defaultFleetId": default, "fleets": fleets, "hosts": hosts, "recoveryDefaults": 1}
             # Keep the existing one-click launcher aligned with the default fleet.
             default_fleet = next(fleet for fleet in fleets if fleet["id"] == default)
             compatible = {

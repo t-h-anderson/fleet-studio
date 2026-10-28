@@ -65,6 +65,9 @@ def rule_signature(rule):
     return hashlib.sha256(json.dumps(rule, sort_keys=True).encode()).hexdigest()
 
 
+# A Claude Code session open in a client cannot receive Studio's messages until someone acts.
+CLIENT_OPEN = " is open in a Claude Code client"
+
 class Triggers:
     def __init__(self, app):
         self.app = app
@@ -127,8 +130,9 @@ class Triggers:
         return agents
 
     def has_open_work(self, fleet, agent):
+        """Work a periodic message can help with: open, and not blocked on someone else."""
         health = self.app.health.get(fleet["id"], agent["id"]) if hasattr(self.app, "health") else None
-        return bool(health and health.get("openWork"))
+        return bool(health and health.get("openWork") and health.get("state") != "waiting")
 
     def hold_reason(self, agents, monitor, idle_only=False, ignore_control_id=None):
         if not agents:
@@ -153,7 +157,7 @@ class Triggers:
                 if item.get("status") == "working":
                     return agent["name"] + " is mid-turn; waiting for it to finish."
                 if item.get("status") == "idle" or item.get("pids"):
-                    return agent["name"] + " is open in a Claude Code client; Studio cannot start a turn alongside it."
+                    return agent["name"] + CLIENT_OPEN + "; Studio cannot start a turn alongside it."
                 if item.get("status") != "closed" or not item.get("livenessKnown"):
                     return agent["name"] + " has unknown process ownership on this host."
                 from studio_agents import ClaudeCodeBackend
@@ -374,9 +378,10 @@ class Triggers:
                     elif rule["kind"] == "timer" and now >= current["nextDue"]:
                         current["nextDue"] = now + rule["minutes"] * 60
                         self.persist()
-                        # A timer only reaches a role that has something to do; dispatch hands out new work.
-                        if any(self.has_open_work(fleet, a) for a in fleet["agents"] if rule["targetRoleId"] in a.get("roleIds", [])):
-                            self.fire(fleet, rule, "timer elapsed", monitor)
+                        # A timer only reaches the agents that have something to do; dispatch hands out new work.
+                        for agent in fleet["agents"]:
+                            if rule["targetRoleId"] in agent.get("roleIds", []) and self.has_open_work(fleet, agent):
+                                self.fire(fleet, rule, "timer elapsed", monitor, agent["id"])
                     elif rule["kind"] == "condition":
                         if not monitor.get("observedAt") or time.time() - monitor["observedAt"] > 20:
                             self.observed.pop(rule["id"], None)

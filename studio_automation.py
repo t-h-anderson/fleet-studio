@@ -48,6 +48,16 @@ PRESETS = [
 ]
 
 
+def default_automations(fleet_id):
+    """The recommended rules, switched on: a fleet that never configured rules recovers stuck agents by itself.
+
+    IDs derive from the fleet, so reading the same unconfigured fleet twice gives the same rules.
+    """
+    return [{**preset, 'id': str(uuid.uuid5(uuid.NAMESPACE_URL, 'fleet-studio:' + fleet_id + ':' + preset['name'])),
+             'enabled': True, 'roleId': '', 'message': '', 'handoffRoleId': '', 'parkSource': True,
+             'windowHours': 24, 'pauseMinutes': 60} for preset in PRESETS]
+
+
 def number(value, name, low, high, default):
     value = default if value is None else value
     if type(value) not in (int, float) or not low <= value <= high:
@@ -193,6 +203,12 @@ def backtest(rule, history, now, hours=24):
 
 # How long a just-started agent counts as working before the session monitor sees it.
 STARTING_SECONDS = 120
+# Studio's own messages, which are not recovery and do not count toward the one-message-at-a-time limit.
+NOT_RECOVERY = ('dispatch', 'agent-handoff', 'blocked-notify', 'unblock-wake')
+# The quiet time an agent gets after a recovery message before any other rule may send it one.
+RECOVERY_GAP_SECONDS = 900
+# A blocked agent waiting on the operator is mentioned again once after this long.
+REMIND_SECONDS = 1800
 # Messages someone is waiting on; when one cannot be delivered the operator must hear of it.
 DIRECT_NOTICES = ('agent-handoff', 'blocked-notify', 'unblock-wake')
 # Fires that may have reached their recipient, or still will: never send these again.
@@ -323,6 +339,7 @@ class Automation:
                             continue
                         changed = self.consider(fleet, rule, agent, health, monitor, now) or changed
             changed = self.track_outcomes(now) or changed
+            changed = self.remind(state, now) or changed
             if changed:
                 self.persist()
 
@@ -423,12 +440,48 @@ class Automation:
             changed = self.escalate_long_hold(fleet, fire, now, rule['cooldownMinutes']) or changed
         return changed
 
+    def remind(self, state, now):
+        """Remind the operator once about a blocked agent still waiting on them after 30 minutes."""
+        fleets = {fleet['id']: fleet for fleet in state['fleets']}
+        changed = False
+        for record in self.data['escalations']:
+            # Only a fresh blocker: older ones were seen before (or predate reminders) and are not repeated.
+            if (not record.get('wakeAgentId') or record['acknowledged'] or record.get('remindedAt')
+                    or not REMIND_SECONDS <= now - record['at'] <= 4 * REMIND_SECONDS or record['fleetId'] not in fleets):
+                continue
+            if not self.still_blocked(fleets[record['fleetId']], record):
+                continue
+            record['remindedAt'] = now
+            record['reported'] = record['message']
+            record['message'] = 'Still blocked after ' + str(int((now - record['at']) // 60)) + ' min: ' + record['message']
+            url = (fleets[record['fleetId']].get('alerts') or {}).get('webhookUrl')
+            if url:
+                threading.Thread(target=self.notify, args=(url, record), daemon=True).start()
+            changed = True
+        return changed
+
+    def still_blocked(self, fleet, record):
+        """Whether the agent behind a blocked escalation is still in the fleet and has not reported since."""
+        agent = next((a for a in fleet['agents'] if a['id'] == record['wakeAgentId'] and a['enabled']), None)
+        if not agent:
+            return False
+        with self.app.progress.lock, closing(self.app.progress.connect()) as db:
+            if not db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_notes'").fetchone():
+                return True
+            row = db.execute('SELECT data FROM agent_notes WHERE fleet=? AND agent=?', (fleet['id'], agent['id'])).fetchone()
+        note = json.loads(row['data']) if row else None
+        return not note or (note.get('kind') == 'blocked' and note.get('at', 0) <= record['at'] + 60)
+
     def escalate_long_hold(self, fleet, fire, now, minutes):
         """Tell the operator once when a delivery has waited longer than its cooldown; it keeps retrying."""
-        if fire['status'] != 'held' or fire.get('heldEscalated') or now - fire['at'] < minutes * 60:
+        from studio_triggers import CLIENT_OPEN
+        # Nothing reaches a session open in a client, so waiting out the cooldown only wastes the agent's time.
+        client = CLIENT_OPEN in fire.get('detail', '')
+        if fire['status'] != 'held' or fire.get('heldEscalated') or (not client and now - fire['at'] < minutes * 60):
             return False
         fire['heldEscalated'] = True
-        record = dict(fire, evidence=fire['evidence'] + ' (waiting ' + str(int((now - fire['at']) // 60)) + ' min to deliver: ' + fire['detail'] + ')')
+        hint = ' Reply in the session yourself, or close it so Studio can.' if client else ''
+        record = dict(fire, evidence=fire['evidence'] + ' (waiting ' + str(int((now - fire['at']) // 60)) + ' min to deliver: ' + fire['detail'] + ')' + hint)
         # The escalation gets a copy, so this fire stays held and keeps retrying.
         self.escalate(fleet, {'id': fire['agentId'], 'name': fire['agentName']}, {'name': fire['ruleName']}, record)
         return True
@@ -492,8 +545,13 @@ class Automation:
         regular = [f for f in fires if not f.get('fallback') and f['status'] in ('sent', 'failed', 'unconfirmed')]
         recent = [f for f in regular if f['at'] > now - rule['windowHours'] * 3600]
         action, fallback = rule['action'], False
-        if health['signals'] and health['signals'][0].get('kind') == 'closed-session' and action == 'reprompt':
+        kind = health['signals'][0].get('kind') if health['signals'] else ''
+        if kind == 'closed-session' and action == 'reprompt':
             action = 'escalate'  # A closed session cannot read a reprompt; a person has to reopen it.
+        if kind == 'nudge-loop' and action == 'reprompt':
+            action = 'escalate'  # Studio's prompts are what is not working; another one would only add to the loop.
+        if action in ('reprompt', 'handoff') and self.recently_messaged(fleet['id'], agent['id'], rule['id'], now):
+            return False
         if rule['maxFires'] and len(recent) >= rule['maxFires']:
             if rule['thenAction'] == 'none' or any(f.get('fallback') and f['at'] > recent[-1]['at'] for f in fires):
                 return False
@@ -507,10 +565,25 @@ class Automation:
         self.app.event('Automation · ' + rule['name'], agent['name'] + ': ' + fire['action'] + ' (' + fire['status'] + ')', fleet['id'])
         return True
 
+    def recently_messaged(self, fleet_id, agent_id, rule_id, now):
+        """Whether another recovery rule already messaged this agent, or is about to; one problem gets one message at a time."""
+        return any(f['fleetId'] == fleet_id and f['agentId'] == agent_id and f['ruleId'] != rule_id
+                   and f['ruleId'] not in NOT_RECOVERY and f['action'] in ('reprompt', 'handoff')
+                   and (f['status'] in ('pending', 'sending', 'held')
+                        or (f['status'] in ('sent', 'unconfirmed') and now - max(f['at'], f.get('sentAt', 0)) < RECOVERY_GAP_SECONDS))
+                   for f in self.data['fires'])
+
     def execute(self, fleet, rule, agent, health, fire, monitor):
         action = fire['action']
         try:
             if action == 'reprompt':
+                if health['state'] == 'looping':
+                    # A looping turn would run on until it ends; stop it so the reprompt lands now.
+                    from studio_agents import NothingRunning
+                    try:
+                        self.stop_turn(agent)
+                    except (NothingRunning, RuntimeError):
+                        pass  # Nothing running, or this backend cannot stop it; the reprompt waits for the turn.
                 self.send(fleet, agent, self.compose(fleet, rule, agent, health), fire)
             elif action == 'handoff':
                 self.handoff(fleet, rule, agent, health, fire, monitor)
@@ -707,8 +780,8 @@ class Automation:
         if agent:
             # An agent that reported blocked to the operator was told it would be woken once someone looked.
             self.app.dispatch.deliver(fleet, agent, MARKER + ' The operator has looked at what blocked you\n\n'
-                                      'You reported: ' + record['message'] + '\nCheck whether you can continue now, or report blocked again.',
-                                      '', 'unblock-wake', 'Wake after blocker', record['message'])
+                                      'You reported: ' + record.get('reported', record['message']) + '\nCheck whether you can continue now, or report blocked again.',
+                                      '', 'unblock-wake', 'Wake after blocker', record.get('reported', record['message']))
         return deepcopy(record)
 
     def resume(self, fleet_id, agent_id):

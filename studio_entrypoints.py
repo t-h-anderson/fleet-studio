@@ -11,6 +11,36 @@ from workflow_spec import digest
 from studio_trackers import tracker_label
 
 
+# Codex reads AGENTS.override.md in place of AGENTS.md; Claude Code loads CLAUDE.local.md alongside CLAUDE.md,
+# so the brief survives compaction and new sessions for both.
+ENTRY_FILES = {"codex": "AGENTS.override.md", "claude-code": "CLAUDE.local.md"}
+
+
+# CLAUDE.local.md is often someone's own notes, so Studio keeps its part between markers and leaves the rest.
+BLOCK_START, BLOCK_END = "<!-- fleet-studio:start -->", "<!-- fleet-studio:end -->"
+
+
+def merged(before, body):
+    """`before` with Studio's block replaced by (or, if absent, appended as) `body`."""
+    block = BLOCK_START + "\n" + body.rstrip("\n") + "\n" + BLOCK_END + "\n"
+    text = before or ""
+    if BLOCK_START in text and BLOCK_END in text.split(BLOCK_START, 1)[1]:
+        head, rest = text.split(BLOCK_START, 1)
+        return head + block + rest.split(BLOCK_END, 1)[1].lstrip("\n")
+    return text + ("\n" if text and not text.endswith("\n") else "") + ("\n" if text else "") + block
+
+
+def studio_part(text, backend):
+    """The part of an entry point Studio owns: the whole file for Codex, the marked block for Claude Code."""
+    if backend == "codex" or BLOCK_START not in text:
+        return text
+    return text.split(BLOCK_START, 1)[1].split(BLOCK_END, 1)[0]
+
+
+def backend_for(path):
+    return next((backend for backend, name in ENTRY_FILES.items() if Path(path).name == name), "codex")
+
+
 def project_rules(agents):
     """Codex reads this override file instead of AGENTS.md in the same folder, so point back to it."""
     folder = Path(agents[0]["directory"]).resolve() if agents and agents[0].get("directory") else None
@@ -41,12 +71,13 @@ class EntryPoints:
                 "The brief gives your goal, what done looks like, your hand-offs and the three commands for done, blocked and hand-off. "
                 "Studio watches your session and tells you when the brief changes, so you do not need to re-read it, post progress updates or acknowledge messages. "
                 "If you are working in a different or nested checkout, ignore this file. "
-                + project_rules(agents) + tracker_label(fleet) + " remains the task record.\n")
+                + (project_rules(agents) if agents[0].get("backend", "codex") == "codex" else "The project's CLAUDE.md and engineering guides still apply. ")
+                + tracker_label(fleet) + " remains the task record.\n")
 
     @staticmethod
-    def target(directory):
+    def target(directory, backend="codex"):
         folder = Path(directory).resolve()
-        target = folder / "AGENTS.override.md"
+        target = folder / ENTRY_FILES[backend]
         if not folder.is_dir() or target.is_symlink() or target.resolve().parent != folder or target.exists() and not target.is_file():
             raise ValueError("The agent entry point must be a regular file inside its assigned folder.")
         return target
@@ -58,9 +89,11 @@ class EntryPoints:
                 continue
             status = "missing"
             try:
-                target = self.target(Path(path).parent)
+                target = self.target(Path(path).parent, backend_for(path))
                 if target.exists():
-                    status = "installed" if digest(target.read_text(encoding="utf-8")) == record["installedDigest"] else "changed"
+                    # Edits outside Studio's own block (someone's notes in CLAUDE.local.md) are not a change.
+                    current = studio_part(target.read_text(encoding="utf-8"), backend_for(path))
+                    status = "installed" if digest(current) == record["installedDigest"] else "changed"
             except (OSError, UnicodeError, ValueError):
                 status = "changed"
             result.append({"path": path, "agentId": record["agentId"], "agentIds": record.get("agentIds", [record["agentId"]]), "status": status})
@@ -74,9 +107,8 @@ class EntryPoints:
         rid = self.app.deployments.data["active"].get(fleet["id"])
         if not rid:
             raise ValueError("Deploy a workflow before installing entry points.")
-        # Claude Code and remote agents receive their brief inside the notification instead.
-        ids = payload.get("agentIds", [a["id"] for a in fleet["agents"] if a["directory"] and a.get("hostId", "local") == "local"
-                                       and a.get("backend", "codex") == "codex"])
+        # Remote agents receive their brief inside the notification instead.
+        ids = payload.get("agentIds", [a["id"] for a in fleet["agents"] if a["directory"] and a.get("hostId", "local") == "local"])
         agents = [a for a in fleet["agents"] if a["id"] in ids]
         if not agents or len(agents) != len(set(ids)):
             raise ValueError("Choose existing agents with assigned folders.")
@@ -85,24 +117,25 @@ class EntryPoints:
         for agent in agents:
             if agent.get("hostId", "local") != "local":
                 raise ValueError("Remote entry-point installation is not supported; remote paths must never be opened locally.")
-            if agent.get('backend', 'codex') != 'codex':
-                raise ValueError('Entry points are installed for Codex agents only; Claude Code agents receive their brief inside the notification.')
             if agent["id"] not in deployed or not same_binding(deployed[agent["id"]], agent):
                 raise ValueError("Agent bindings changed. Deploy again before installing entry points.")
             if not agent["directory"]:
                 raise ValueError("Assign an agent folder first.")
-            target = self.target(agent["directory"])
+            target = self.target(agent["directory"], agent.get("backend", "codex"))
             key = str(target).casefold()
             groups.setdefault(key, {"target": target, "agents": []})["agents"].append(agent)
         for group in groups.values():
             target, members = group["target"], group["agents"]
-            peers = [a for a in fleet["agents"] if a.get("hostId", "local") == "local" and a["directory"] and Path(a["directory"]).resolve() == target.parent]
+            peers = [a for a in fleet["agents"] if a.get("hostId", "local") == "local" and a["directory"] and Path(a["directory"]).resolve() == target.parent
+                     and a.get("backend", "codex") == members[0].get("backend", "codex")]
             if any(a["id"] not in ids for a in peers):
                 raise ValueError("Include all agents sharing a folder when reviewing its entry point.")
             before = target.read_bytes() if target.exists() else None
             if before is not None and len(before) > 100000:
                 raise ValueError("Existing entry point is too large to review here.")
-            after = self.content(fleet, members)
+            backend = members[0].get("backend", "codex")
+            body = self.content(fleet, members)
+            after = body if backend == "codex" else merged(before.decode("utf-8-sig") if before is not None else None, body)
             changes.append({"name": ", ".join(a["name"] for a in members), "agentId": members[0]["id"], "agentIds": [a["id"] for a in members], "path": str(target), "before": before.decode("utf-8-sig") if before is not None else None,
                             "beforeBytes": base64.b64encode(before).decode() if before is not None else None, "after": after})
         result = {"id": uuid.uuid4().hex, "fleetId": fleet["id"], "releaseId": rid, "revision": state["revision"], "createdAt": time.time(), "changes": changes}
@@ -132,7 +165,7 @@ class EntryPoints:
             if preview["revision"] != state["revision"] or preview["releaseId"] != self.app.deployments.data["active"].get(preview["fleetId"]):
                 raise ValueError("Fleet or release changed. Review entry points again.")
             for c in preview["changes"]:
-                path = self.target(Path(c["path"]).parent)
+                path = self.target(Path(c["path"]).parent, backend_for(c["path"]))
                 before = base64.b64decode(c["beforeBytes"]) if c["beforeBytes"] is not None else None
                 if (path.read_bytes() if path.exists() else None) != before:
                     raise ValueError("Entry point changed since preview: " + c["path"])
@@ -140,7 +173,8 @@ class EntryPoints:
             records = deepcopy(self.records)
             for c in preview["changes"]:
                 records.setdefault(c["path"], {"originalBytes": c["beforeBytes"], "fleetId": preview["fleetId"], "agentId": c["agentId"]})
-                records[c["path"]].update(fleetId=preview["fleetId"], agentId=c["agentId"], agentIds=c["agentIds"], installedDigest=digest(c["after"]), installedAt=time.time())
+                records[c["path"]].update(fleetId=preview["fleetId"], agentId=c["agentId"], agentIds=c["agentIds"],
+                                          installedDigest=digest(studio_part(c["after"], backend_for(c["path"]))), installedAt=time.time())
             self.path.parent.mkdir(exist_ok=True)
             atomic_json(self.path, records)
             completed = []

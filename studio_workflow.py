@@ -111,13 +111,14 @@ def sync_handoff_triggers(roles, links, triggers):
             trigger.update(sourceRoleId=link['source'], targetRoleId=link['target'], name=link['label'][:100],
                            workflowSignature=signature(link))
             trigger.pop('specContract', None)
-            if trigger.get('message', '').startswith(GENERATED):
-                trigger['message'] = handoff_message(link, by_role)
+        # A still-generated message also follows role renames, which the signature does not cover.
+        if trigger.get('message', '').startswith(GENERATED):
+            trigger['message'] = handoff_message(link, by_role)
         trigger['enabled'] = delivery != 'off'
         if delivery != 'off':
             trigger['mode'] = delivery
     if len(output) > TRIGGER_LIMIT:
-        raise ValueError('At most ' + str(TRIGGER_LIMIT) + ' triggers, including one per delivered hand-off; switch some hand-offs off.')
+        raise ValueError('At most ' + str(TRIGGER_LIMIT) + ' triggers, including one per hand-off that has been delivered; remove hand-offs or triggers under Advanced.')
     return output
 
 

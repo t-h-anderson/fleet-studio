@@ -72,7 +72,11 @@ class SpecificationTests(unittest.TestCase):
         self.assertEqual(next_fleet["agents"], f["agents"])
         self.assertEqual([r["position"] for r in next_fleet["roles"]], [r["position"] for r in f["roles"]])
         self.assertEqual([r["id"] for r in next_fleet["roles"]], [r["id"] for r in f["roles"]])
-        self.assertEqual(export_spec(validate_fleets([next_fleet])[0]), spec)
+        renamed = export_spec(validate_fleets([next_fleet])[0])
+        # Generated hand-off instructions follow the rename; everything else round-trips unchanged.
+        self.assertEqual({k: v for k, v in renamed.items() if k != "triggers"}, {k: v for k, v in spec.items() if k != "triggers"})
+        self.assertTrue(any("Renamed role" in t["message"] for t in renamed["triggers"]))
+        self.assertEqual(export_spec(validate_fleets([apply_spec(f, renamed)])[0]), renamed)
         encoded = json.dumps(spec)
         for a in f["agents"]:
             self.assertNotIn(a["sessionId"], encoded);self.assertNotIn(a["directory"], encoded)

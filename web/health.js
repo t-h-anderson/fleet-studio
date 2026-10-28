@@ -180,7 +180,7 @@ let renderForced=false;
 renderContent=function(){
  if(!state||drag)return;
  // Background refreshes must not redraw a form someone is typing in; navigation and saves (renderAll) still do.
- if(!renderForced&&['health','automation','throughput'].includes(view)&&editingContent())return;
+ if(!renderForced&&EDITABLE_VIEWS.includes(view)&&editingContent())return;
  if(view==='health')return renderHealth();
  if(view==='automation')return renderAutomation();
  if(view==='throughput')return renderThroughput();

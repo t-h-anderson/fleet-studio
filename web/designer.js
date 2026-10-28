@@ -56,6 +56,7 @@ function linkInspector(link){
   (trigger?'<p class="field-hint">Agents report it as <code>'+esc(trigger.eventName)+'</code>.</p>':'')+
   '<div class="row-actions inspector-actions"><button class="button primary small" id="inspector-save">Save</button>'+
   '<button class="button small" data-inspector-more="rolelink">More settings…</button>'+
+  (trigger?'<button class="button small" data-edit-trigger="'+trigger.id+'">Delivery message…</button>':'')+
   '<button class="button small danger" id="inspector-remove">Remove</button></div>'+
   '<p class="field-hint">Saved to the draft; delivery changes take effect after you deploy.</p>';
 }

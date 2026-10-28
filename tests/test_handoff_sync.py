@@ -68,6 +68,13 @@ class HandoffSyncTests(unittest.TestCase):
         self.assertEqual(self.trigger_for(fleet, link)['message'], 'Our own wording')
         self.assertFalse(contract_problem(fleet, self.trigger_for(fleet, link)))
 
+    def test_renaming_a_role_refreshes_a_generated_handoff_message(self):
+        app, fleet = self.app()
+        link = self.link(fleet)
+        self.save(app, lambda f: next(l for l in f['roleLinks'] if l['id'] == link['id']).update(delivery='automatic'))
+        fleet = self.save(app, lambda f: next(r for r in f['roles'] if r['id'] == link['source']).update(name='Renamed author'))
+        self.assertIn('From: Renamed author', self.trigger_for(fleet, link)['message'])
+
     def test_a_changed_handoff_no_longer_blocks_deploy(self):
         app, fleet = self.app()
         link = self.link(fleet)

@@ -357,6 +357,16 @@ try{
  const synced=(await bootstrap()).state.fleets[0].triggers.find(t=>t.workflowLinkId===linkId);
  assert.equal(synced?.mode,'review','The hand-off trigger did not follow its delivery');
  assert.equal(await page.locator('#editor').evaluate(d=>d.open),false,'Selecting a hand-off opened a dialog');
+ // The hand-off's own trigger stays editable, but its delivery mode belongs to the hand-off.
+ await page.locator('#design-inspector [data-edit-trigger]').click();
+ await page.locator('#editor').waitFor({state:'visible'});
+ assert.ok(await page.locator('#f-mode').isDisabled(),'A hand-off trigger offered its own delivery mode');
+ await page.locator('#cancel-editor').click();
+ // A timed refresh must not wipe what someone has typed but not yet saved, even after focus moves on.
+ await page.locator('#i-condition').fill('Typed but not saved');
+ await page.locator('#i-condition').evaluate(n=>n.blur());
+ await page.evaluate(()=>refresh());
+ assert.equal(await page.locator('#i-condition').inputValue(),'Typed but not saved','A refresh wiped unsaved inspector edits');
  const roleId=await page.locator('[data-edit-role]').first().getAttribute('data-edit-role');
  await page.locator('[data-edit-role="'+roleId+'"]').first().click();
  await page.locator('#i-goal').fill('Ship reviewed, tested changes every day');
@@ -365,7 +375,7 @@ try{
  await page.locator('[data-design-tab="roles"]').click();await page.locator('.roles-grid').waitFor();
  assert.ok(await page.locator('#nav-workflow.active').count(),'Workflow nav not highlighted on the Roles tab');
  assert.deepEqual(errors,[]);
- checks.push('One Workflow screen: tabs; the inspector edits a hand-off\'s delivery and a role\'s goal in place, and the trigger follows');
+ checks.push('One Workflow screen: tabs; the inspector edits a hand-off\'s delivery and a role\'s goal in place, the trigger follows, and refreshes keep unsaved edits');
  // Deploy bar on every tab; the review counts hand-off delivery; Advanced lists triggers not tied to a hand-off.
  await until(async()=>/Undeployed changes/.test(await page.locator('#design-deploy-status').innerText()),'Deploy bar does not show the undeployed change');
  await page.locator('#design-deploy').click();await page.locator('#workflow-review').waitFor();

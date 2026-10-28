@@ -118,18 +118,22 @@ function renderInsights(){
 }
 
 // Focus anywhere in a form counts as editing, so a click on its button is not lost to a redraw;
-// so do typed values not yet saved, even after focus moves elsewhere.
+// so do typed values not yet saved, even after focus moves elsewhere (the Workflow inspector counts as a form).
 function editingContent(){
  if(document.activeElement?.closest('#content input,#content textarea,#content select,#content form'))return true;
- return [...document.querySelectorAll('#content form input,#content form textarea')].some(n=>n.type==='checkbox'||n.type==='radio'?n.checked!==n.defaultChecked:n.value!==n.defaultValue);
+ const fields='#content form input,#content form textarea,#design-inspector input,#design-inspector textarea';
+ return [...document.querySelectorAll(fields)].some(n=>n.type==='checkbox'||n.type==='radio'?n.checked!==n.defaultChecked:n.value!==n.defaultValue)||
+  [...document.querySelectorAll('#design-inspector select')].some(n=>[...n.options].some(o=>o.selected!==o.defaultSelected));
 }
+// Views whose timed redraws wait while someone is editing on them.
+const EDITABLE_VIEWS=['health','automation','throughput','board'];
 async function refresh(full=false){
  if(stopped)return;
  try{
   monitor=await api('/api/status');if(full||!catalogue.length||view==='sessions')catalogue=(await api('/api/sessions')).sessions;
   if(pendingJob){const j=(monitor.jobs||[]).find((j)=>j.id===pendingJob);if(j&&j.status!=='running'){pendingJob=null;toast(j.message,j.status==='failed');}}
   // A timed refresh must not redraw a form someone is filling in; saves and navigation still do.
-  renderMetrics();if(!(['health','automation','throughput'].includes(view)&&editingContent()))renderContent();renderInsights();
+  renderMetrics();if(!(EDITABLE_VIEWS.includes(view)&&editingContent()))renderContent();renderInsights();
  }catch(error){$('live-pill').innerHTML='<span class="status-dot attention"></span><span>Disconnected</span>';$('monitor-banner').textContent='The local app is not responding. Use the Fleet Studio shortcut to reopen it.';$('monitor-banner').classList.remove('hidden');}
 }
 async function launch(ids){

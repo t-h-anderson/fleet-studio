@@ -7,6 +7,7 @@ agents are never woken just to look for work. Claims stop two agents from
 receiving the same ticket.
 """
 from contextlib import closing
+import hashlib
 import json
 import threading
 import time
@@ -154,10 +155,20 @@ class Dispatch:
                        'Work it toward done; report done, blocked or a hand-off when you get there.')
             self.deliver(fleet, agent, message, ticket['url'], 'dispatch', 'Next ticket', ticket['title'])
 
-    def deliver(self, fleet, recipient, message, ticket, rule_id, rule_name, evidence, source=None):
-        """Send a direct message as an automation fire, claiming the ticket for the recipient."""
+    def deliver(self, fleet, recipient, message, ticket, rule_id, rule_name, evidence, source=None, key=None):
+        """Send a direct message as an automation fire, claiming the ticket for the recipient.
+
+        With a `key` (from the client's retry ID) a retried report reuses the first delivery.
+        """
+        from studio_automation import LIVE_STATUSES
         automation = self.app.automation
-        fire = {'id': uuid.uuid4().hex, 'fleetId': fleet['id'], 'ruleId': rule_id, 'ruleName': rule_name,
+        if key:
+            existing = next((f for f in automation.data['fires'] if f['id'] == key and f['status'] in LIVE_STATUSES), None)
+            if existing:
+                return existing
+            if any(f['id'] == key for f in automation.data['fires']):
+                key += '-' + uuid.uuid4().hex[:6]
+        fire = {'id': key or uuid.uuid4().hex, 'fleetId': fleet['id'], 'ruleId': rule_id, 'ruleName': rule_name,
                 'agentId': (source or recipient)['id'], 'agentName': (source or recipient)['name'], 'action': rule_id,
                 'fallback': False, 'at': self.clock(), 'episode': None, 'healthState': rule_id, 'evidence': evidence,
                 'status': 'pending', 'detail': '', 'outcome': None, 'recipientId': recipient['id'],
@@ -205,7 +216,7 @@ class Dispatch:
 
     # Blockers.
 
-    def blocked(self, fleet, agent, note, ticket, target=None):
+    def blocked(self, fleet, agent, note, ticket, target=None, retry_id=None):
         """Tell whoever can unblock the agent, or the operator when nobody is named."""
         if target:
             role_ids, named = self.app.reports.resolve(fleet, agent, target)
@@ -213,7 +224,8 @@ class Dispatch:
             message = ('[Fleet Studio] ' + agent['name'] + ' is blocked and needs you\n\n' + note + '\n'
                        + ('Ticket: ' + ticket + '\n' if ticket else '')
                        + 'When it is sorted, report unblocked or done so ' + agent['name'] + ' is woken.')
-            self.deliver(fleet, recipient, message, '', 'blocked-notify', 'Blocked: ' + agent['name'], note, source=agent)
+            self.deliver(fleet, recipient, message, '', 'blocked-notify', 'Blocked: ' + agent['name'], note, source=agent,
+                         key='blocked-' + hashlib.sha256((agent['id'] + retry_id).encode()).hexdigest()[:24] if retry_id else None)
             return {'waitingOn': recipient['id'], 'recipient': recipient['name'],
                     'next': 'Recorded; ' + recipient['name'] + ' has been told. Stop here; Studio will wake you when they report back.'}
         record = {'id': uuid.uuid4().hex, 'evidence': note, 'detail': ''}

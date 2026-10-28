@@ -171,6 +171,33 @@ class AccuracyTests(unittest.TestCase):
         self.assertNotIn('hunter2', grep['label'])
         self.assertTrue(grep['label'].endswith(' in src'))
 
+    def test_common_credential_forms_are_redacted(self):
+        S = 'S3CR3TVALUE'
+        LEAK_CASES = [
+            f'cd repo && GITHUB_TOKEN={S} gh pr list', f'echo hi; API_KEY={S} npm test', f'PGPASSWORD={S} psql -h db',
+            f'env SECRET_KEY={S} python app.py', f'export OPENAI_API_KEY="{S} x"', f'curl -u admin:{S} https://x.io',
+            f'curl --user admin:{S} https://x.io', f'curl -H "X-Api-Key: {S}" https://x.io', f"curl -H 'Cookie: session={S}' https://x.io",
+            f'curl --header "Private-Token: {S}" https://gitlab', f'curl -d "user=a&password={S}" https://x.io',
+            f"curl --data '{{\"password\": \"{S}\"}}' https://x.io", f'docker login -u me -p {S} reg.io', f'sshpass -p {S} ssh host',
+            f'mysql -uroot -p{S} db', f'tool --client-secret {S}', f'tool --access-token={S}', f'tool --private-key {S}',
+            f'aws configure set aws_secret_access_key {S}', f'kubectl create secret generic s --from-literal=password={S}',
+            f'git clone https://me:{S}@github.com/a/b', f'curl https://x.io/a?token={S}', f'curl -H "Authorization: Bearer {S}" x',
+            f'npm config set //registry.npmjs.org/:_authToken={S}', f'echo eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.{S}',
+            f'run sk-ant-{S}abcdef', f'run AIzaSy{S}abcdefghijklmnopq', f'pip install --index-url https://u:{S}@pypi.x/simple pkg',
+            f'TOKEN={S} make deploy', f'heroku config:set DB_PASSWORD={S}',
+        ]
+        for command in LEAK_CASES:
+            self.assertNotIn(S, call_metadata('Bash', {'command': command})['label'], command)
+        for command in ['pytest tests/test_a.py -k token', 'grep -rn password src/', 'mkdir -p build']:
+            self.assertEqual(call_metadata('Bash', {'command': command})['label'], command)
+
+    def test_redaction_is_linear_on_adversarial_labels(self):
+        from studio_telemetry import redact
+        for text in ['pass' * 160, 'auth' * 160, '--pass' * 100, 'x-' * 320, 'a.' * 320]:
+            start = time.perf_counter()
+            redact(text)
+            self.assertLess(time.perf_counter() - start, 0.05)
+
     def test_signatures_distinguish_full_arguments(self):
         sig = lambda tool, args: call_metadata(tool, args)['sig']
         self.assertNotEqual(sig('Grep', {'pattern': 'a', 'path': 'src'}), sig('Grep', {'pattern': 'b', 'path': 'src'}))
@@ -235,6 +262,43 @@ class AccuracyTests(unittest.TestCase):
         [turn] = parser.drain()
         self.assertEqual(turn['id'], 'u1')
         self.assertEqual(turn['tokens']['output'], 14)
+
+    def feed_all(self, rows):
+        parser = TurnParser('s', 'claude-code')
+        turns = {}
+        for row in rows:
+            parser.feed(row)
+            for turn in parser.drain():
+                turns[turn['id']] = turn
+        return list(turns.values())
+
+    def prompt(self, uid, at, text='Work the ticket'):
+        return {'type': 'user', 'uuid': uid, 'timestamp': stamp(at), 'message': {'role': 'user', 'content': text}}
+
+    def reply(self, mid, at, blocks, stop='end_turn'):
+        return {'type': 'assistant', 'timestamp': stamp(at), 'message': {'id': mid, 'stop_reason': stop, 'usage': {'output_tokens': 1}, 'content': blocks}}
+
+    def test_a_message_split_across_rows_is_one_turn(self):
+        # Claude Code writes thinking and text as separate rows of one message, each marked end_turn.
+        turns = self.feed_all([self.prompt('u1', 1000),
+                               self.reply('m1', 1001, [{'type': 'thinking', 'thinking': ''}]),
+                               self.reply('m1', 1002, [{'type': 'text', 'text': 'The parser now handles split messages correctly.'}])])
+        self.assertEqual([(t['id'], t['status']) for t in turns], [('u1', 'completed')])
+        self.assertEqual(len(turns[0]['replies']), 1)
+
+    def test_turns_without_stop_reasons_end_completed_unless_cut_off(self):
+        rows = [self.prompt('u1', 1000), self.reply('m1', 1001, [{'type': 'text', 'text': 'Finished the change and the tests pass.'}], None),
+                self.prompt('u2', 1100), self.reply('m2', 1101, [{'type': 'tool_use', 'id': 't1', 'name': 'Bash', 'input': {'command': 'make'}}], None),
+                self.prompt('u3', 1200)]
+        status = {t['id']: t['status'] for t in self.feed_all(rows)}
+        self.assertEqual((status['u1'], status['u2']), ('completed', 'aborted'))
+
+    def test_bash_mode_and_interruptions(self):
+        rows = [self.prompt('u1', 1000), self.reply('m1', 1001, [{'type': 'tool_use', 'id': 't1', 'name': 'Bash', 'input': {'command': 'make'}}], 'tool_use'),
+                self.prompt('x', 1002, '[Request interrupted by user for tool use]'),
+                self.prompt('b1', 1003, '<bash-input>git status</bash-input>'),
+                self.prompt('b2', 1004, '<bash-stdout>clean</bash-stdout><bash-stderr></bash-stderr>')]
+        self.assertEqual([(t['id'], t['status']) for t in self.feed_all(rows)], [('u1', 'aborted')])
 
     def test_follower_resumes_from_saved_state_without_duplicates(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -319,6 +383,23 @@ class StorageTests(unittest.TestCase):
         self.app.health.tick(self.state, {'sessions': {}})
         cached = next(t for _, t in self.app.health.turn_cache[self.fleet['id']].values())
         self.assertEqual([c['seq'] for c in cached['calls']], list(range(1, 457)))
+
+    def test_work_past_the_stored_call_limit_is_not_burning(self):
+        agent = self.fleet['agents'][0]['id']
+        rows = []
+        for i in range(30):
+            rows += call_rows(i, self.now - 12000 + i * 400, 'edit f' + str(i), prompt=i == 0)
+        for row in rows:
+            if row['type'] == 'assistant':
+                row['message']['usage']['input_tokens'] = 50000
+                row['message']['content'][0].update(name='Edit', input={'file_path': '/repo/f' + row['message']['id'], 'new_string': 'x'})
+        self.append(agent, rows)
+        with patch('studio_telemetry.CALL_LIMIT', 5):
+            self.app.telemetry.tick(self.state)
+        self.app.health.tick(self.state, {'sessions': {}})
+        health = self.app.health.get(self.fleet['id'], agent)
+        self.assertNotEqual(health['state'], 'burning')
+        self.assertIsNotNone(health['lastWorkAt'])
 
     def test_read_position_is_saved_at_most_every_30_seconds_and_replay_does_not_duplicate(self):
         agent = self.fleet['agents'][0]['id']

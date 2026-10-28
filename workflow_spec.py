@@ -310,6 +310,24 @@ def render(spec, role_ids=None):
     return "\n".join(line.rstrip() for line in lines)
 
 
+def command_shell(windows, backend):
+    """The shell an agent's commands run in: Codex on Windows uses PowerShell, Claude Code uses Git Bash."""
+    return "powershell" if windows and backend == "codex" else "posix"
+
+
+def shell_quote(text, shell):
+    """Quote text for an agent's shell.
+
+    Single quotes are literal in both PowerShell and POSIX shells (cmd-style double
+    quotes would let PowerShell expand `$` and backticks); only an embedded single
+    quote needs the shell's own escape.
+    """
+    import shlex
+    if shell == "powershell":
+        return "'" + text.replace("'", "''") + "'"
+    return shlex.quote(text)
+
+
 def brief_document(fleet, spec, agent, release_id, app_root):
     """A short, goal-first brief: what this agent is for, what done looks like and how to say so.
 
@@ -321,12 +339,11 @@ def brief_document(fleet, spec, agent, release_id, app_root):
     spec_roles = {r["id"]: r for r in spec["roles"]}
     mine = [spec_roles[by_id[rid]] for rid in agent.get("roleIds", []) if by_id.get(rid) in spec_roles]
     names = {r["id"]: r["name"] for r in fleet["roles"]}
-    import os, shlex, subprocess
-    # Quote for the shell the agents on this host use; notes with quotes are better sent with --note -.
-    windows = os.name == "nt"
-    quote = (lambda text: subprocess.list2cmdline([text])) if windows else shlex.quote
-    client = quote(str(Path(app_root) / "workflow_client.py"))
-    sample = (lambda text: '"' + text + '"') if windows else (lambda text: "'" + text + "'")
+    import os
+    # Quote for the shell the agent runs commands in; notes with quotes are better sent with --note -.
+    shell = command_shell(os.name == "nt", agent.get("backend", "codex"))
+    client = shell_quote(str(Path(app_root) / "workflow_client.py"), shell)
+    sample = lambda text: "'" + text + "'"
     identity = " --fleet " + fleet["id"] + " --agent " + agent["id"]
     lines = ["# " + agent["name"] + " — " + (", ".join(r["name"] for r in mine) or "unassigned"), ""]
     for role in mine:

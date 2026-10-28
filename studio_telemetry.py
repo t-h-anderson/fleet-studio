@@ -53,15 +53,28 @@ WAIT_TOOLS = {'BashOutput', 'Monitor', 'wait', 'write_stdin'}
 SHELL_TOOLS = {'Bash', 'shell', 'exec_command', 'shell_command', 'local_shell', 'container.exec'}
 # Planning calls repeat by design and never indicate a loop.
 LOOP_EXEMPT = {'TodoWrite', 'update_plan'}
+# Names that mark a value as a credential, wherever it appears: env vars, flags, form fields, headers, JSON keys.
+# Anchored to the start of a name and bounded, so a long run of letters cannot backtrack.
+SECRET_CORE = r'[\w.-]{0,40}?(?:pass(?:word|wd)?|pwd|token|secret|api[_-]?key|apikey|access[_-]?key|private[_-]?key|auth\w{0,20}|credential|cookie|session)[\w.-]{0,40}'
+SECRET_NAME = r'(?<![\w.-])' + SECRET_CORE
+VALUE = r'(?:"[^"]*"|\'[^\']*\'|[^\s&;|\'"]+)'
 SECRET_PATTERNS = (
     (re.compile(r'^(?:\w+=\S+\s+)+'), ''),
-    (re.compile(r'\b(export\s+\w+)=\S+'), r'\1=…'),
-    (re.compile(r'(--?(?:password|passwd|token|secret|key|api-key|apikey|auth)[=\s]+)\S+', re.IGNORECASE), r'\1…'),
+    (re.compile(r'\b(export\s+\w+)=' + VALUE), r'\1=…'),
+    # Upper-case assignments are environment variables, which often carry credentials.
+    (re.compile(r'\b([A-Z][A-Z0-9_]*)=' + VALUE), r'\1=…'),
+    (re.compile(r'(' + SECRET_NAME + r')=' + VALUE, re.IGNORECASE), r'\1=…'),
+    (re.compile(r'((?<![\w.-])--?' + SECRET_CORE + r'[=\s]+)' + VALUE, re.IGNORECASE), r'\1…'),
+    (re.compile(r'(["\']?' + SECRET_NAME + r'["\']?\s*:\s*)("[^"]*"|\'[^\']*\'|[^\s,}\'"]+)', re.IGNORECASE), r'\1…'),
+    # curl/wget credentials and any header value: headers are where API keys and cookies travel.
+    (re.compile(r'(\s(?:-u|--user|--proxy-user)[=\s]+)' + VALUE), r'\1…'),
+    (re.compile(r'(\s(?:-H|--header)[=\s]+["\']?[\w-]+:\s*)[^"\']*'), r'\1…'),
+    (re.compile(r'(\b(?:sshpass|docker\s+login|podman\s+login|helm\s+registry\s+login)\b[^|;&]{0,200}?\s-p)\s*(?=\S)\S+'), r'\1 …'),
     # Bounded and anchored to the mysql word so long commands cannot backtrack quadratically.
     (re.compile(r'(\b(?:mysql|mariadb|mysqldump)\b[^|;&]{0,200}?\s-p)(?=\S)\S+'), r'\1…'),
-    (re.compile(r'(authorization:?\s*)(bearer|basic|token)?\s*[^\s\'"]+', re.IGNORECASE), r'\1…'),
+    (re.compile(r'(\bconfig(?:ure)?(?::set|\s+set)\s+\S*(?:secret|token|key|password)\S*\s+)\S+', re.IGNORECASE), r'\1…'),
     (re.compile(r'\bbearer\s+[^\s\'"]+', re.IGNORECASE), 'Bearer …'),
-    (re.compile(r'\b(ghp|gho|ghs|github_pat|glpat|xox[abp]|sk|AKIA)[-_][\w-]{8,}|\bAKIA[0-9A-Z]{16}\b'), '…'),
+    (re.compile(r'\b(ghp|gho|ghs|ghu|github_pat|glpat|xox[abpr]|sk|npm|hf|pypi)[-_][\w-]{8,}|\bAKIA[0-9A-Z]{16}\b|\bAIza[\w-]{20,}|\beyJ[\w-]+\.[\w-]+\.[\w-]+'), '…'),
     (re.compile(r'(https?://[^\s?\'"]+)\?[^\s\'"]*'), r'\1?…'),
     (re.compile(r'(\s(?:-m|--message|--body|-b|--title|--notes?|-F)\s+)("[^"]*"|\'[^\']*\'|\S+)'), r'\1"…"'),
     (re.compile(r'://[^/\s:@]+:[^/\s@]+@'), '://…@'),
@@ -228,9 +241,13 @@ def output_failed(output):
 
 BUCKET_SECONDS = 300
 REPLY_MINIMUM = 20
+# Claude Code writes this when the user stops a turn.
+INTERRUPTED = '[Request interrupted by user'
 # Claude Code records these as user rows, but they are not prompts.
 NON_PROMPTS = ('<command-name>', '<command-message>', '<local-command-stdout>', '<local-command-stderr>',
-               '<user-memory-input>', 'Caveat: The messages below were generated')
+               '<user-memory-input>', 'Caveat: The messages below were generated',
+               # `!` bash mode runs a command for the user without a model turn.
+               '<bash-input>', '<bash-stdout>', '<bash-stderr>')
 
 
 def new_turn(session, turn_id, at, from_studio=False):
@@ -286,6 +303,17 @@ class TurnParser:
         self.touch(self.current, at)
         return self.current
 
+    def previous_status(self):
+        """How an open turn ended when a new prompt arrives without an end marker.
+
+        Some Claude Code versions write no stop reason, so a turn that finished with a
+        reply and no running tool counts as completed; one cut off mid-tool was aborted.
+        """
+        turn = self.current
+        if turn and turn.get('replied') and not self.pending_calls:
+            return 'completed'
+        return 'aborted'
+
     def finish(self, status, at):
         turn = self.current
         if not turn or turn['status'] != 'open':
@@ -300,8 +328,9 @@ class TurnParser:
             self.current['partial'] = True
         return self.current
 
-    def add_call(self, meta, call_id, at):
-        turn = self.ensure(at)
+    def add_call(self, meta, call_id, at, turn=None):
+        # A late row of a message that already ended its turn belongs to that turn, not a new partial one.
+        turn = turn or self.ensure(at)
         turn['callCount'] += 1
         turn['classes'][meta['cls']] += 1
         if turn['callCount'] <= CALL_LIMIT:
@@ -315,6 +344,10 @@ class TurnParser:
                     self.pending_calls.pop(next(iter(self.pending_calls)))
             self.touch(turn, at)
             return call
+        # Past the stored limit only totals are kept, but work still counts, so a long
+        # productive turn is not mistaken for burning tokens without progress.
+        if meta['cls'] == 'work':
+            turn['lastWorkAt'] = max(turn.get('lastWorkAt') or 0, at or 0)
         self.touch(turn, at)
         return None
 
@@ -325,17 +358,19 @@ class TurnParser:
         if call is not None and failed and not call['error']:
             call['error'] = True
             self.current['errors'] += 1
+        if call is not None and not failed and call['cls'] == 'work' and self.current:
+            self.current['lastWorkAt'] = max(self.current.get('lastWorkAt') or 0, call.get('at') or 0)
         if call is not None and self.current:
             self.dirty.setdefault(self.current['id'], {})[call['seq']] = call
         if self.current:
             self.touch(self.current, at)
 
-    def add_reply(self, text, at):
+    def add_reply(self, text, at, turn=None):
         normalized = ' '.join(text.lower().split())
         # Short stock replies ("Done.") repeat legitimately and say nothing about loops.
         if len(normalized) < REPLY_MINIMUM:
             return
-        turn = self.ensure(at)
+        turn = turn or self.ensure(at)
         turn['replies'] = (turn['replies'] + [digest(normalized)])[-10:]
         self.touch(turn, at)
 
@@ -362,9 +397,12 @@ class TurnParser:
             texts = [b.get('text') for b in blocks if isinstance(b, dict) and b.get('type') == 'text' and isinstance(b.get('text'), str)]
             if texts and not results:
                 prompt = '\n'.join(texts).lstrip()
+                if prompt.startswith(INTERRUPTED):
+                    self.finish('aborted', at)
+                    return
                 if prompt.startswith(NON_PROMPTS) or row.get('isCompactSummary'):
                     return
-                self.start(row.get('uuid') or digest(self.session + str(at) + prompt), at, studio_prompt(prompt))
+                self.start(row.get('uuid') or digest(self.session + str(at) + prompt), at, studio_prompt(prompt), self.previous_status())
                 if prompt.startswith(CHECK_MARKER):
                     self.current['studioCheck'] = True
             return
@@ -401,11 +439,14 @@ class TurnParser:
             if block.get('type') == 'tool_use':
                 if block.get('id') and any(c.get('callId') == block['id'] for c in turn['calls'][-20:]):
                     continue
-                call = self.add_call(call_metadata(block.get('name') or 'tool', block.get('input')), block.get('id'), at)
+                call = self.add_call(call_metadata(block.get('name') or 'tool', block.get('input')), block.get('id'), at, turn)
                 if block.get('id') and call:
                     call['callId'] = block['id']
             elif block.get('type') == 'text' and isinstance(block.get('text'), str) and turn is self.current:
-                self.add_reply(block['text'], at)
+                self.add_reply(block['text'], at, turn)
+                turn['replied'] = True
+            if block.get('type') == 'tool_use':
+                turn['replied'] = False
         self.touch(turn, at)
         if message.get('stop_reason') == 'end_turn' and turn is self.current:
             self.finish('completed', at)

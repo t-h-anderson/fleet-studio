@@ -203,6 +203,32 @@ class RulesTests(unittest.TestCase):
         self.assertEqual(app.automation.hold(fleet['id'], [writer], monitor, throttle=False), '')
         self.assertIn('Throttled', app.automation.hold(fleet['id'], [writer], monitor, throttle=True))
 
+    def test_working_limit_holds_within_one_tick(self):
+        app, fleet = self.app()
+        state = app.store.snapshot()
+        state['fleets'][0]['throttles'] = {'maxWorkingAgents': 1}
+        app.store.save(state)
+        fleet = app.store.fleet(fleet['id'])
+        monitor = self.monitor(fleet)
+        writer, integrator = fleet['agents']
+        # Both are idle in the tick's snapshot; letting work through to one counts it as working.
+        self.assertEqual(app.automation.hold(fleet['id'], [writer], monitor), '')
+        self.assertIn('Throttled', app.automation.hold(fleet['id'], [integrator], monitor))
+
+    def test_cooldown_runs_from_delivery_not_creation(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        [cleaned] = __import__('studio_automation').clean_automations([{'id': str(uuid.uuid4()), 'name': 'Reprompt', 'when': {'signal': 'stalled'},
+                                                                        'action': 'reprompt', 'cooldownMinutes': 15}], set())
+        now = time.time()
+        app.automation.data['fires'].append({'id': 'f', 'fleetId': fleet['id'], 'ruleId': cleaned['id'], 'ruleName': 'Reprompt',
+            'agentId': writer['id'], 'agentName': writer['name'], 'action': 'reprompt', 'fallback': False, 'at': now - 3600,
+            'sentAt': now - 60, 'episode': 0, 'healthState': 'stalled', 'evidence': '', 'status': 'sent', 'detail': '', 'outcome': None})
+        health = {'state': 'stalled', 'since': 0, 'signals': [{'state': 'stalled', 'kind': 'idle-with-work', 'message': 'x'}]}
+        with patch.object(app.automation, 'execute') as execute:
+            self.assertFalse(app.automation.consider(fleet, cleaned, writer, health, self.monitor(fleet), now))
+            execute.assert_not_called()
+
     def test_token_budget_escalates_once_an_hour(self):
         app, fleet = self.app()
         state = app.store.snapshot()

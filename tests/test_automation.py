@@ -44,6 +44,15 @@ class BacktestTests(unittest.TestCase):
         # Agent b's stall ended after 5 min, before the 10 min delay.
         self.assertEqual(result['fires'], 2)
 
+    def test_flapping_state_gets_one_fallback_like_the_live_rule(self):
+        [cleaned] = clean_automations([rule(when={'signal': 'stalled', 'forMinutes': 0}, cooldownMinutes=10, maxFires=1)], set())
+        now = 100000
+        history = []
+        for i in range(6):
+            history += [{'at': now - 3600 + i * 600, 'agentId': 'a', 'state': 'stalled'},
+                        {'at': now - 3600 + i * 600 + 300, 'agentId': 'a', 'state': 'productive'}]
+        self.assertEqual(backtest(cleaned, history, now)['fallbacks'], 1)
+
     def test_validation(self):
         with self.assertRaisesRegex(ValueError, 'health signal'):
             clean_automations([rule(when={'signal': 'bored'})], set())

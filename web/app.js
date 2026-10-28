@@ -109,7 +109,7 @@ function renderInsights(){
 }
 
 // An open settings panel counts as editing even when focus has moved to its buttons.
-function editingContent(){return !!document.activeElement?.closest('#content input,#content textarea,#content select')||!!document.querySelector('#content details[open] form');}
+function editingContent(){return !!document.activeElement?.closest('#content input,#content textarea,#content select,#content form')||!!document.querySelector('#content details[open] form');}
 async function refresh(full=false){
  if(stopped)return;
  try{
@@ -215,7 +215,9 @@ function wireEvents(){
  };
  $('content').onchange=(e)=>{
   const t=e.target;if(t.dataset.select){if(t.checked)selected.add(t.dataset.select);else selected.delete(t.dataset.select);}
-  if(t.id==='select-all')filteredAgents().filter(launchable).forEach((a)=>t.checked?selected.add(a.id):selected.delete(a.id));renderContent();
+  if(t.id==='select-all')filteredAgents().filter(launchable).forEach((a)=>t.checked?selected.add(a.id):selected.delete(a.id));
+  // Only selection changes need a redraw; redrawing on any input's change rebuilt forms before their submit click landed.
+  if(t.dataset.select||t.id==='select-all')renderContent();
  };
  $('editor-form').onsubmit=saveEditor;$('delete-item').onclick=deleteItem;
  const close=()=>{$('editor').close();editing=null;};$('close-editor').onclick=close;$('cancel-editor').onclick=close;

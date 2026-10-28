@@ -219,7 +219,8 @@ def tokens_since(turn, since):
 def detect_burn(turns, now, settings, calls_since=None):
     since = now - WINDOW_SECONDS
     tokens = sum(tokens_since(turn, since) for turn in turns)
-    work = sum(1 for call in (calls_since or (lambda s: recent_calls(turns, s)))(since) if call['cls'] == 'work')
+    work = sum(1 for call in (calls_since or (lambda s: recent_calls(turns, s)))(since) if call['cls'] == 'work') \
+        or any((turn.get('lastWorkAt') or 0) >= since for turn in turns)
     if tokens < settings['burnTokensPerHour'] or work:
         return None
     return {'kind': 'burn', 'tokens': tokens,
@@ -290,7 +291,7 @@ def cached_waste(turn, settings):
 
 def last_work(turns):
     """Latest successful work call; only work that succeeded counts, a failing test run is not recovery."""
-    best = 0
+    best = max((turn.get('lastWorkAt') or 0 for turn in turns), default=0)
     for turn in turns:
         if (turn.get('lastAt') or 0) <= best:
             continue

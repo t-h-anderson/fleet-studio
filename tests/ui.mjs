@@ -215,6 +215,7 @@ try{
                  {id:sameId,name:'Local Claude',backend:'claude-code',hostId:'local',directory:'/local/claude'},
                  {id:sameId,name:'Remote Codex',backend:'codex',hostId:'test-node',directory:'/remote/codex'}];
  await page.route('**/api/sessions',route=>route.fulfill({json:{sessions}}));
+ const savedHosts=await page.evaluate(()=>state.hosts);
  await page.evaluate(()=>{state.hosts=[{id:'test-node',name:'Test node'}];openEditor('agent');});
  await page.locator('[data-pick-session="local:claude-code:'+sameId+'"]').click();
  assert.equal(await page.locator('#f-backend').inputValue(),'claude-code');
@@ -227,6 +228,8 @@ try{
  await page.locator('#f-host').selectOption('local');
  assert.equal(await page.locator('#selected-session').innerText(),'');
  await page.locator('#cancel-editor').click();
+ // The synthetic host is client-only and invalid to save; later checks save state.
+ await page.evaluate(hosts=>{state.hosts=hosts;},savedHosts);
  assert.deepEqual(errors,[]);
  checks.push('Same session UUID on multiple backends and hosts remains independently selectable; runtime changes unlink the old session');
  await page.setViewportSize({width:1500,height:1050});
@@ -245,11 +248,20 @@ try{
  assert.equal(await page.locator('.automation-card').count(),4);
  assert.match(await page.locator('.automation-card').first().innerText(),/At most 2 time/);
  await page.locator('[data-automation-backtest]').first().click();
- await until(async()=>(await page.locator('.automation-card').first().innerText()).includes('Backtest'),'Backtest result missing');
+ await until(async()=>(await page.locator('.automation-card').first().innerText()).includes('Backtest: would have acted'),'Backtest result missing');
  assert.match(await page.locator('#content').innerText(),/recovered/);
  await page.locator('#f-maxWorkingAgents').fill('3');
  await sleep(6500);
  assert.equal(await page.locator('#f-maxWorkingAgents').inputValue(),'3','Throttle form lost typed input on refresh');
+ // Clicking the button blurs the input first; the form must still be there to submit.
+ await page.locator('#throttle-form button[type="submit"]').click();
+ await until(async()=>(await bootstrap()).state.fleets[0].throttles?.maxWorkingAgents===3,'Save limits did not save');
+ // A backtest that finishes while someone types must not redraw the form under them.
+ await page.locator('[data-automation-backtest]').nth(1).click();
+ await page.locator('#f-fleetTokensPerHour').fill('5000');
+ await sleep(1500);
+ assert.equal(await page.locator('#f-fleetTokensPerHour').inputValue(),'5000','A finished backtest wiped typed input');
+ await page.locator('#f-fleetTokensPerHour').fill('');
  assert.match(await page.locator('.automation-card').first().innerText(),/Has not acted yet|Last:/);
  await post('/api/workflow/pause',{fleetId:fixture.fleetId,paused:true});
  await page.locator('#nav-health').click();await page.locator('#nav-automation').click();
@@ -269,8 +281,7 @@ try{
  await page.locator('#cancel-editor').click();
  assert.deepEqual(errors,[]);assert.equal((await bootstrap()).status.controls.length,0,'Tests must never send to agents');
  checks.push('Agent health shows loops and admin share with turn timelines; automations list, backtest and outcomes; throughput waste; stuck roles on the board; role goals editable');
- // The session-picker check above left a synthetic host in client state; start from saved state.
- await page.reload();await page.locator('#nav-health').click();await page.locator('.health-table').waitFor();
+ await page.locator('#nav-health').click();await page.locator('.health-table').waitFor();
  await page.locator('.threshold-panel summary').click();
  await page.locator('#f-h-stallMinutes').fill('45');
  await page.locator('#threshold-form button[type="submit"]').click();
@@ -283,7 +294,7 @@ try{
  assert.match(await page.locator('#live-edges').innerText(),/Hand-offs in flight/);
  await page.locator('#nav-automation').click();
  await until(async()=>/Routing[\s\S]*Dispatch[\s\S]*Timeline/.test(await page.locator('#content').innerText()),'Rules sections missing');
- await until(async()=>!(await page.locator('#content').innerText()).includes('Loading…'),'Timeline did not load');
+ await until(async()=>(await page.locator('#content').innerText()).includes('OUTCOME'),'Timeline did not load');
  await page.locator('#nav-health').click();
  await until(async()=>(await page.locator('.setup-checklist').count())>0,'Setup checklist missing');
  assert.match(await page.locator('.setup-checklist').innerText(),/Deploy the workflow/);

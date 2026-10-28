@@ -62,7 +62,7 @@ async function loadHealth(){
 async function loadTurns(agentId){
  const data=await api('/api/telemetry/turns?fleetId='+encodeURIComponent(activeId)+'&agentId='+encodeURIComponent(agentId));
  turnCache.set(agentId,data.turns);
- if(view==='health')renderHealth();
+ if(view==='health')renderContent();
 }
 
 function turnTimeline(agentId){

@@ -52,6 +52,15 @@ class BriefTests(unittest.TestCase):
         self.assertIn('Release process', text)
         self.assertNotIn('step step step', text)
 
+    def test_commands_are_quoted_for_the_agents_shell(self):
+        from workflow_spec import command_shell, shell_quote
+        path = r"C:\Users\O'Neil\Fleet $Studio\workflow_client.py"
+        self.assertEqual(command_shell(True, 'codex'), 'powershell')
+        self.assertEqual(command_shell(True, 'claude-code'), 'posix')  # Claude Code on Windows runs Git Bash.
+        # PowerShell: literal single quotes, so `$Studio` is not expanded; a quote is doubled.
+        self.assertEqual(shell_quote(path, 'powershell'), "'C:\\Users\\O''Neil\\Fleet $Studio\\workflow_client.py'")
+        self.assertEqual(shell_quote('/srv/fleet studio/workflow_client.py', 'posix'), "'/srv/fleet studio/workflow_client.py'")
+
     def test_client_reports_an_unavailable_studio_in_one_line(self):
         import subprocess
         client = Path(__file__).resolve().parents[1] / 'workflow_client.py'
@@ -170,6 +179,50 @@ class ReportTests(unittest.TestCase):
             app.reports.report({**payload, 'retryId': 'a'})
             app.reports.report({**payload, 'retryId': 'b'})
         self.assertEqual(send.call_count, 2)
+
+    def test_retried_reports_never_deliver_twice(self):
+        from studio_control import AutomationHeld
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        handoff = {'kind': 'handoff', 'fleetId': fleet['id'], 'agentId': writer['id'], 'to': 'Integrator', 'note': 'Ready', 'retryId': 'a'}
+        # The first attempt is held (recipient busy); the client's retry must not create a second delivery.
+        with patch.object(app.controls, 'send', side_effect=AutomationHeld('Integrator is working')) as send:
+            app.reports.report(handoff)
+            app.reports.report(handoff)
+        self.assertEqual(len([f for f in app.automation.data['fires'] if f['ruleId'] == 'agent-handoff']), 1)
+        blocked = {'kind': 'blocked', 'fleetId': fleet['id'], 'agentId': writer['id'], 'to': 'Integrator', 'note': 'Need the API key', 'retryId': 'b'}
+        with patch.object(app.controls, 'send', return_value={'id': 'r1'}) as send:
+            app.reports.report(blocked)
+            app.reports.report(blocked)
+        self.assertEqual(send.call_count, 1)
+
+    def test_retried_workflow_handoff_is_not_also_sent_directly(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        state = app.store.snapshot()
+        state['fleets'][0]['triggers'] = [fixtures.DesignTests.rule(self, fleet, 'event')]
+        app.store.save(state)
+        preview = app.deployments.preview({'fleetId': fleet['id'], 'revision': app.store.snapshot()['revision'], 'kind': 'deploy'})
+        app.deployments.apply(preview['id'])
+        payload = {'kind': 'handoff', 'fleetId': fleet['id'], 'agentId': writer['id'], 'to': 'Integrator', 'note': 'Ready',
+                   'ticket': 'https://gitlab.example/p/-/issues/1', 'retryId': 'r'}
+        first = app.reports.report(payload)
+        second = app.reports.report(payload)
+        self.assertTrue(first['route'].startswith('workflow'), first)
+        self.assertTrue(second['route'].startswith('workflow'), second)
+        self.assertEqual([f for f in app.automation.data['fires'] if f['ruleId'] == 'agent-handoff'], [])
+        self.assertEqual(len(app.triggers.data['actions']), 1)
+
+    def test_a_delivery_that_may_have_landed_is_unconfirmed_not_retried(self):
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        fire = {'id': 'f', 'fleetId': fleet['id'], 'ruleId': 'r', 'ruleName': 'Reprompt', 'agentId': writer['id'], 'agentName': writer['name'],
+                'action': 'reprompt', 'fallback': False, 'at': time.time() - 900, 'sentAt': time.time() - 900, 'episode': 0,
+                'healthState': 'looping', 'evidence': 'x', 'status': 'sending', 'controlId': 'lost', 'detail': '', 'outcome': None}
+        app.automation.data['fires'].append(fire)
+        app.automation.settle(fleet, fire)
+        self.assertEqual(fire['status'], 'unconfirmed')
+        self.assertEqual(len(app.automation.data['escalations']), 1)
 
     def test_unknown_handoff_target_is_one_clear_error(self):
         app, fleet = self.app()

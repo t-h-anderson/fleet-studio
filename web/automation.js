@@ -182,13 +182,13 @@ async function automationClick(e){
     const saved=current().automations.find(r=>r.id===preset.id);
     if(saved)backtests.set(saved.id,await api('/api/automation/backtest',{fleetId:activeId,rule:saved,hours:24}));
    }));
-   renderAutomation();
+   renderContent();
   }
   if(b.dataset.automationEdit)openEditor('automation',b.dataset.automationEdit);
   if(b.dataset.automationToggle)await saveAutomations(list=>{const r=list.find(r=>r.id===b.dataset.automationToggle);r.enabled=!r.enabled;},'Automation updated.');
   if(b.dataset.automationBacktest){
    const rule=current().automations.find(r=>r.id===b.dataset.automationBacktest);
-   backtests.set(rule.id,await api('/api/automation/backtest',{fleetId:activeId,rule,hours:24}));renderAutomation();
+   backtests.set(rule.id,await api('/api/automation/backtest',{fleetId:activeId,rule,hours:24}));renderContent();
   }
   if(b.hasAttribute('data-waste-agents')){healthSort='waste';setView('health');}
   if(b.dataset.roleHealth){setView('health');query=b.dataset.roleHealth;$('search').value=query;renderContent();}

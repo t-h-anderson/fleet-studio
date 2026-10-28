@@ -10,6 +10,7 @@ import json
 import time
 import uuid
 
+from studio_automation import LIVE_STATUSES
 from studio_health import PROBLEM_STATES
 
 KINDS = ('done', 'blocked', 'unblocked', 'handoff')
@@ -47,7 +48,7 @@ class Reports:
         elif kind == 'done':
             record.update(dispatch.route_done(fleet, agent, note, ticket, payload.get('to'), payload.get('retryId')))
         elif kind == 'blocked':
-            record.update(dispatch.blocked(fleet, agent, note, ticket, payload.get('to')))
+            record.update(dispatch.blocked(fleet, agent, note, ticket, payload.get('to'), payload.get('retryId')))
         else:
             record['next'] = 'Carry on with the task.'
         with self.app.progress.lock, closing(self.app.progress.connect()) as db, db:
@@ -105,7 +106,8 @@ class Reports:
         # identical hand-off is new; without one, a ten-minute window stands in.
         basis = [agent['id'], retry_id] if retry_id else [agent['id'], role_ids, named['id'] if named else '', note, ticket, int(self.clock() // 600)]
         key = hashlib.sha256(json.dumps(basis).encode()).hexdigest()[:32]
-        existing = next((f for f in self.app.automation.data['fires'] if f['id'] == key and f['status'] in ('pending', 'sending', 'sent')), None)
+        # Anything that may have reached the recipient, or still will, is the same hand-off.
+        existing = next((f for f in self.app.automation.data['fires'] if f['id'] == key and f['status'] in LIVE_STATUSES), None)
         if existing:
             return {'route': 'direct', 'recipient': existing['recipientName'], 'delivery': existing['status']}
         if any(f['id'] == key for f in self.app.automation.data['fires']):
@@ -123,6 +125,9 @@ class Reports:
             except ValueError as exc:
                 fallback = str(exc)
             else:
+                if result.get('duplicate'):
+                    # A retry of a hand-off the workflow already took; sending it directly too would deliver it twice.
+                    return {'route': 'workflow trigger ' + rules[0]['name'], 'recipient': '', 'delivery': 'already recorded'}
                 actions = result.get('actions', [])
                 if actions:
                     return {'route': 'workflow trigger ' + rules[0]['name'], 'recipient': ', '.join(a['targetName'] for a in actions),

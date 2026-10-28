@@ -161,19 +161,19 @@ def backtest(rule, history, now, hours=24):
         by_agent.setdefault(row['agentId'], []).append(row)
     result = {'fires': 0, 'fallbacks': 0, 'agents': {}, 'hours': hours}
     for agent, rows in by_agent.items():
-        fires = []
+        fires, fallback_at = [], None
         for index, row in enumerate(rows):
             end = rows[index + 1]['at'] if index + 1 < len(rows) else now
             if not matches(rule, {'state': row['state']}):
                 continue
             moment = max(row['at'] + rule['when']['forMinutes'] * 60, start)
-            fell_back = False
             while moment <= end:
                 recent = [at for at in fires if at > moment - rule['windowHours'] * 3600]
                 if rule['maxFires'] and len(recent) >= rule['maxFires']:
-                    if not fell_back and rule['thenAction'] != 'none':
+                    # As live: one fallback after the latest regular fire, not one per matching interval.
+                    if rule['thenAction'] != 'none' and (fallback_at is None or fallback_at < recent[-1]) and moment >= start:
                         result['fallbacks'] += 1
-                        fell_back = True
+                        fallback_at = moment
                     break
                 fires.append(moment)
                 moment += rule['cooldownMinutes'] * 60
@@ -184,6 +184,12 @@ def backtest(rule, history, now, hours=24):
     return result
 
 
+# How long a just-started agent counts as working before the session monitor sees it.
+STARTING_SECONDS = 120
+# Fires that may have reached their recipient, or still will: never send these again.
+LIVE_STATUSES = ('pending', 'sending', 'held', 'sent', 'unconfirmed')
+
+
 class Automation:
     def __init__(self, app, clock=time.time):
         self.app, self.clock = app, clock
@@ -191,6 +197,9 @@ class Automation:
         # Delivery checks run under the control and store locks; they use their own lock
         # so a dispatch never waits on a tick that is itself waiting to dispatch.
         self.hold_lock = threading.Lock()
+        # New work let through recently, by agent: the session monitor reports it as working
+        # only on its next poll, so without this one tick could start more agents than the limit.
+        self.started = {}
         self.path = app.root / '.runtime' / 'automation.json'
         self.data = {'fires': [], 'paused': {}, 'escalations': [], 'throttled': {}, 'throttleLog': []}
         if self.path.exists():
@@ -226,7 +235,9 @@ class Automation:
         sessions = monitor.get('sessions', {})
         recipients = {a['id'] for a in agents}
         if limits.get('maxWorkingAgents'):
-            working = [a for a in fleet['agents'] if a['id'] not in recipients and sessions.get(session_key(a), {}).get('status') == 'working']
+            recent = self.clock() - STARTING_SECONDS
+            working = [a for a in fleet['agents'] if a['id'] not in recipients and (sessions.get(session_key(a), {}).get('status') == 'working'
+                       or self.started.get(fleet['id'] + ':' + a['id'], 0) > recent)]
             if len(working) >= limits['maxWorkingAgents']:
                 return 'Throttled: ' + str(len(working)) + ' agents are working (limit ' + str(limits['maxWorkingAgents']) + ').'
         health = {a['id']: self.app.health.get(fleet['id'], a['id']) or {} for a in fleet['agents']}
@@ -257,6 +268,9 @@ class Automation:
         reason = self.throttle_reason(fleet, agents, monitor) if throttle else ''
         now = self.clock()
         with self.hold_lock:
+            if throttle and not reason:
+                for agent in agents:
+                    self.started[fleet_id + ':' + agent['id']] = now
             for agent in agents:
                 key = fleet_id + ':' + agent['id']
                 started = self.data['throttled'].get(key)
@@ -406,8 +420,10 @@ class Automation:
     def settle(self, fleet, fire):
         receipt = next((c for c in self.app.controls.snapshot(full=True) if c['id'] == fire.get('controlId')), None)
         if not receipt and self.clock() - fire.get('sentAt', fire['at']) > 600:
-            # The receipt was lost (for example a damaged controls file); nothing can confirm delivery.
-            fire.update(status='failed', detail='No delivery receipt was recorded; check the session.')
+            # The receipt was lost (for example a damaged controls file). The message may have landed,
+            # so it is not retried; the operator checks the session.
+            fire.update(status='unconfirmed', detail='No delivery receipt was recorded; check the session.')
+            self.escalate_failure(fleet, fire)
             return True
         if not receipt or receipt['status'] == 'sending':
             return False
@@ -420,6 +436,10 @@ class Automation:
         elif receipt['status'] == 'completed':
             fire.update(status='sent', detail=detail)
             self.park(fleet, fire)
+        elif receipt['status'] == 'unknown' or any(t['status'] in ('unknown', 'sending', 'waiting') for t in targets):
+            # A timeout or a restart mid-send: the message may have been accepted, so it is never resent.
+            fire.update(status='unconfirmed', detail=detail)
+            self.escalate_failure(fleet, fire)
         else:
             fire.update(status='failed', detail=detail)
             if fire.get('fallback') or fire['action'] == 'handoff':
@@ -445,10 +465,11 @@ class Automation:
         if any(f['status'] in ('pending', 'sending', 'held') for f in fires):
             return False  # resolve() owns unfinished fires.
         last = fires[-1] if fires else None
-        if last and now - last['at'] < rule['cooldownMinutes'] * 60:
+        # The cooldown runs from delivery: a fire held for a while must not let the next one follow straight after it.
+        if last and now - max(last['at'], last.get('sentAt', 0)) < rule['cooldownMinutes'] * 60:
             return False
         # Only attempts that reached the agent, or failed outright, use up the rule's budget.
-        regular = [f for f in fires if not f.get('fallback') and f['status'] in ('sent', 'failed')]
+        regular = [f for f in fires if not f.get('fallback') and f['status'] in ('sent', 'failed', 'unconfirmed')]
         recent = [f for f in regular if f['at'] > now - rule['windowHours'] * 3600]
         action, fallback = rule['action'], False
         if health['signals'] and health['signals'][0].get('kind') == 'closed-session' and action == 'reprompt':

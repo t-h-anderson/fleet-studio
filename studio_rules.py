@@ -5,6 +5,8 @@ and dispatch share this listing and timeline. Each keeps the delivery path it
 was proven on: routing through the receipt and contract pipeline in
 studio_triggers, recovery and dispatch through studio_automation.
 """
+import re
+
 from studio_dispatch import clean_dispatch
 
 KIND_LABELS = {'event': 'reports a hand-off', 'condition': 'changes state', 'timer': 'on a timer', 'idle': 'when idle'}
@@ -14,7 +16,9 @@ def routing_rule(fleet, runtime, trigger):
     names = {r['id']: r['name'] for r in fleet.get('roles', [])}
     deployed = next((t for t in runtime.get('triggers', []) if t['id'] == trigger['id']), None)
     if trigger['kind'] == 'event':
-        when = (names.get(trigger['sourceRoleId'], 'A role')) + ' reports "' + trigger['eventName'] + '"'
+        # Generated event names ("handoff-9e32e493") mean nothing to a person; say what happens instead.
+        generated = re.fullmatch(r'handoff-[0-9a-f]{6,}', trigger['eventName'])
+        when = names.get(trigger['sourceRoleId'], 'A role') + (' hands off' if generated else ' reports "' + trigger['eventName'] + '"')
     elif trigger['kind'] == 'condition':
         when = names.get(trigger['sourceRoleId'], 'A role') + ' ' + {'turn-completed': 'finishes a turn'}.get(trigger['condition'], 'is ' + trigger['condition'])
     else:
@@ -61,13 +65,16 @@ def flow(app, fleet):
     from studio_health import PROBLEM_STATES
     now = app.dispatch.clock()
     roles = {r['id']: {'waiting': 0, 'stuck': 0, 'working': 0, 'claimed': 0} for r in fleet.get('roles', [])}
+    from studio_bindings import session_key
     agents = {a['id']: a for a in fleet['agents']}
+    sessions = app.status().get('sessions', {})
     for agent in fleet['agents']:
         health = app.health.get(fleet['id'], agent['id']) or {}
         for role_id in agent.get('roleIds', []):
             if role_id in roles:
                 roles[role_id]['stuck'] += health.get('state') in PROBLEM_STATES
-                roles[role_id]['working'] += health.get('state') == 'productive'
+                # Same source as the header's count: a session processing a turn right now.
+                roles[role_id]['working'] += sessions.get(session_key(agent), {}).get('status') == 'working'
     try:
         waiting = app.dispatch.tickets_by_role(fleet, clean_dispatch(fleet.get('dispatch')))
     except Exception:

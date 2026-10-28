@@ -45,6 +45,18 @@ EXPLORE_COMMAND = re.compile(
     r'|^kubectl\s+(get|describe|logs)\b|^(gh|glab)\s+(issue|pr|mr|repo)\s+(view|list|diff|status)\b'
     r'|^(gh|glab)\s+api\b(?!.*(-X|--method)\s*(POST|PATCH|PUT|DELETE))'
     r'|\bworkflow_client(\.py)?[\'"]?\s+instructions\b')
+# Commands that change files or run the project's code. Anything not recognised is `other`: neither progress
+# nor proof of it, so an agent cannot look productive by running `git fetch` or `jq` in a loop.
+WORK_COMMAND = re.compile(
+    r'^(python[0-9.]*|py|pytest|tox|nox|uv|poetry|pip[0-9.]*\s+install|conda\s+(install|run)|node|deno|bun|npm|npx|pnpm|yarn'
+    r'|jest|vitest|mocha|tsc|eslint|prettier|black|ruff|flake8|mypy|pylint|isort'
+    r'|go|cargo|rustc|gcc|g\+\+|clang|make|cmake|ninja|bazel|mvn|gradle|\./gradlew|\./mvnw|dotnet|msbuild|swift|xcodebuild'
+    r'|java|javac|ruby|bundle|rake|rspec|perl|php|composer|phpunit|Rscript|julia|matlab|octave'
+    r'|docker\s+(build|run|compose)|docker-compose|kubectl\s+(apply|create|delete|rollout|scale)|terraform|ansible-playbook|helm\s+(install|upgrade)'
+    r'|mkdir|cp|mv|rm|rmdir|touch|chmod|ln|patch|tar|unzip|sed\s+-i|perl\s+-p?i'
+    r'|git\s+(add|commit|push|pull|checkout|switch|merge|rebase|cherry-pick|restore|reset|stash|tag|apply|am|revert|rm|mv|worktree|clone|init)'
+    r'|gh\s+(pr\s+(create|merge)|release\s+create)|glab\s+mr\s+(create|merge)'
+    r'|(bash|sh|zsh|pwsh|powershell)\s+\S+|\./\S+|\S+\.(sh|py|js|ts|rb|pl|ps1)\b)')
 # Redirecting into a file is writing, whatever the command.
 WRITE_REDIRECT = re.compile(r'(^|[^0-9&>])>{1,2}\s*(?!&|/dev/null)\S|\btee\b')
 WORK_TOOLS = {'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'apply_patch', 'Task', 'Agent'}
@@ -202,7 +214,7 @@ def classify_command(command):
         return 'wait'
     if EXPLORE_COMMAND.search(command):
         return 'explore'
-    return 'work'
+    return 'work' if WORK_COMMAND.match(command) else 'other'
 
 
 def classify(tool, label, script=None):
@@ -223,7 +235,7 @@ def classify(tool, label, script=None):
         if not parts:
             return 'other'
         found = {classify_pipeline(part[:SIGNATURE_LIMIT * 4]) for part in parts[:50]}
-        return next(cls for cls in ('work', 'admin', 'wait', 'explore') if cls in found)
+        return next(cls for cls in ('work', 'admin', 'wait', 'explore', 'other') if cls in found)
     return 'other'
 
 

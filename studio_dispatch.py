@@ -143,8 +143,12 @@ class Dispatch:
     def ready(self, fleet, agent, monitor, claims):
         if not agent['enabled'] or not agent.get('sessionId'):
             return False
+        from studio_bindings import session_key
         health = self.app.health.get(fleet['id'], agent['id']) or {}
-        if health.get('openWork') or health.get('state') in PROBLEM_STATES or health.get('state') in ('waiting', 'productive'):
+        if health.get('openWork') or health.get('state') in PROBLEM_STATES or health.get('state') == 'waiting':
+            return False
+        # "Productive" lasts ten minutes after a turn; an agent whose turn has ended can take the next ticket now.
+        if (monitor.get('sessions', {}).get(session_key(agent)) or {}).get('status') == 'working':
             return False
         # A claim older than the agent's last done or hand-off report was settled by that report.
         settled = self.settled_at(fleet['id']).get(agent['id'], 0)
@@ -249,7 +253,7 @@ class Dispatch:
             recipient = named or self.app.reports.pick(fleet, agent, role_ids)
             message = ('[Fleet Studio] ' + agent['name'] + ' is blocked and needs you\n\n' + note + '\n'
                        + ('Ticket: ' + ticket + '\n' if ticket else '')
-                       + 'When it is sorted, report unblocked or done so ' + agent['name'] + ' is woken.')
+                       + 'When it is sorted, report unblocked (with a note on what changed) so ' + agent['name'] + ' is woken.')
             self.deliver(fleet, recipient, message, '', 'blocked-notify', 'Blocked: ' + agent['name'], note, source=agent,
                          key='blocked-' + hashlib.sha256((agent['id'] + retry_id).encode()).hexdigest()[:24] if retry_id else None)
             return {'waitingOn': recipient['id'], 'recipient': recipient['name'],
@@ -258,13 +262,20 @@ class Dispatch:
         self.app.automation.escalate(fleet, agent, {'name': 'Blocked report'}, record)
         return {'next': 'Recorded and passed to the operator. Stop here; Studio will wake you once they have looked at it.'}
 
-    def wake_waiting(self, fleet, resolver):
-        """When someone reports done or unblocked, wake each agent that was waiting on them, once."""
+    def wake_waiting(self, fleet, resolver, kind, ticket='', recipient_id=''):
+        """Wake each agent waiting on the resolver, once, when the resolver's report is about its blocker:
+        an unblocked report, done on the blocked ticket, or a hand-off to the blocked agent. Unrelated
+        reports leave it alone, so a busy owner does not wake it with every ticket they close."""
+        from studio_progress import task_key
         with self.app.progress.lock, closing(self.app.progress.connect()) as db:
             notes = [(row['agent'], json.loads(row['data'])) for row in
                      db.execute('SELECT agent, data FROM agent_notes WHERE fleet=?', (fleet['id'],))]
         for agent_id, note in notes:
             if note.get('kind') != 'blocked' or note.get('waitingOn') != resolver['id'] or note.get('woken'):
+                continue
+            related = (kind == 'unblocked' or recipient_id == agent_id
+                       or (kind == 'done' and ticket and note.get('ticket') and task_key(ticket) == task_key(note['ticket'])))
+            if not related:
                 continue
             agent = next((a for a in fleet['agents'] if a['id'] == agent_id), None)
             if not agent:

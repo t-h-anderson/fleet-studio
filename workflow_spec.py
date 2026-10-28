@@ -360,6 +360,7 @@ def brief_document(fleet, spec, agent, release_id, app_root):
     if agent.get("notes"):
         lines += ["## Your scope", "", agent["notes"], ""]
     outgoing = [link for link in fleet.get("roleLinks", []) if link["source"] in agent.get("roleIds", [])]
+    next_roles = sorted({names[link["target"]] for link in outgoing if link["target"] in names and link["target"] not in agent.get("roleIds", [])})
     if outgoing:
         lines += ["## Hand-offs", ""]
         for link in outgoing:
@@ -382,6 +383,8 @@ def brief_document(fleet, spec, agent, release_id, app_root):
               "python " + client + " report handoff" + identity + " --to " + sample("<who>") + " --note " + sample("<what to pick up>"),
               "```", "",
               "When you report done, Studio passes the work to the next role and sends you your next ticket, so you never need to go looking. "
+              + (("More than one role can take your finished work (" + ", ".join(next_roles) + "), so name one: report done --to <role>. ")
+                 if len(next_roles) > 1 else "") +
               "Add --to <who> to a blocked report and Studio tells them, then wakes you when they report back. "
               "Studio infers your current ticket; add --ticket <URL> to name a different one. "
               "For long notes use --note-file <path>, or --note - to read standard input. "

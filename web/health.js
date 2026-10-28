@@ -25,7 +25,9 @@ function healthTitle(id){
 function stuckCount(agents){return agents.filter(a=>HEALTH_PROBLEMS.includes(healthState(a.id))).length;}
 function healthBadge(h){
  if(!h)return '<span class="health-badge health-unknown">No telemetry</span>';
- return '<span class="health-badge health-'+h.state+'">'+esc(HEALTH_LABELS[h.state]||h.state)+'</span>';
+ // A closed session is not stalled work an agent can resume; someone has to reopen it.
+ const label=h.signals?.[0]?.kind==='closed-session'?'Needs reopening':HEALTH_LABELS[h.state]||h.state;
+ return '<span class="health-badge health-'+h.state+'">'+esc(label)+'</span>';
 }
 function tokenCount(n){
  n=Number(n)||0;
@@ -88,7 +90,7 @@ function healthRow(row){
   '<td class="health-evidence">'+esc((signal?.message?signal.message+hint:'')||h?.polling||(h?.state==='no-telemetry'?'Studio cannot read this agent\'s transcript (remote, or no linked session); only session status is shown.':h?'—':'Waiting for the first observation'))+'</td>'+
   '<td>'+tokenCount(h?.tokensLastHour)+'<small>'+tokenCount(h?.tokens24h)+' / 24h</small></td>'+
   '<td>'+mixBar(h?.classes24h)+'<small>'+(h?h.calls24h+' calls · '+h.errors24h+' failed':'')+'</small></td>'+
-  '<td>'+(h?tokenCount(h.wasteTokens24h)+'<small>'+(h.tokens24h?Math.round(100*h.wasteTokens24h/h.tokens24h):0)+'% of 24h</small>':'—')+'</td>'+
+  '<td>'+(h?'≈'+tokenCount(h.wasteTokens24h)+'<small>'+(h.tokens24h?Math.round(100*h.wasteTokens24h/h.tokens24h):0)+'% of 24h</small>':'—')+'</td>'+
   '<td><div class="row-actions">'+
    '<button class="button small" data-health-nudge="'+a.id+'" title="Send a message now" aria-label="Nudge '+esc(a.name)+'">Nudge</button>'+
    '<button class="button small" data-health-agent="'+a.id+'" title="Edit this agent\'s scope notes and roles">Edit scope</button>'+
@@ -134,6 +136,7 @@ function renderHealth(){
  $('visible-count').textContent=rows.length;
  $('content').innerHTML=
   setupChecklist(data)+
+  (data.deployment?.paused?'<div class="backlog-notice">Workflow automation is paused, so no rule, hand-off or dispatch message is sent. <button class="text-button" data-view-link="workflow">Resume in Workflow</button></div>':'')+
   (auto.escalations.length?'<div class="backlog-notice">'+auto.escalations.length+' escalation(s) need you. <button class="text-button" data-view-link="automation">Review</button></div>':'')+
   '<div class="health-summary">'+['looping','stalled','admin-heavy','burning','waiting','productive','idle','offline','no-telemetry'].map(s=>'<div class="health-tile health-'+s+'"><span>'+HEALTH_LABELS[s]+'</span><strong>'+(counts[s]||0)+'</strong></div>').join('')+'</div>'+
   '<div class="table-wrap"><table class="health-table"><thead><tr><th>AGENT</th><th>HEALTH</th><th>WHY</th><th>TOKENS / H</th><th>CALL MIX 24H</th><th>WASTE 24H</th><th></th></tr></thead><tbody>'+
@@ -152,8 +155,11 @@ async function healthClick(e){
    await showControl('message',[b.dataset.healthNudge],'[Fleet Studio] '+(evidence?evidence+'\n\n':'')+'Step back, state the next concrete action toward your goal, and take it.');
   }
   // Tweaks open in place so the operator keeps the health context.
-  if(b.dataset.healthRole)openEditor('role',b.dataset.healthRole);
-  if(b.dataset.healthAgent)openEditor('agent',b.dataset.healthAgent);
+  if(b.dataset.healthRole||b.dataset.healthAgent){
+   openEditor(b.dataset.healthRole?'role':'agent',b.dataset.healthRole||b.dataset.healthAgent);
+   // Briefs are frozen at deploy, so say when a tweak reaches the agent.
+   $('editor-fields').insertAdjacentHTML('afterbegin','<p class="field-hint deploy-hint">Saved to the draft. Agents see the change after you deploy: use Review &amp; deploy at the top.</p>');
+  }
   if(b.id==='health-sort-problems'){healthSort='problems';renderHealth();}
   if(b.dataset.healthResume){await api('/api/automation/resume',{fleetId:activeId,agentId:b.dataset.healthResume});await loadHealth();toast('Automatic deliveries resumed.');}
  }catch(error){toast(error.message,true);}

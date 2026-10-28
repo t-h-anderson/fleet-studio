@@ -34,7 +34,7 @@ from studio_telemetry import Telemetry
 from studio_health import Health, clean_health_settings
 from studio_reports import Reports
 from studio_dispatch import Dispatch, clean_dispatch
-from studio_automation import Automation, backtest, clean_alerts, clean_automations, clean_throttles, watches
+from studio_automation import Automation, backtest, clean_alerts, clean_automations, clean_throttles, default_automations, watches
 from studio_reconciliation import Reconciliation
 from studio_goals import Goals
 from studio_agents import Runtimes, clean_binding, clean_hosts, tmux_launch, LOCAL_HOST
@@ -157,7 +157,8 @@ def validate_fleets(value, host_ids=()):
             backlog = clean_config(raw.get("backlog"), agent_ids, design.get("roleSource"))
             health = clean_health_settings(raw.get("health"))
             role_ids = {r["id"] for r in design["roles"]}
-            automations = clean_automations(raw.get("automations"), role_ids, agent_ids)
+            # A fleet that never configured rules gets the recommended ones, switched on; an empty list stays empty.
+            automations = clean_automations(raw["automations"] if "automations" in raw else default_automations(fid), role_ids, agent_ids)
             throttles = clean_throttles(raw.get("throttles"), role_ids)
             alerts = clean_alerts(raw.get("alerts"))
             dispatch = clean_dispatch(raw.get("dispatch"), [s["id"] for s in (raw.get("workflow") or {}).get("states", [])])

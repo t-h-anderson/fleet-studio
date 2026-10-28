@@ -13,6 +13,12 @@ function ruleSummary(r){
   '. At most '+(r.maxFires||'unlimited')+(r.maxFires?' time(s)':'')+' per agent in '+(r.windowHours||24)+' h, '+(r.cooldownMinutes||15)+' min apart'+
   (r.maxFires&&r.thenAction!=='none'?', then '+ACTION_LABELS[r.thenAction].toLowerCase():'')+'.';
 }
+function throttledNow(){
+ const rows=automationData().throttled||[];
+ if(!rows.length)return '<p class="field-hint">No agent is waiting on a limit now.</p>';
+ const name=id=>current().agents.find(a=>a.id===id)?.name||'Removed agent';
+ return '<p class="field-hint"><strong>Waiting on a limit now:</strong> '+rows.map(r=>esc(name(r.agentId))+' ('+ago(r.since).toLowerCase()+')').join(', ')+'. New work for them is sent once the fleet is back under its limits.</p>';
+}
 function agentOptions(f,roleId,selected){
  const agents=f.agents.filter(a=>!roleId||(a.roleIds||[]).includes(roleId));
  return '<option value="">Every agent in the role</option>'+agents.map(a=>'<option value="'+a.id+'"'+(a.id===selected?' selected':'')+'>'+esc(a.name)+'</option>').join('');
@@ -40,7 +46,7 @@ function throttleForm(){
   field('Fleet tokens per hour','fleetTokensPerHour',t.fleetTokensPerHour??'','type="number" min="1000" placeholder="No limit"')+'</div>'+
   '<div class="form-row">'+current().roles.filter(r=>r.kind!=='subagent').map(r=>field(esc(r.name)+' tokens per hour','role-'+r.id,roleLimits[r.id]??'','type="number" min="1000" placeholder="No limit" data-role-limit="'+r.id+'"')).join('')+'</div>'+
   field('Escalation webhook (Slack-compatible JSON)','webhookUrl',alerts.webhookUrl||'','type="url" placeholder="https://hooks.example/…"')+
-  '<p class="field-hint">Automatic sends that would exceed a limit wait, and the waiting time is shown in Throughput.</p><button class="button primary small" type="submit">Save limits</button></form>';
+  throttledNow()+'<p class="field-hint">Automatic sends that would exceed a limit wait, and the waiting time is shown in Throughput.</p><button class="button primary small" type="submit">Save limits</button></form>';
 }
 function renderAutomation(){
  const f=current(),rules=(f.automations||[]).filter(r=>(r.name+' '+r.when.signal).toLowerCase().includes(query.toLowerCase())),data=automationData();
@@ -49,7 +55,7 @@ function renderAutomation(){
   (data.workflowPaused?'<div class="backlog-notice">Workflow automation is paused, so these automations are paused too. Resume it from Progress or Workflow.</div>':'')+
   (data.escalations.length?'<section class="escalations"><h3>Needs you</h3>'+data.escalations.map(e=>'<div class="progress-attention"><span class="stage-tag">'+esc(e.ruleName)+'</span><strong>'+esc(e.agentName)+'</strong><span>'+esc(e.message)+'</span><button class="button small" data-escalation-ack="'+e.id+'" aria-label="Dismiss escalation for '+esc(e.agentName)+'">Done</button></div>').join('')+'</section>':'')+
   '<div class="definition-toolbar"><div><strong>Recovery rules act on health, not on a schedule.</strong><p>Changes apply on the next check; no deployment is needed. Each rule limits itself, then falls back once.</p></div><div>'+
-  (data.presets?.length?'<label class="checkbox-field">For <select id="automation-preset-role" aria-label="Role for recommended automations"><option value="">all roles</option>'+current().roles.filter(r=>r.kind!=='subagent').map(r=>'<option value="'+r.id+'">'+esc(r.name)+'</option>').join('')+'</select></label><button class="button small" id="automation-presets">Add recommended (off)</button>':'')+'<button class="button small" id="automation-new">'+icon('plus')+'New automation</button></div></div>'+
+  (data.presets?.length?'<label class="checkbox-field">For <select id="automation-preset-role" aria-label="Role for recommended automations"><option value="">all roles</option>'+current().roles.filter(r=>r.kind!=='subagent').map(r=>'<option value="'+r.id+'">'+esc(r.name)+'</option>').join('')+'</select></label><button class="button small" id="automation-presets">Add recommended</button>':'')+'<button class="button small" id="automation-new">'+icon('plus')+'New automation</button></div></div>'+
   '<h3>Recovery</h3>'+
   (rules.length?'<div class="roles-grid">'+rules.map(ruleCard).join('')+'</div>':'<p class="field-hint">No recovery rules yet. Add the recommended set to reprompt loops and stalls, refocus admin-heavy agents and escalate token burn.</p>')+
   routingSection()+dispatchSection()+
@@ -94,9 +100,9 @@ function renderThroughput(){
  const tiles=[
   ['Tickets closed · 24h',progress&&!progress.error&&!progress.tracker?.url?'Connect tracker':closed??'—'],
   ['Fresh tokens · 24h',tokenCount(tokens)],
-  ['Estimated waste · 24h',tokenCount(wasted)+(tokens?' ('+Math.round(100*wasted/tokens)+'%)':'')],
+  ['Estimated waste · 24h','≈'+tokenCount(wasted)+(tokens?' ('+Math.round(100*wasted/tokens)+'%)':'')],
   ['Tokens per closed ticket',closed?tokenCount(Math.round(tokens/closed)):'—'],
-  ['Throttled · 24h',Math.round((auto.throttledSeconds24h||0)/60)+' agent-min'],
+  ['Throttled · 24h',Math.round((auto.throttledSeconds24h||0)/60)+' agent-min'+(auto.throttled.length?' · '+auto.throttled.length+' now':'')],
   ['Recovery that helped · 24h',auto.delivered?recovered+' of '+auto.delivered+' judged':'—'],
  ];
  $('visible-count').textContent=current().roles.length;
@@ -178,12 +184,12 @@ async function automationClick(e){
  try{
   if(b.id==='automation-new')openEditor('automation');
   if(b.id==='automation-presets'){
-   // Presets arrive switched off with a backtest, so the operator sees what they would do first.
+   // Presets arrive switched on, with a backtest showing what they would have done; any can be turned off.
    const roleId=$('automation-preset-role')?.value||'',suffix=roleId?' · '+roleLabel(roleId):'';
-   const presets=automationData().presets.map(p=>({...clone(p),name:p.name+suffix,id:uid(),enabled:false,roleId,message:'',handoffRoleId:'',parkSource:true,windowHours:24,pauseMinutes:60}));
+   const presets=automationData().presets.map(p=>({...clone(p),name:p.name+suffix,id:uid(),enabled:true,roleId,message:'',handoffRoleId:'',parkSource:true,windowHours:24,pauseMinutes:60}));
    const existing=new Set((current().automations||[]).map(r=>r.name));
    const added=presets.filter(p=>!existing.has(p.name));
-   await saveAutomations(list=>list.push(...added),'Recommended automations added, switched off. Check the backtests, then turn on the ones you want.');
+   await saveAutomations(list=>list.push(...added),'Recommended automations added and running. Their backtests show what they would have done; turn off any you do not want.');
    await Promise.allSettled(added.map(async preset=>{
     const saved=current().automations.find(r=>r.id===preset.id);
     if(saved)backtests.set(saved.id,await api('/api/automation/backtest',{fleetId:activeId,rule:saved,hours:24}));

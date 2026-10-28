@@ -330,6 +330,19 @@ try{
  assert.ok(!afterRemove.throttles?.roleTokensPerHour?.[tempRole],'Token limit of the removed role remains');
  assert.deepEqual(errors,[]);
  checks.push('Rule editor offers only agents in the chosen role; removing a role takes its rules and limits with it');
+ // Round 4: rules read as what happens, throttles and drafts are explicit, tweaks say when they land.
+ await page.locator('#nav-automation').click();await page.locator('.automation-card').first().waitFor();
+ await until(async()=>(await page.locator('#content').innerText()).includes('hands off'),'Routing rules still show generated event names');
+ assert.doesNotMatch(await page.locator('#content').innerText(),/reports "handoff-[0-9a-f]+"/);
+ assert.match(await page.locator('#automation-presets').innerText(),/^Add recommended$/);
+ assert.match(await page.locator('#throttle-form').innerText(),/waiting on a limit now/i);
+ await page.locator('#nav-board').click();await page.locator('#board-draft-label').waitFor();
+ await page.locator('#nav-health').click();await page.locator('.health-table').waitFor();
+ await page.locator('[data-health-role]').first().click();
+ assert.match(await page.locator('#editor-fields').innerText(),/Agents see the change after you deploy/);
+ await page.locator('#cancel-editor').click();
+ assert.deepEqual(errors,[]);
+ checks.push('Routing rules read as hand-offs; presets add switched on; throttled agents listed; board labelled Draft; tweaks say they land on deploy');
  console.log(JSON.stringify({passed:true,checks},null,2));
 }finally{
  if(browser)await browser.close();

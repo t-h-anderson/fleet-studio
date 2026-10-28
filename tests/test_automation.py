@@ -53,6 +53,13 @@ class BacktestTests(unittest.TestCase):
                         {'at': now - 3600 + i * 600 + 300, 'agentId': 'a', 'state': 'productive'}]
         self.assertEqual(backtest(cleaned, history, now)['fallbacks'], 1)
 
+    def test_a_named_agent_decides_who_a_rule_watches(self):
+        from studio_automation import watches
+        alice, bob = {'id': 'a', 'roleIds': ['writer']}, {'id': 'b', 'roleIds': ['reviewer']}
+        self.assertTrue(watches({'roleId': 'reviewer', 'agentId': 'a'}, alice))
+        self.assertFalse(watches({'roleId': 'reviewer', 'agentId': 'a'}, bob))
+        self.assertEqual([watches({'roleId': 'writer'}, x) for x in (alice, bob)], [True, False])
+
     def test_validation(self):
         with self.assertRaisesRegex(ValueError, 'health signal'):
             clean_automations([rule(when={'signal': 'bored'})], set())

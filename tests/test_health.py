@@ -183,6 +183,24 @@ class StuckTests(unittest.TestCase):
         health = assess({'status': 'closed', 'backend': 'codex'}, [turn([], NOW - 30)], NOW, DEFAULTS, open_work=True)
         self.assertEqual(health['signals'][0]['kind'], 'closed-session')
 
+    def test_polling_that_exits_non_zero_is_waiting_not_looping(self):
+        polls = [call('Bash', {'command': 'gh pr checks 42'}, NOW - 300 + i * 60, error=True) for i in range(5)]
+        health = assess({'status': 'working'}, [turn(polls, NOW - 10, status='open')], NOW, DEFAULTS)
+        self.assertNotEqual(health['state'], 'looping')
+        self.assertEqual(turn_waste(turn(polls, NOW), DEFAULTS)['loop'], 0)
+
+    def test_waste_never_exceeds_what_the_turn_spent(self):
+        waits = [call('Bash', {'command': 'sleep 30'}, NOW - 100 + i) for i in range(8)]
+        admin = [call('Bash', {'command': 'python fleet_progress.py --kind progress-updated'}, NOW - 50 + i) for i in range(8)]
+        for calls in (waits, admin):
+            self.assertLessEqual(sum(turn_waste(turn(calls, NOW), DEFAULTS).values()), 1000)
+
+    def test_a_turn_waiting_on_the_person_is_not_stalled(self):
+        question = call('AskUserQuestion', {'questions': []}, NOW - 3600)
+        question['open'] = True
+        health = assess({'status': 'working'}, [turn([question], NOW - 3600, status='open')], NOW, DEFAULTS, open_work=True)
+        self.assertEqual((health['state'], health['signals'][0]['kind']), ('waiting', 'needs-you'))
+
     def test_failed_work_is_not_recovery(self):
         failing = [call('Bash', {'command': 'make'}, NOW - 10, error=True)]
         self.assertIsNone(assess({'status': 'working'}, [turn(failing, NOW - 5)], NOW, DEFAULTS)['lastWorkAt'])

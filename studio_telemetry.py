@@ -55,7 +55,7 @@ SHELL_TOOLS = {'Bash', 'shell', 'exec_command', 'shell_command', 'local_shell', 
 LOOP_EXEMPT = {'TodoWrite', 'update_plan'}
 # Names that mark a value as a credential, wherever it appears: env vars, flags, form fields, headers, JSON keys.
 # Anchored to the start of a name and bounded, so a long run of letters cannot backtrack.
-SECRET_CORE = r'[\w.-]{0,40}?(?:pass(?:word|wd)?|pwd|token|secret|api[_-]?key|apikey|access[_-]?key|private[_-]?key|auth\w{0,20}|credential|cookie|session)[\w.-]{0,40}'
+SECRET_CORE = r'[\w.-]{0,40}?(?:pass(?:word|wd)?|pwd|token|secret|api[_-]?key|apikey|access[_-]?key|private[_-]?key|auth\w{0,20}|credential|cookie|session|pw(?![a-z]))[\w.-]{0,40}'
 SECRET_NAME = r'(?<![\w.-])' + SECRET_CORE
 VALUE = r'(?:"[^"]*"|\'[^\']*\'|[^\s&;|\'"]+)'
 SECRET_PATTERNS = (
@@ -65,10 +65,16 @@ SECRET_PATTERNS = (
     (re.compile(r'\b([A-Z][A-Z0-9_]*)=' + VALUE), r'\1=…'),
     (re.compile(r'(' + SECRET_NAME + r')=' + VALUE, re.IGNORECASE), r'\1=…'),
     (re.compile(r'((?<![\w.-])--?' + SECRET_CORE + r'[=\s]+)' + VALUE, re.IGNORECASE), r'\1…'),
+    # An Authorization value is a scheme then the credential (e.g. git -c http.extraheader="AUTHORIZATION: basic …").
+    (re.compile(r'(authorization\s*:\s*(?:(?:basic|bearer|token|digest)\s+)?)[^\s\'"]+', re.IGNORECASE), r'\1…'),
     (re.compile(r'(["\']?' + SECRET_NAME + r'["\']?\s*:\s*)("[^"]*"|\'[^\']*\'|[^\s,}\'"]+)', re.IGNORECASE), r'\1…'),
     # curl/wget credentials and any header value: headers are where API keys and cookies travel.
     (re.compile(r'(\s(?:-u|--user|--proxy-user)[=\s]+)' + VALUE), r'\1…'),
-    (re.compile(r'(\s(?:-H|--header)[=\s]+["\']?[\w-]+:\s*)[^"\']*'), r'\1…'),
+    (re.compile(r'(\s(?:-H|--header)[=\s]*["\']?[\w-]+:\s*)[^"\']*'), r'\1…'),
+    (re.compile(r'(\bredis-cli\b[^|;&]{0,200}?\s-a)\s*(?=\S)\S+'), r'\1 …'),
+    # Webhook and bot URLs carry their secret in the path.
+    (re.compile(r'(hooks\.slack\.com/services|discord(?:app)?\.com/api/webhooks)/[^\s\'"?]+'), r'\1/…'),
+    (re.compile(r'\bbot\d+:[\w-]{20,}'), 'bot…'),
     (re.compile(r'(\b(?:sshpass|docker\s+login|podman\s+login|helm\s+registry\s+login)\b[^|;&]{0,200}?\s-p)\s*(?=\S)\S+'), r'\1 …'),
     # Bounded and anchored to the mysql word so long commands cannot backtrack quadratically.
     (re.compile(r'(\b(?:mysql|mariadb|mysqldump)\b[^|;&]{0,200}?\s-p)(?=\S)\S+'), r'\1…'),
@@ -77,7 +83,8 @@ SECRET_PATTERNS = (
     (re.compile(r'\b(ghp|gho|ghs|ghu|github_pat|glpat|xox[abpr]|sk|npm|hf|pypi)[-_][\w-]{8,}|\bAKIA[0-9A-Z]{16}\b|\bAIza[\w-]{20,}|\beyJ[\w-]+\.[\w-]+\.[\w-]+'), '…'),
     (re.compile(r'(https?://[^\s?\'"]+)\?[^\s\'"]*'), r'\1?…'),
     (re.compile(r'(\s(?:-m|--message|--body|-b|--title|--notes?|-F)\s+)("[^"]*"|\'[^\']*\'|\S+)'), r'\1"…"'),
-    (re.compile(r'://[^/\s:@]+:[^/\s@]+@'), '://…@'),
+    # URL credentials, with or without a password (https://<token>@host).
+    (re.compile(r'://[^/\s@]+@'), '://…@'),
 )
 EXIT_CODE = re.compile(r'(?:exit code|exited with code|exit_code)["\s:]*(-?\d+)', re.IGNORECASE)
 
@@ -147,7 +154,49 @@ def patch_files(text):
     return re.findall(r'^\*\*\* (?:Update|Add|Delete) File: (.+)$', text, re.MULTILINE)[:5]
 
 
-def classify(tool, label):
+# Shell steps that only set up the shell; they say nothing about what the command does.
+SETUP_COMMAND = re.compile(r'^(cd|pushd|popd|set|export|source|\.|true|false|:|exit|unset|alias|test|\[\[?)(\s|$)')
+# Shell grammar words; the command after one is what runs.
+KEYWORD = re.compile(r'^for\s+\w+(\s+in\b.*)?$|^(do|then|else|elif|if|while|until|!)\s+|^(done|fi|esac|\{|\})$')
+# Classification reads this much of a script; the rest of a huge command changes nothing.
+CLASSIFY_LIMIT = 4000
+SEPARATORS = ('&&', '||', ';', '|', '\n')
+
+
+def shell_parts(script):
+    """Commands of a script split at &&, ||, ;, | and newlines outside quotes."""
+    parts, current, quote, index = [], [], '', 0
+    while index < len(script):
+        char = script[index]
+        if quote:
+            quote = '' if char == quote else quote
+        elif char in '"\'':
+            quote = char
+        else:
+            separator = next((s for s in SEPARATORS if script.startswith(s, index)), None)
+            if separator:
+                parts.append(''.join(current))
+                current, index = [], index + len(separator)
+                continue
+        current.append(char)
+        index += 1
+    parts.append(''.join(current))
+    return [' '.join(part.split()) for part in parts if part.strip() and not part.strip().startswith('#')]
+
+
+def classify_command(command):
+    if re.match(r'(apply_patch|cat\s*>|tee)\b', command) or WRITE_REDIRECT.search(unquoted(command)):
+        return 'work'
+    if ADMIN_COMMAND.search(command) and not re.match(r'(rg|grep|ag|cat|less|head|tail)\b', command):
+        return 'admin'
+    if WAIT_COMMAND.search(command):
+        return 'wait'
+    if EXPLORE_COMMAND.search(command):
+        return 'explore'
+    return 'work'
+
+
+def classify(tool, label, script=None):
     if tool in WORK_TOOLS:
         return 'work'
     if tool in EXPLORE_TOOLS:
@@ -155,17 +204,17 @@ def classify(tool, label):
     if tool in WAIT_TOOLS:
         return 'wait'
     if tool in SHELL_TOOLS:
-        if not label:
-            return 'other'
-        if re.match(r'(apply_patch|cat\s*>|tee)\b', label) or WRITE_REDIRECT.search(unquoted(label)):
-            return 'work'
-        if ADMIN_COMMAND.search(label) and not re.match(r'(rg|grep|ag|cat|less|head|tail)\b', label):
-            return 'admin'
-        if WAIT_COMMAND.search(label):
+        text = (script if script is not None else label)[:CLASSIFY_LIMIT]
+        # A polling loop is waiting, whatever runs inside it.
+        if re.match(r'\s*(while|until)\b', text) and re.search(r'\bsleep\b', text):
             return 'wait'
-        if EXPLORE_COMMAND.search(label):
-            return 'explore'
-        return 'work'
+        # Every command in the script counts: `git status && pytest` runs the tests.
+        parts = [KEYWORD.sub('', p).strip() for p in shell_parts(text)]
+        parts = [p for p in parts if p and not SETUP_COMMAND.match(p)]
+        if not parts:
+            return 'other'
+        found = {classify_command(part[:SIGNATURE_LIMIT * 4]) for part in parts[:50]}
+        return next(cls for cls in ('work', 'admin', 'wait', 'explore') if cls in found)
     return 'other'
 
 
@@ -215,7 +264,8 @@ def call_metadata(tool, arguments):
     else:
         label, basis = '', fingerprint(arguments)
     label = redact(' '.join(label.split()))[:SIGNATURE_LIMIT]
-    return {'tool': tool[:80], 'cls': classify(tool, label), 'label': label, 'sig': digest(tool + '\0' + basis),
+    script = basis if tool in SHELL_TOOLS else None
+    return {'tool': tool[:80], 'cls': classify(tool, label, script), 'label': label, 'sig': digest(tool + '\0' + basis),
             **({'exempt': True} if tool in LOOP_EXEMPT else {})}
 
 
@@ -283,6 +333,7 @@ class TurnParser:
         self.current = None
         self.changed = {}
         self.pending_calls = {}
+        self.pending_turns = {}
         self.usage_by_message = {}
         self.message_turns = {}
         self.codex_total = None
@@ -300,6 +351,7 @@ class TurnParser:
             self.finish(previous, at)
         self.current = new_turn(self.session, turn_id, at, from_studio)
         self.pending_calls = {}
+        self.pending_turns = {}
         self.touch(self.current, at)
         return self.current
 
@@ -340,8 +392,12 @@ class TurnParser:
             self.dirty.setdefault(turn['id'], {})[call['seq']] = call
             if call_id:
                 self.pending_calls[call_id] = call
+                if turn is not self.current:
+                    self.pending_turns[call_id] = turn
                 if len(self.pending_calls) > PENDING_LIMIT:
-                    self.pending_calls.pop(next(iter(self.pending_calls)))
+                    oldest = next(iter(self.pending_calls))
+                    self.pending_calls.pop(oldest)
+                    self.pending_turns.pop(oldest, None)
             self.touch(turn, at)
             return call
         # Past the stored limit only totals are kept, but work still counts, so a long
@@ -353,16 +409,18 @@ class TurnParser:
 
     def mark_result(self, call_id, failed, at):
         call = self.pending_calls.pop(call_id, None)
-        if call is not None:
+        # The result belongs to the call's own turn, which a late row may have reopened after it ended.
+        turn = self.pending_turns.pop(call_id, None) or self.current
+        if call is not None and turn:
             call['open'] = False
-        if call is not None and failed and not call['error']:
-            call['error'] = True
-            self.current['errors'] += 1
-        if call is not None and not failed and call['cls'] == 'work' and self.current:
-            self.current['lastWorkAt'] = max(self.current.get('lastWorkAt') or 0, call.get('at') or 0)
-        if call is not None and self.current:
-            self.dirty.setdefault(self.current['id'], {})[call['seq']] = call
-        if self.current:
+            if failed and not call['error']:
+                call['error'] = True
+                turn['errors'] += 1
+            if not failed and call['cls'] == 'work':
+                turn['lastWorkAt'] = max(turn.get('lastWorkAt') or 0, call.get('at') or 0)
+            self.dirty.setdefault(turn['id'], {})[call['seq']] = call
+            self.touch(turn, at)
+        elif self.current:
             self.touch(self.current, at)
 
     def add_reply(self, text, at, turn=None):
@@ -792,15 +850,17 @@ class Telemetry:
                 output.append(turn)
         return output
 
-    def prune(self, db, fleet_id, cutoff, now=None):
+    def prune(self, db, fleet_id, cutoff, now=None, agents=None):
         # Per-call detail serves health (one day) and recent timelines; turn summaries keep the full retention.
         call_cutoff = max(cutoff, (now or time.time()) - CALL_RETENTION_DAYS * 86400)
         db.execute('DELETE FROM turn_calls WHERE fleet=? AND at<?', (fleet_id, call_cutoff))
         db.execute('DELETE FROM turns WHERE fleet=? AND last<?', (fleet_id, cutoff))
-        # Read positions of agents no longer followed only cost a re-read of the tail if they return.
-        with self.lock:
-            active = {json.dumps(key) for key in self.followers if key[0] == fleet_id}
+        if agents is None:
+            return
+        # Only positions of agents that left the fleet or changed session go: a follower dropped after a
+        # failed write must resume from its saved position, or its turn would be rebuilt and counted twice.
+        current = {json.dumps([fleet_id, agent['id'], session_key(agent)]) for agent in agents}
         for row in db.execute('SELECT follower FROM telemetry_offsets').fetchall():
             key = json.loads(row['follower'])
-            if key[0] == fleet_id and row['follower'] not in active:
+            if key[0] == fleet_id and row['follower'] not in current:
                 db.execute('DELETE FROM telemetry_offsets WHERE follower=?', (row['follower'],))

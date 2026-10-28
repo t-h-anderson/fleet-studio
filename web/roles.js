@@ -166,7 +166,7 @@ deleteItem=async function(){
  const action=clone(editing);
  try{await mutate(next=>updateFleet(next,f=>{
   const key={role:'roles',rolelink:'roleLinks',trigger:'triggers'}[action.type];f[key]=f[key].filter(r=>r.id!==action.id);
-  if(action.type==='role'){f.agents.forEach(a=>a.roleIds=(a.roleIds||[]).filter(id=>id!==action.id));f.roleLinks=f.roleLinks.filter(l=>l.source!==action.id&&l.target!==action.id);f.triggers=(f.triggers||[]).filter(t=>t.sourceRoleId!==action.id&&t.targetRoleId!==action.id);}
+  if(action.type==='role'){f.agents.forEach(a=>a.roleIds=(a.roleIds||[]).filter(id=>id!==action.id));f.roleLinks=f.roleLinks.filter(l=>l.source!==action.id&&l.target!==action.id);f.triggers=(f.triggers||[]).filter(t=>t.sourceRoleId!==action.id&&t.targetRoleId!==action.id);forgetRole(f,action.id);}
  }),'Removed from design.');$('editor').close();editing=null;}catch(e){toast(e.message,true);}
 };
 $('delete-item').onclick=deleteItem;

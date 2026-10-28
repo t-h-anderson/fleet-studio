@@ -41,10 +41,11 @@ class Reports:
         record = {'kind': kind, 'note': note, 'ticket': ticket, 'at': now, 'agentId': agent['id'], 'agentName': agent['name']}
         dispatch = self.app.dispatch
         if kind == 'handoff':
+            if ticket:
+                # Released first: the hand-off claims it again for the recipient.
+                dispatch.release(fleet['id'], ticket)
             record.update(self.handoff(fleet, agent, payload.get('to'), note, ticket, payload.get('retryId')))
             record['next'] = 'Stop work on this; it is ' + (record.get('recipient') or 'theirs') + ' now.'
-            if ticket:
-                dispatch.release(fleet['id'], ticket)
         elif kind == 'done':
             record.update(dispatch.route_done(fleet, agent, note, ticket, payload.get('to'), payload.get('retryId')))
         elif kind == 'blocked':
@@ -101,6 +102,11 @@ class Reports:
         return [role['id']], None
 
     def handoff(self, fleet, agent, target, note, ticket, retry_id=None):
+        # One lock from the retry check to the send, so two concurrent retries cannot both deliver.
+        with self.app.automation.lock:
+            return self.deliver_handoff(fleet, agent, target, note, ticket, retry_id)
+
+    def deliver_handoff(self, fleet, agent, target, note, ticket, retry_id):
         role_ids, named = self.resolve(fleet, agent, target)
         # The client sends one retry ID per invocation, so its own retries match and a later,
         # identical hand-off is new; without one, a ten-minute window stands in.
@@ -143,14 +149,18 @@ class Reports:
                 'agentId': agent['id'], 'agentName': agent['name'], 'action': 'handoff', 'fallback': False, 'at': self.clock(),
                 'episode': None, 'healthState': 'handoff', 'evidence': note, 'status': 'pending', 'detail': '', 'outcome': None,
                 'recipientId': recipient['id'], 'recipientName': recipient['name'], 'ticket': ticket, 'message': message}
-        with self.app.automation.lock:
-            self.app.automation.data['fires'].append(fire)
-            try:
-                self.app.automation.send(fleet, recipient, message, fire)
-            except Exception as exc:
-                fire.update(status='failed', detail=str(exc)[-600:])
-                self.app.automation.escalate_failure(fleet, fire)
-            self.app.automation.persist()
+        if ticket:
+            # The ticket is the recipient's now, so dispatch does not offer it to anyone else.
+            self.app.dispatch.claim(fleet['id'], ticket, recipient['id'])
+        self.app.automation.data['fires'].append(fire)
+        try:
+            self.app.automation.send(fleet, recipient, message, fire)
+        except Exception as exc:
+            fire.update(status='failed', detail=str(exc)[-600:])
+            if ticket:
+                self.app.dispatch.release(fleet['id'], ticket)
+            self.app.automation.escalate_failure(fleet, fire)
+        self.app.automation.persist()
         return {'route': 'direct', 'recipient': recipient['name'], 'delivery': 'queued' if fire['status'] == 'sending' else fire['status']}
 
     def pick(self, fleet, agent, role_ids):

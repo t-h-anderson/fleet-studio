@@ -83,6 +83,8 @@ def failing_streak(calls):
     """The longest run of one failing call repeated without any other edit, build or test in between."""
     best, streaks = None, {}
     for call in calls:
+        if call['cls'] == 'wait':
+            continue  # Polling CI or a server exits non-zero until it is ready; that is waiting, not looping.
         if call['cls'] == 'work' and not call.get('error'):
             # Any successful work resets every streak; the agent changed something.
             streaks = {}
@@ -227,6 +229,18 @@ def detect_burn(turns, now, settings, calls_since=None):
             'message': format(tokens, ',') + ' fresh tokens in the last hour without any edit, build or test.'}
 
 
+# Tools that wait for the person at the keyboard; a turn paused on one is not stuck.
+PERSON_TOOLS = {'AskUserQuestion', 'ExitPlanMode'}
+
+
+def waiting_on_person(turns):
+    current = next((turn for turn in turns if turn.get('status') == 'open'), None)
+    last = current['calls'][-1] if current and current.get('calls') else None
+    if last and last.get('open') and last.get('tool') in PERSON_TOOLS:
+        return 'Waiting for you to answer `' + last['tool'] + '` in the session.'
+    return ''
+
+
 def detect_stall(session, turns, now, settings, open_work):
     status = session.get('status')
     last = max((turn.get('lastAt') or 0 for turn in turns), default=0) or session.get('session', {}).get('updatedAt') or 0
@@ -268,15 +282,27 @@ def turn_waste(turn, settings):
         waste['nudge'] = tokens
         return waste
     # Only repeats of non-work calls are waste; re-running a test after an edit is progress.
-    signatures = Counter(call['sig'] for call in turn.get('calls', []) if call['cls'] != 'work' and not call.get('exempt'))
-    repeated = sum(count - 1 for count in signatures.values() if count >= settings['loopRepeats'])
+    # Polling is counted as waiting below, not as a loop, and each call counts as one kind of waste only.
+    candidates = [call for call in turn.get('calls', []) if call['cls'] not in ('work', 'wait') and not call.get('exempt')]
+    signatures = Counter(call['sig'] for call in candidates)
+    looped, seen = Counter(), Counter()
+    for call in candidates:
+        seen[call['sig']] += 1
+        if signatures[call['sig']] >= settings['loopRepeats'] and seen[call['sig']] > 1:
+            looped[call['cls']] += 1
+    repeated = sum(looped.values())
     # Re-running the same failing command with nothing changed in between is also a loop.
     streak = failing_streak(turn.get('calls', []))
-    if streak and streak[1] >= settings['loopRepeats']:
+    if streak and streak[1] >= settings['loopRepeats'] and streak[0]['cls'] == 'work':
         repeated += streak[1] - 1
-    waste['loop'] = round(tokens * min(repeated, calls) / calls)
-    waste['admin'] = round(tokens * classes.get('admin', 0) / calls)
-    waste['wait'] = round(tokens * classes.get('wait', 0) / calls)
+    share = lambda count: round(tokens * max(0, count) / calls)
+    waste['loop'] = share(min(repeated, calls))
+    waste['admin'] = share(classes.get('admin', 0) - looped['admin'])
+    waste['wait'] = share(classes.get('wait', 0))
+    # Rounding and partial call lists must never report more waste than the turn spent.
+    over = sum(waste.values()) - tokens
+    if over > 0:
+        waste['wait'] = max(0, waste['wait'] - over)
     return waste
 
 
@@ -315,13 +341,17 @@ def assess(session, turns, now, settings, open_work=False, blocked=None, since_i
     calls_since = call_window(turns, now)
     loop = detect_loop(turns, now, settings, since_intervention, calls_since)
     burn = detect_burn(turns, now, settings, calls_since)
-    stall = None if blocked else detect_stall(session, turns, now, settings, open_work)
+    stall = None if blocked or waiting_on_person(turns) else detect_stall(session, turns, now, settings, open_work)
     admin = detect_admin(turns, now, settings, calls_since)
     for state, evidence in (('looping', loop), ('burning', burn), ('stalled', stall), ('admin-heavy', admin)):
         if evidence:
             signals.append({'state': state, **evidence})
+    person = waiting_on_person(turns)
     if signals:
         state = signals[0]['state']
+    elif person:
+        state = 'waiting'
+        signals.append({'state': 'waiting', 'kind': 'needs-you', 'message': person})
     elif blocked:
         state = 'waiting'
         signals.append({'state': 'waiting', 'kind': 'blocked', 'message': blocked.get('reason') or 'Reported blocked.'})
@@ -487,15 +517,17 @@ class Health:
                                                   'previous': previous['state'] if previous else None,
                                                   'signals': health['signals']})
                     self.current[key] = health
+            present = {(fleet['id'], agent['id']) for fleet in state['fleets'] for agent in fleet['agents']}
+            for key in set(self.current) - present:
+                del self.current[key]
 
     def prune(self, db, fleet):
         agents = {agent['id'] for agent in fleet['agents']}
         for row in db.execute('SELECT agent FROM health_state WHERE fleet=?', (fleet['id'],)).fetchall():
             if row['agent'] not in agents:
                 db.execute('DELETE FROM health_state WHERE fleet=? AND agent=?', (fleet['id'], row['agent']))
-        with self.lock:
-            for key in [key for key in self.current if key[0] == fleet['id'] and key[1] not in agents]:
-                del self.current[key]
+        # In-memory state is trimmed by tick(): taking self.lock here, under the progress lock,
+        # would invert tick's lock order.
 
     def recent_turns(self, fleet_id, since):
         """The last day's turns, reloading from the database only those that changed since the last tick."""

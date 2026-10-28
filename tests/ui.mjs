@@ -300,6 +300,34 @@ try{
  assert.match(await page.locator('.setup-checklist').innerText(),/Deploy the workflow/);
  assert.deepEqual(errors,[]);assert.equal((await bootstrap()).status.controls.length,0,'Tests must never send to agents');
  checks.push('Thresholds save from Agent health; undeployed banner and badge; live counts on the board; Rules shows routing, dispatch and timeline; setup checklist');
+ // The rule editor offers only agents in the chosen role.
+ await page.locator('#nav-automation').click();await page.locator('.automation-card').first().waitFor();
+ const writerRole=await page.evaluate(id=>state.fleets[0].agents.find(a=>a.id===id).roleIds[0],fixture.writerId);
+ await page.evaluate(()=>openEditor('automation'));
+ await page.locator('#f-auto-role').selectOption(writerRole);
+ const offered=await page.locator('#f-auto-agent option').evaluateAll(options=>options.map(o=>o.value).filter(Boolean));
+ assert.deepEqual(offered,[fixture.writerId]);
+ await page.locator('#cancel-editor').click();
+ // A role that a rule and a token limit refer to can still be removed; both references go with it.
+ const tempRole=await page.evaluate(async()=>{
+  const id=crypto.randomUUID();
+  await mutate(next=>updateFleet(next,f=>{
+   const base=f.roles[0];
+   const role={...structuredClone(base),id,key:'temp-role',name:'Temp role',baseline:null};delete role.specId;f.roles.push(role);
+   f.automations.push({...structuredClone(f.automations[0]),id:crypto.randomUUID(),roleId:id,name:'Temp rule'});
+   f.throttles={...(f.throttles||{}),roleTokensPerHour:{[id]:5000}};
+  }));
+  return id;
+ });
+ page.once('dialog',dialog=>dialog.accept());
+ await page.evaluate(id=>openEditor('role',id),tempRole);
+ await page.locator('#delete-item').click();
+ await until(async()=>!(await bootstrap()).state.fleets[0].roles.some(r=>r.id===tempRole),'Role with references could not be removed');
+ const afterRemove=(await bootstrap()).state.fleets[0];
+ assert.ok(!afterRemove.automations.some(r=>r.roleId===tempRole),'Rule scoped to the removed role remains');
+ assert.ok(!afterRemove.throttles?.roleTokensPerHour?.[tempRole],'Token limit of the removed role remains');
+ assert.deepEqual(errors,[]);
+ checks.push('Rule editor offers only agents in the chosen role; removing a role takes its rules and limits with it');
  console.log(JSON.stringify({passed:true,checks},null,2));
 }finally{
  if(browser)await browser.close();

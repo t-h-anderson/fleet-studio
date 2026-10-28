@@ -30,6 +30,10 @@ LOCAL_HOST = "local"
 BACKENDS = ("codex", "claude-code")
 
 
+class NothingRunning(RuntimeError):
+    """Raised by interrupt() when there is no turn to stop; callers treat it as already stopped."""
+
+
 class BackendUnsupported(ValueError):
     """The selected backend does not offer this operation."""
 
@@ -115,7 +119,7 @@ class CodexBackend(AgentBackend):
         from studio_control import app_server
         turn = self.observe([session_id])["sessions"].get(session_id, {})
         if turn.get("turnStatus") != "inProgress" or not turn.get("turnId"):
-            raise RuntimeError("No Codex turn is running for this session.")
+            raise NothingRunning("No Codex turn is running for this session.")
         try:
             app_server(self.executable, "turn/interrupt", {"threadId": session_id, "turnId": turn["turnId"]})
         except (RuntimeError, TimeoutError, OSError) as exc:
@@ -387,7 +391,7 @@ class ClaudeCodeBackend(AgentBackend):
         with self.send_lock:
             process = self.processes.get(session_id)
             if process is None or process.poll() is not None:
-                raise RuntimeError('No Studio-started Claude turn is running for this session.')
+                raise NothingRunning('No Studio-started Claude turn is running for this session.')
             # The turn runs in its own process group; stop its tools too.
             stop = (lambda sig: os.killpg(process.pid, sig)) if os.name != 'nt' else (lambda sig: process.terminate())
             try:

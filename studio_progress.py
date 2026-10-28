@@ -399,7 +399,7 @@ class Progress:
                     cutoff = now - clean_settings(f.get('progress'))['retentionDays'] * 86400
                     db.execute('DELETE FROM observations WHERE fleet=? AND at<?', (f['id'], cutoff))
                     self.metrics.prune(db, f['id'], cutoff)
-                    self.app.telemetry.prune(db, f['id'], cutoff)
+                    self.app.telemetry.prune(db, f['id'], cutoff, agents=f['agents'])
                     self.app.health.prune(db, f)
                     for row in db.execute('SELECT * FROM handoffs WHERE fleet=?', (f['id'],)).fetchall():
                         h = json.loads(row['data'])

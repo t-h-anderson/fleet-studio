@@ -31,6 +31,13 @@ function statusLabel(a){const s=statusOf(a),p=sessionFor(a).pids||[];return '<sp
 function toast(message,error=false){const n=document.createElement('div');n.className='toast'+(error?' error':'');n.textContent=message;const b=document.createElement('button');b.textContent='×';b.setAttribute('aria-label','Dismiss');b.onclick=()=>n.remove();n.append(b);$('toasts').append(n);while($('toasts').children.length>3)$('toasts').firstElementChild.remove();setTimeout(()=>n.remove(),error?13000:6000);}
 async function api(path,body){const options={headers:{}};if(body!==undefined){options.method='POST';options.headers={'Content-Type':'application/json','X-Fleet-Token':token};options.body=JSON.stringify(body);}const r=await fetch(path,options),data=await r.json();if(!r.ok)throw new Error(data.error||'Request failed.');return data;}
 function mutate(change,message){const op=saveQueue.catch(()=>{}).then(async()=>{const next=clone(state);change(next);state=(await api('/api/state',next)).state;if(!state.fleets.some((f)=>f.id===activeId))activeId=state.defaultFleetId;renderAll();if(message)toast(message);return state;});saveQueue=op;return op;}
+// Rules and limits that name a removed role or agent go with it; the server rejects dangling references.
+// A rule scoped to a removed role or agent is removed, never widened to the whole fleet.
+function forgetRole(f,roleId){
+ f.automations=(f.automations||[]).filter(r=>r.roleId!==roleId).map(r=>r.handoffRoleId===roleId?{...r,handoffRoleId:''}:r);
+ if(f.throttles?.roleTokensPerHour){delete f.throttles.roleTokensPerHour[roleId];if(!Object.keys(f.throttles.roleTokensPerHour).length)delete f.throttles.roleTokensPerHour;}
+}
+function forgetAgent(f,agentId){f.automations=(f.automations||[]).filter(r=>r.agentId!==agentId);}
 function updateFleet(next,change){change(next.fleets.find((f)=>f.id===activeId));}
 function filteredAgents(){return current().agents.filter((a)=>(a.name+' '+displayedRole(a)+' '+a.directory).toLowerCase().includes(query.toLowerCase())&&(filter==='all'||(filter==='disabled'?!a.enabled:statusOf(a)===filter)));}
 function setView(v){view=v;localStorage.setItem('fleet-view',v);query='';filter='all';$('search').value='';$('status-filter').value='all';selected.clear();renderAll();}
@@ -108,8 +115,8 @@ function renderInsights(){
  $('activity-list').innerHTML=events.length?events.map((e)=>'<div class="activity-item"><span class="event-dot"></span><div><div class="event-title">'+esc(e.title)+'</div><div class="event-detail">'+esc(e.detail)+'</div><div class="event-time">'+ago(e.time)+'</div></div></div>').join(''):'<div class="activity-empty">Fleet changes and session status will appear here.</div>';
 }
 
-// An open settings panel counts as editing even when focus has moved to its buttons.
-function editingContent(){return !!document.activeElement?.closest('#content input,#content textarea,#content select,#content form')||!!document.querySelector('#content details[open] form');}
+// Focus anywhere in a form counts as editing, so a click on its button is not lost to a redraw.
+function editingContent(){return !!document.activeElement?.closest('#content input,#content textarea,#content select,#content form');}
 async function refresh(full=false){
  if(stopped)return;
  try{
@@ -186,7 +193,7 @@ async function deleteItem(){
  if(!window.confirm(prompt))return;
  try{await mutate((next)=>{
   if(action.type==='fleet'){next.fleets=next.fleets.filter((f)=>f.id!==action.id);if(next.defaultFleetId===action.id)next.defaultFleetId=next.fleets[0].id;}
-  else updateFleet(next,(f)=>{if(action.type==='agent'){f.agents=f.agents.filter((a)=>a.id!==action.id);f.links=f.links.filter((l)=>l.source!==action.id&&l.target!==action.id);}else f.links=f.links.filter((l)=>l.id!==action.id);});
+  else updateFleet(next,(f)=>{if(action.type==='agent'){f.agents=f.agents.filter((a)=>a.id!==action.id);f.links=f.links.filter((l)=>l.source!==action.id&&l.target!==action.id);forgetAgent(f,action.id);}else f.links=f.links.filter((l)=>l.id!==action.id);});
  },'Removed from the fleet.');$('editor').close();editing=null;selected.delete(action.id);}catch(e){toast(e.message,true);}
 }
 function exportFleet(){const blob=new Blob([JSON.stringify(current(),null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=current().windowName+'.json';a.click();URL.revokeObjectURL(url);}

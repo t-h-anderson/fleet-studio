@@ -7,11 +7,15 @@ const backtests=new Map();
 function roleLabel(id){return id?(current().roles.find(r=>r.id===id)?.name||'Missing role'):'All roles';}
 function ruleSummary(r){
  const agent=r.agentId&&current().agents.find(a=>a.id===r.agentId);
- return 'When '+(agent?esc(agent.name)+' is ':roleLabel(r.roleId).toLowerCase()+' '+(r.roleId?'agents are ':'are '))+SIGNAL_LABELS[r.when.signal].toLowerCase()+
+ return 'When '+(agent?agent.name+' is ':roleLabel(r.roleId).toLowerCase()+' '+(r.roleId?'agents are ':'are '))+SIGNAL_LABELS[r.when.signal].toLowerCase()+
   (r.when.forMinutes?' for '+r.when.forMinutes+' min':'')+': '+ACTION_LABELS[r.action].toLowerCase()+
   (r.action==='handoff'?' in '+roleLabel(r.handoffRoleId||r.roleId):'')+
   '. At most '+(r.maxFires||'unlimited')+(r.maxFires?' time(s)':'')+' per agent in '+(r.windowHours||24)+' h, '+(r.cooldownMinutes||15)+' min apart'+
   (r.maxFires&&r.thenAction!=='none'?', then '+ACTION_LABELS[r.thenAction].toLowerCase():'')+'.';
+}
+function agentOptions(f,roleId,selected){
+ const agents=f.agents.filter(a=>!roleId||(a.roleIds||[]).includes(roleId));
+ return '<option value="">Every agent in the role</option>'+agents.map(a=>'<option value="'+a.id+'"'+(a.id===selected?' selected':'')+'>'+esc(a.name)+'</option>').join('');
 }
 function ruleCard(r){
  const test=backtests.get(r.id);
@@ -125,7 +129,7 @@ openEditor=function(type,id=null,preSession=null){
  const actions=Object.fromEntries(Object.entries(ACTION_LABELS).filter(([k])=>k!=='none'&&(k!=='stop-turn'||canStop||item.action==='stop-turn')));
  $('editor-fields').innerHTML=field('Name','name',item.name,'required maxlength="100"')+
   '<div class="form-row"><div class="field"><label for="f-auto-role">Watch agents in</label><select id="f-auto-role">'+roles(item.roleId,'All roles')+'</select></div>'+
-  '<div class="field"><label for="f-auto-agent">Only this agent (optional)</label><select id="f-auto-agent"><option value="">Every agent in the role</option>'+f.agents.map(a=>'<option value="'+a.id+'"'+(a.id===item.agentId?' selected':'')+'>'+esc(a.name)+'</option>').join('')+'</select></div>'+
+  '<div class="field"><label for="f-auto-agent">Only this agent (optional)</label><select id="f-auto-agent">'+agentOptions(f,item.roleId,item.agentId)+'</select></div>'+
   '<div class="field"><label for="f-auto-signal">When an agent is</label><select id="f-auto-signal">'+options(SIGNAL_LABELS,item.when.signal)+'</select></div>'+
   field('For at least (minutes)','auto-for',item.when.forMinutes,'type="number" min="0" max="10080"')+'</div>'+
   '<div class="form-row"><div class="field"><label for="f-auto-action">Then</label><select id="f-auto-action">'+options(actions,item.action)+'</select></div>'+
@@ -137,6 +141,8 @@ openEditor=function(type,id=null,preSession=null){
   field('Pause length (minutes)','auto-pause',item.pauseMinutes,'type="number" min="1" max="10080"')+'</div>'+
   '<label class="checkbox-field"><input id="f-auto-park" type="checkbox" '+(item.parkSource?'checked':'')+'>Pause the stuck agent after handing off its work</label>'+
   '<label class="checkbox-field"><input id="f-auto-enabled" type="checkbox" '+(item.enabled?'checked':'')+'>Running</label>';
+ // Only agents in the chosen role can be picked, so a rule never names an agent its role excludes.
+ $('f-auto-role').onchange=()=>{$('f-auto-agent').innerHTML=agentOptions(f,$('f-auto-role').value,$('f-auto-agent').value);};
  $('editor').showModal();
 };
 const automationOriginalSaveEditor=saveEditor;

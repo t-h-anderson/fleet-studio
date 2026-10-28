@@ -186,6 +186,12 @@ class AccuracyTests(unittest.TestCase):
             f'run sk-ant-{S}abcdef', f'run AIzaSy{S}abcdefghijklmnopq', f'pip install --index-url https://u:{S}@pypi.x/simple pkg',
             f'TOKEN={S} make deploy', f'heroku config:set DB_PASSWORD={S}',
         ]
+        LEAK_CASES += [
+            f'git -c http.extraheader="AUTHORIZATION: basic {S}" clone x', f'curl -X POST https://hooks.slack.com/services/T0/B0/{S}',
+            f'curl https://api.telegram.org/bot123456:{S}abcdefghijklmnop/sendMessage', f'curl -H"X-Key: {S}" https://x',
+            f'kubectl create secret generic s --from-literal=db_pw={S}', f'redis-cli -h db -a {S} ping', f'git push https://{S}@github.com/a/b',
+        ]
+        self.assertNotIn(S, call_metadata('WebFetch', {'url': f'https://hooks.slack.com/services/T/B/{S}'})['label'])
         for command in LEAK_CASES:
             self.assertNotIn(S, call_metadata('Bash', {'command': command})['label'], command)
         for command in ['pytest tests/test_a.py -k token', 'grep -rn password src/', 'mkdir -p build']:
@@ -292,6 +298,27 @@ class AccuracyTests(unittest.TestCase):
                 self.prompt('u3', 1200)]
         status = {t['id']: t['status'] for t in self.feed_all(rows)}
         self.assertEqual((status['u1'], status['u2']), ('completed', 'aborted'))
+
+    def test_compound_commands_count_their_work(self):
+        cls = lambda command: call_metadata('Bash', {'command': command})['cls']
+        self.assertEqual(cls('git status && python -m pytest'), 'work')
+        self.assertEqual(cls('cat build.log; npm test'), 'work')
+        self.assertEqual(cls('git log | head -5'), 'explore')
+        self.assertEqual(cls('set -e; git status'), 'explore')
+        self.assertEqual(cls('for f in *.py; do echo $f; done'), 'explore')
+        self.assertEqual(cls('while true; do gh pr checks 4; sleep 30; done'), 'wait')
+        self.assertEqual(cls('grep -n "a; b" file'), 'explore')
+
+    def test_a_late_result_is_recorded_on_its_own_turn(self):
+        # A late row of a finished message adds a call to that turn; its result must land there too.
+        rows = [self.prompt('u1', 1000), self.reply('m1', 1001, [{'type': 'text', 'text': 'Done with the first part of the work.'}]),
+                self.prompt('u2', 1010), self.reply('m2', 1011, [{'type': 'text', 'text': 'Done with the second part of the work.'}]),
+                self.reply('m1', 1012, [{'type': 'tool_use', 'id': 't9', 'name': 'Bash', 'input': {'command': 'make'}}], 'end_turn'),
+                {'type': 'user', 'timestamp': stamp(1013), 'message': {'role': 'user', 'content': [
+                    {'type': 'tool_result', 'tool_use_id': 't9', 'is_error': True, 'content': 'failed'}]}}]
+        turns = {t['id']: t for t in self.feed_all(rows)}
+        self.assertEqual((turns['u1']['errors'], turns['u2']['errors']), (1, 0))
+        self.assertEqual(turns['u2']['callCount'], 0)
 
     def test_bash_mode_and_interruptions(self):
         rows = [self.prompt('u1', 1000), self.reply('m1', 1001, [{'type': 'tool_use', 'id': 't1', 'name': 'Bash', 'input': {'command': 'make'}}], 'tool_use'),
@@ -424,20 +451,23 @@ class StorageTests(unittest.TestCase):
         self.app.telemetry.tick(self.state)
         with closing(self.app.telemetry.connect()) as db, db:
             db.execute("INSERT INTO telemetry_offsets VALUES(?, '{}')", (json.dumps([self.fleet['id'], 'gone', 'x']),))
-            self.app.telemetry.prune(db, self.fleet['id'], self.now - 90 * 86400, now=self.now + 4 * 86400)
+            # The followed agent's position stays even if its follower was dropped; the departed one's goes.
+            self.app.telemetry.followers.clear()
+            self.app.telemetry.prune(db, self.fleet['id'], self.now - 90 * 86400, now=self.now + 4 * 86400, agents=self.fleet['agents'])
             self.app.health.prune(db, {**self.fleet, 'agents': []})
             self.assertEqual(db.execute('SELECT COUNT(*) FROM turn_calls').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM turns').fetchone()[0], 1)
             followers = [json.loads(row[0])[1] for row in db.execute('SELECT follower FROM telemetry_offsets')]
         self.assertEqual(followers, [agent])
 
-    def test_completed_receipts_are_trimmed(self):
+    def test_finished_receipts_are_trimmed_but_not_sends_in_progress(self):
         controls = self.app.controls
         controls.receipts = {'old': {'id': 'old', 'status': 'completed', 'createdAt': 10, 'targets': []},
-                             'open': {'id': 'open', 'status': 'needs-attention', 'createdAt': 10, 'targets': []},
+                             'held': {'id': 'held', 'status': 'needs-attention', 'createdAt': 10, 'targets': []},
+                             'sending': {'id': 'sending', 'status': 'sending', 'createdAt': 10, 'targets': []},
                              'new': {'id': 'new', 'status': 'completed', 'createdAt': time.time(), 'targets': []}}
         controls.prune(time.time() - 86400)
-        self.assertEqual(sorted(controls.receipts), ['new', 'open'])
+        self.assertEqual(sorted(controls.receipts), ['new', 'sending'])
 
     def test_a_busy_fleet_tick_stays_fast(self):
         """Ten agents, each making a call every five seconds, for 200 ticks."""

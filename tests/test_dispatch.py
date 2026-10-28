@@ -105,10 +105,80 @@ class DispatchTests(unittest.TestCase):
         self.assertIn('is blocked and needs you', texts[0])
         self.assertEqual(sum('has reported back' in t for t in texts), 1)
 
-    def test_blocked_without_owner_escalates(self):
+    def test_blocked_without_owner_escalates_and_acknowledging_wakes_the_agent(self):
+        from studio_automation import Automation
         app, fleet = self.app()
-        app.reports.report({'kind': 'blocked', 'fleetId': fleet['id'], 'agentId': fleet['agents'][0]['id'], 'note': 'No credentials'})
-        self.assertEqual(len(app.automation.snapshot(fleet['id'])['escalations']), 1)
+        writer = fleet['agents'][0]
+        result = app.reports.report({'kind': 'blocked', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'No credentials'})
+        self.assertIn('once they have looked at it', result['next'])
+        [escalation] = app.automation.snapshot(fleet['id'])['escalations']
+        # Saved straight away, not on the next tick that happens to change something.
+        self.assertEqual(len(Automation(app).data['escalations']), 1)
+        with patch.object(app.controls, 'send', return_value={'id': 'r1'}) as send:
+            app.automation.acknowledge(fleet['id'], escalation['id'])
+            app.automation.acknowledge(fleet['id'], escalation['id'])
+        [target] = self.sent(app, send)
+        self.assertEqual(target['agentId'], writer['id'])
+        self.assertIn('The operator has looked at what blocked you', target['text'])
+
+    def test_a_stale_claim_never_locks_an_agent_out(self):
+        app, fleet = self.app()
+        fleet = self.writers(app, 1)
+        writer = fleet['agents'][0]
+        # Closed in the tracker without a report: the claim is released and the next ticket offered.
+        app.dispatch.claim(fleet['id'], ticket(4)['url'], writer['id'])
+        closed = {**ticket(4), 'state': 'closed'}
+        with patch.object(app.backlog, 'snapshot', return_value=self.backlog([closed, ticket(5)])), \
+                patch.object(app.controls, 'send', return_value={'id': 'r1'}) as send:
+            app.dispatch.tick(app.store.snapshot(), self.monitor(fleet))
+        self.assertIn('/issues/5', self.sent(app, send)[0]['text'])
+        # A claim older than the agent's last done report was settled by it.
+        app.dispatch.release(fleet['id'], ticket(5)['url'])
+        app.dispatch.claim(fleet['id'], ticket(6)['url'], writer['id'])
+        app.reports.report({'kind': 'done', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Finished',
+                            'ticket': 'https://gitlab.example/team/project/-/issues/99'})
+        self.assertTrue(app.dispatch.ready(fleet, writer, self.monitor(fleet), app.dispatch.claims(fleet['id'])))
+
+    def test_a_failed_offer_releases_the_ticket_and_is_not_retried_every_tick(self):
+        app, fleet = self.app()
+        fleet = self.writers(app, 1)
+        with patch.object(app.backlog, 'snapshot', return_value=self.backlog([ticket(4)])), \
+                patch.object(app.controls, 'send', side_effect=RuntimeError('backend down')) as send:
+            app.dispatch.tick(app.store.snapshot(), self.monitor(fleet))
+            app.dispatch.tick(app.store.snapshot(), self.monitor(fleet))
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(app.dispatch.claims(fleet['id'])['https://gitlab.example/team/project/-/issues/4']['status'], 'done')
+
+    def test_an_undeliverable_blocker_notice_is_escalated(self):
+        app, fleet = self.app()
+        writer, integrator = fleet['agents']
+        with patch.object(app.controls, 'send', side_effect=RuntimeError('session gone')):
+            app.reports.report({'kind': 'blocked', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Need access', 'to': integrator['name']})
+        [escalation] = app.automation.snapshot(fleet['id'])['escalations']
+        self.assertIn('blocked-notify failed', escalation['message'])
+
+    def test_a_direct_handoff_claims_the_ticket_for_its_recipient(self):
+        app, fleet = self.app()
+        writer, integrator = fleet['agents']
+        url = 'https://gitlab.example/team/project/-/issues/9'
+        with patch.object(app.controls, 'send', return_value={'id': 'r1'}):
+            app.reports.report({'kind': 'handoff', 'fleetId': fleet['id'], 'agentId': writer['id'], 'note': 'Yours', 'to': 'Integrator', 'ticket': url})
+        claim = app.dispatch.claims(fleet['id'])[url]
+        self.assertEqual((claim['agent'], claim['status']), (integrator['id'], 'offered'))
+
+    def test_stop_on_an_agent_with_no_running_turn_still_mutes_it(self):
+        from studio_agents import NothingRunning
+        from studio_automation import clean_automations
+        app, fleet = self.app()
+        writer = fleet['agents'][0]
+        [rule] = clean_automations([{'id': str(uuid.uuid4()), 'name': 'Stop loops', 'when': {'signal': 'looping'}, 'action': 'stop'}], set())
+        fire = {'action': 'stop', 'status': 'pending', 'detail': '', 'fallback': False}
+        health = {'state': 'looping', 'since': 0, 'signals': []}
+        with patch.object(app.automation, 'stop_turn', side_effect=NothingRunning('nothing')):
+            app.automation.execute(fleet, rule, writer, health, fire, self.monitor(fleet))
+        self.assertEqual(fire['status'], 'sent')
+        self.assertIn('No turn was running', fire['detail'])
+        self.assertTrue(app.automation.paused_reason(fleet['id'], writer))
 
 
 if __name__ == '__main__':

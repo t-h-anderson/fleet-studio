@@ -22,7 +22,11 @@ function updateDeployBanner(){
  banner.innerHTML=changed?'<span><strong>Undeployed changes.</strong> '+(status.active?(stale?stale+' agent(s) are still working from an older brief.':'Agents are still working from the deployed version.'):'Nothing is deployed yet, so agents have no brief.')+'</span><button class="button small primary" id="deploy-banner-review">Review &amp; deploy</button>':'';
  $('nav-workflow')?.classList.toggle('has-badge',changed);
  if(view==='workflow'){const b=$('workflow-deploy');if(b&&status?.active){b.disabled=!changed;b.title=changed?'':'The draft matches the deployed version.';}}
- if(view==='roles')document.querySelectorAll('[data-apply-role]').forEach(b=>{if(changed){b.textContent='Deploy & notify…';b.disabled=false;}});
+ if(view==='roles')document.querySelectorAll('[data-apply-role]').forEach(b=>{
+  // Keep the original label so it comes back once the draft is deployed.
+  if(changed){b.dataset.label??=b.textContent;b.textContent='Deploy & notify…';b.disabled=false;}
+  else if(b.dataset.label){b.textContent=b.dataset.label;delete b.dataset.label;}
+ });
 }
 // Sending assignments from a stale draft fails; route it to the deployment review instead.
 $('content').addEventListener('click',e=>{

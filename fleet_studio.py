@@ -34,7 +34,7 @@ from studio_telemetry import Telemetry
 from studio_health import Health, clean_health_settings
 from studio_reports import Reports
 from studio_dispatch import Dispatch, clean_dispatch
-from studio_automation import Automation, backtest, clean_alerts, clean_automations, clean_throttles
+from studio_automation import Automation, backtest, clean_alerts, clean_automations, clean_throttles, watches
 from studio_reconciliation import Reconciliation
 from studio_goals import Goals
 from studio_agents import Runtimes, clean_binding, clean_hosts, tmux_launch, LOCAL_HOST
@@ -652,7 +652,7 @@ class Handler(BaseHTTPRequestHandler):
                 hours = payload.get("hours", 24)
                 if type(hours) is not int or not 1 <= hours <= 720:
                     raise ValidationError("Backtest window must be 1 to 720 hours.")
-                agents = [a["id"] for a in fleet["agents"] if not rule["roleId"] or rule["roleId"] in a.get("roleIds", [])]
+                agents = [a["id"] for a in fleet["agents"] if watches(rule, a)]
                 history = [h for h in app.health.history(fleet["id"], time.time() - hours * 3600 - 86400) if h["agentId"] in agents]
                 return self.json(200, backtest(rule, history, time.time(), hours))
             if path == "/api/progress/report":

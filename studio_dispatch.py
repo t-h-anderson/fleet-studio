@@ -74,6 +74,19 @@ class Dispatch:
             elif agent_id:
                 db.execute("UPDATE dispatch_claims SET status='done' WHERE fleet=? AND agent=? AND status!='done'", (fleet_id, agent_id))
 
+    def settled_at(self, fleet_id):
+        """When each agent last reported done or a hand-off, which closes what it held before."""
+        with self.app.progress.lock, closing(self.app.progress.connect()) as db:
+            if not db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_notes'").fetchone():
+                return {}
+            rows = db.execute('SELECT agent, data FROM agent_notes WHERE fleet=?', (fleet_id,)).fetchall()
+        settled = {}
+        for row in rows:
+            note = json.loads(row['data'])
+            if note.get('kind') in ('done', 'handoff'):
+                settled[row['agent']] = note.get('at', 0)
+        return settled
+
     def current_ticket(self, fleet_id, agent_id):
         for ticket, row in self.claims(fleet_id).items():
             if row['agent'] == agent_id and row['status'] != 'done':
@@ -105,10 +118,14 @@ class Dispatch:
         claims = self.claims(fleet['id'])
         found = []
         for ticket in backlog.get('items', []):
-            if ticket['state'] == 'closed' or ticket.get('assignees'):
-                continue
             url = task_key(ticket['url'])
             claim = claims.get(url)
+            if ticket['state'] == 'closed' and claim and claim['status'] != 'done':
+                # Closed in the tracker without a report; the claim must not hold the agent forever.
+                self.release(fleet['id'], ticket['url'])
+                continue
+            if ticket['state'] == 'closed' or ticket.get('assignees'):
+                continue
             if claim and claim['status'] != 'done':
                 continue
             if workflow.get('states'):
@@ -129,7 +146,13 @@ class Dispatch:
         health = self.app.health.get(fleet['id'], agent['id']) or {}
         if health.get('openWork') or health.get('state') in PROBLEM_STATES or health.get('state') in ('waiting', 'productive'):
             return False
-        if any(row['agent'] == agent['id'] and row['status'] != 'done' for row in claims.values()):
+        # A claim older than the agent's last done or hand-off report was settled by that report.
+        settled = self.settled_at(fleet['id']).get(agent['id'], 0)
+        if any(row['agent'] == agent['id'] and row['status'] != 'done' and row['at'] > settled for row in claims.values()):
+            return False
+        # An agent whose last offer could not be delivered is not retried every tick.
+        if any(f['ruleId'] == 'dispatch' and f.get('recipientId') == agent['id'] and f['status'] == 'failed'
+               and f['at'] > self.clock() - 900 for f in self.app.automation.data['fires']):
             return False
         if self.app.automation.paused_reason(fleet['id'], agent):
             return False
@@ -160,22 +183,23 @@ class Dispatch:
 
         With a `key` (from the client's retry ID) a retried report reuses the first delivery.
         """
-        from studio_automation import LIVE_STATUSES
+        from studio_automation import DIRECT_NOTICES, LIVE_STATUSES
         automation = self.app.automation
-        if key:
-            existing = next((f for f in automation.data['fires'] if f['id'] == key and f['status'] in LIVE_STATUSES), None)
-            if existing:
-                return existing
-            if any(f['id'] == key for f in automation.data['fires']):
-                key += '-' + uuid.uuid4().hex[:6]
-        fire = {'id': key or uuid.uuid4().hex, 'fleetId': fleet['id'], 'ruleId': rule_id, 'ruleName': rule_name,
-                'agentId': (source or recipient)['id'], 'agentName': (source or recipient)['name'], 'action': rule_id,
-                'fallback': False, 'at': self.clock(), 'episode': None, 'healthState': rule_id, 'evidence': evidence,
-                'status': 'pending', 'detail': '', 'outcome': None, 'recipientId': recipient['id'],
-                'recipientName': recipient['name'], 'ticket': ticket, 'message': message}
-        if ticket:
-            self.claim(fleet['id'], ticket, recipient['id'])
+        # The retry check and the append share the lock, so two concurrent retries cannot both pass.
         with automation.lock:
+            if key:
+                existing = next((f for f in automation.data['fires'] if f['id'] == key and f['status'] in LIVE_STATUSES), None)
+                if existing:
+                    return existing
+                if any(f['id'] == key for f in automation.data['fires']):
+                    key += '-' + uuid.uuid4().hex[:6]
+            fire = {'id': key or uuid.uuid4().hex, 'fleetId': fleet['id'], 'ruleId': rule_id, 'ruleName': rule_name,
+                    'agentId': (source or recipient)['id'], 'agentName': (source or recipient)['name'], 'action': rule_id,
+                    'fallback': False, 'at': self.clock(), 'episode': None, 'healthState': rule_id, 'evidence': evidence,
+                    'status': 'pending', 'detail': '', 'outcome': None, 'recipientId': recipient['id'],
+                    'recipientName': recipient['name'], 'ticket': ticket, 'message': message}
+            if ticket:
+                self.claim(fleet['id'], ticket, recipient['id'])
             automation.data['fires'].append(fire)
             try:
                 automation.send(fleet, recipient, message, fire)
@@ -183,6 +207,8 @@ class Dispatch:
                 fire.update(status='failed', detail=str(exc)[-600:])
                 if ticket:
                     self.release(fleet['id'], ticket)
+                if rule_id in DIRECT_NOTICES:
+                    automation.escalate_failure(fleet, fire)
             automation.persist()
         self.app.event('Dispatch · ' + rule_name, recipient['name'] + ': ' + (ticket or evidence)[:120], fleet['id'])
         return fire
@@ -228,9 +254,9 @@ class Dispatch:
                          key='blocked-' + hashlib.sha256((agent['id'] + retry_id).encode()).hexdigest()[:24] if retry_id else None)
             return {'waitingOn': recipient['id'], 'recipient': recipient['name'],
                     'next': 'Recorded; ' + recipient['name'] + ' has been told. Stop here; Studio will wake you when they report back.'}
-        record = {'id': uuid.uuid4().hex, 'evidence': note, 'detail': ''}
+        record = {'id': uuid.uuid4().hex, 'evidence': note, 'detail': '', 'wakeAgentId': agent['id']}
         self.app.automation.escalate(fleet, agent, {'name': 'Blocked report'}, record)
-        return {'next': 'Recorded and passed to the operator. Stop here; Studio will wake you when it is resolved.'}
+        return {'next': 'Recorded and passed to the operator. Stop here; Studio will wake you once they have looked at it.'}
 
     def wake_waiting(self, fleet, resolver):
         """When someone reports done or unblocked, wake each agent that was waiting on them, once."""
@@ -245,7 +271,9 @@ class Dispatch:
                 continue
             message = ('[Fleet Studio] ' + resolver['name'] + ' has reported back on what blocked you\n\n'
                        'You were waiting on: ' + note['note'] + '\nCheck it, then continue or report blocked again.')
-            self.deliver(fleet, agent, message, '', 'unblock-wake', 'Wake after blocker', note['note'], source=resolver)
+            fire = self.deliver(fleet, agent, message, '', 'unblock-wake', 'Wake after blocker', note['note'], source=resolver)
+            if fire['status'] == 'failed':
+                continue  # Escalated by deliver; a later report from the resolver tries again.
             note['woken'] = self.clock()
             with self.app.progress.lock, closing(self.app.progress.connect()) as db, db:
                 db.execute('UPDATE agent_notes SET data=? WHERE fleet=? AND agent=?', (json.dumps(note), fleet['id'], agent_id))

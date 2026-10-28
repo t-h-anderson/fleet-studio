@@ -148,6 +148,13 @@ def evidence_text(health):
     return ' '.join(signal['message'] for signal in health.get('signals', [])) or 'Health state: ' + health['state'] + '.'
 
 
+def watches(rule, agent):
+    """Whether a rule applies to an agent: a named agent decides alone, otherwise the role does."""
+    if rule.get('agentId'):
+        return rule['agentId'] == agent['id']
+    return not rule['roleId'] or rule['roleId'] in agent.get('roleIds', [])
+
+
 def backtest(rule, history, now, hours=24):
     """Replay recorded health transitions to estimate how often a rule would act.
 
@@ -186,6 +193,8 @@ def backtest(rule, history, now, hours=24):
 
 # How long a just-started agent counts as working before the session monitor sees it.
 STARTING_SECONDS = 120
+# Messages someone is waiting on; when one cannot be delivered the operator must hear of it.
+DIRECT_NOTICES = ('agent-handoff', 'blocked-notify', 'unblock-wake')
 # Fires that may have reached their recipient, or still will: never send these again.
 LIVE_STATUSES = ('pending', 'sending', 'held', 'sent', 'unconfirmed')
 
@@ -214,7 +223,16 @@ class Automation:
             for fire in self.data['fires']:
                 by_fleet.setdefault(fire['fleetId'], []).append(fire)
             self.data['fires'] = sorted((f for fires in by_fleet.values() for f in fires[-1000:]), key=lambda f: f['at'])
-            self.data['escalations'] = self.data['escalations'][-500:]
+            # Per fleet, oldest acknowledged first, so a busy fleet cannot evict another's open escalations.
+            kept = []
+            for fleet_id in {e['fleetId'] for e in self.data['escalations']}:
+                rows = [e for e in self.data['escalations'] if e['fleetId'] == fleet_id]
+                extra = len(rows) - 500
+                if extra > 0:
+                    drop = {id(e) for e in [e for e in rows if e['acknowledged']][:extra]}
+                    rows = [e for e in rows if id(e) not in drop][-500:]
+                kept += rows
+            self.data['escalations'] = sorted(kept, key=lambda e: e['at'])
             self.data['throttleLog'] = self.data['throttleLog'][-1000:]
             snapshot = deepcopy(self.data)
         atomic_json(self.path, snapshot)
@@ -298,9 +316,7 @@ class Automation:
                     for agent in fleet['agents']:
                         if not agent['enabled'] or not agent.get('sessionId'):
                             continue
-                        if rule['roleId'] and rule['roleId'] not in agent.get('roleIds', []):
-                            continue
-                        if rule.get('agentId') and rule['agentId'] != agent['id']:
+                        if not watches(rule, agent):
                             continue
                         health = self.app.health.get(fleet['id'], agent['id'])
                         if not matches(rule, health) or now - health['since'] < rule['when']['forMinutes'] * 60:
@@ -386,9 +402,9 @@ class Automation:
                 except Exception as exc:
                     # One undeliverable message must never stop the other rules from running.
                     fire.update(status='failed', detail=str(exc)[-600:])
-                    if fire['ruleId'] == 'dispatch':
+                    if fire['ruleId'] in ('dispatch', 'agent-handoff') and fire.get('ticket'):
                         self.app.dispatch.release(fleet['id'], fire['ticket'])
-                    else:
+                    if fire['ruleId'] != 'dispatch':
                         self.escalate_failure(fleet, fire)
                 changed = changed or fire['status'] != 'held' or fire['detail'] != before
                 if fire['ruleId'] != 'dispatch':
@@ -442,7 +458,11 @@ class Automation:
             self.escalate_failure(fleet, fire)
         else:
             fire.update(status='failed', detail=detail)
-            if fire.get('fallback') or fire['action'] == 'handoff':
+            if fire['ruleId'] in ('dispatch', 'agent-handoff') and fire.get('ticket'):
+                # The work did not arrive, so the recipient's claim must not hold it.
+                self.app.dispatch.release(fleet['id'], fire['ticket'])
+            # An offer that did not arrive is simply made again later; anything else someone waits on is escalated.
+            if fire['ruleId'] != 'dispatch' and (fire.get('fallback') or fire['action'] == 'handoff' or fire['ruleId'] in DIRECT_NOTICES):
                 self.escalate_failure(fleet, fire)
         return True
 
@@ -495,7 +515,12 @@ class Automation:
             elif action == 'handoff':
                 self.handoff(fleet, rule, agent, health, fire, monitor)
             elif action in ('stop-turn', 'stop'):
-                detail = self.stop_turn(agent)
+                from studio_agents import NothingRunning
+                try:
+                    detail = self.stop_turn(agent)
+                except NothingRunning:
+                    # Nothing to stop is the outcome a stop wants; muting below still applies.
+                    detail = 'No turn was running.'
                 if action == 'stop':
                     # Stop the turn and mute Studio's messages, so the agent stays still until someone looks.
                     self.data['paused'][fleet['id'] + ':' + agent['id']] = self.clock() + rule['pauseMinutes'] * 60
@@ -629,8 +654,12 @@ class Automation:
 
     def escalate(self, fleet, agent, rule, fire):
         record = {'id': uuid.uuid4().hex, 'fleetId': fleet['id'], 'agentId': agent['id'], 'agentName': agent['name'],
-                  'ruleName': rule['name'], 'at': self.clock(), 'message': fire['evidence'], 'acknowledged': False}
-        self.data['escalations'].append(record)
+                  'ruleName': rule['name'], 'at': self.clock(), 'message': fire['evidence'], 'acknowledged': False,
+                  **({'wakeAgentId': fire['wakeAgentId']} if fire.get('wakeAgentId') else {})}
+        # Request threads escalate too, so the record is saved now rather than on the next changed tick.
+        with self.lock:
+            self.data['escalations'].append(record)
+            self.persist()
         fire.update(status='sent', detail='Escalated to the operator.')
         url = (fleet.get('alerts') or {}).get('webhookUrl')
         if url:
@@ -668,9 +697,19 @@ class Automation:
             record = next((e for e in self.data['escalations'] if e['id'] == escalation_id and e['fleetId'] == fleet_id), None)
             if not record:
                 raise ValueError('Escalation not found.')
+            first = not record['acknowledged']
             record['acknowledged'] = True
             self.persist()
-            return deepcopy(record)
+        # Only the first acknowledgement wakes the agent.
+        wake = record.get('wakeAgentId') if first else None
+        fleet = self.app.store.fleet(fleet_id)
+        agent = next((a for a in fleet['agents'] if a['id'] == wake), None) if wake else None
+        if agent:
+            # An agent that reported blocked to the operator was told it would be woken once someone looked.
+            self.app.dispatch.deliver(fleet, agent, MARKER + ' The operator has looked at what blocked you\n\n'
+                                      'You reported: ' + record['message'] + '\nCheck whether you can continue now, or report blocked again.',
+                                      '', 'unblock-wake', 'Wake after blocker', record['message'])
+        return deepcopy(record)
 
     def resume(self, fleet_id, agent_id):
         with self.lock:

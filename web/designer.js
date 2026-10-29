@@ -1,6 +1,6 @@
 'use strict';
 // One Workflow screen: Design (board and inspector), Roles and Process & deploy are tabs of a single view.
-const DESIGN_VIEWS={board:'Design',roles:'Roles',workflow:'Process & deploy'};
+const DESIGN_VIEWS={board:'Design',roles:'Roles',workflow:'Process & deploy',profiles:'Profiles'};
 let designSelection=null;
 
 // One strip above the board toolbar, so the tabs sit in the same place on every tab.
@@ -13,16 +13,27 @@ function updateDesignTabs(){
    const tab=e.target.closest('[data-design-tab]');if(tab)setView(tab.dataset.designTab);
    if(e.target.closest('#design-deploy'))openDeployReview();
   });
+  // The switch waits for the button, so moving through the list with arrow keys never opens a review.
+  tabs.addEventListener('click',e=>{
+   if(!e.target.closest('#design-profile-switch'))return;
+   const slug=$('design-profile').value;if(!slug)return toast('Choose a profile to switch to.',true);
+   switchProfile(slug).catch(error=>toast(error.message,true));
+  });
  }
  tabs.classList.toggle('hidden',!DESIGN_VIEWS[view]);
- tabs.innerHTML=Object.entries(DESIGN_VIEWS).map(([id,label])=>
+ const markup=Object.entries(DESIGN_VIEWS).map(([id,label])=>
   '<button class="button small '+(view===id?'primary':'')+'" role="tab" aria-selected="'+(view===id)+'" data-design-tab="'+id+'">'+label+'</button>').join('')+deployBar();
+ // Health polls redraw this strip; leaving it alone when nothing changed keeps an open dropdown open.
+ if(tabs.dataset.markup!==markup){tabs.innerHTML=markup;tabs.dataset.markup=markup;}
 }
 // The workflow's deploy state, next to the tabs on every one of them.
 function deployBar(){
  const status=typeof deploymentStatus==='function'?deploymentStatus():null;
  const text=!status?'Checking deployment…':!status.active?'Not deployed yet: agents have no brief.':status.draftChanged?'Undeployed changes: agents still follow the last deploy.':'Deployed and up to date.';
- return '<span class="design-deploy"><span id="design-deploy-status">'+esc(text)+'</span><button class="button small primary" id="design-deploy"'+(status?.active&&!status.draftChanged?' disabled':'')+'>Review &amp; deploy</button></span>';
+ const profiles=(typeof profileData==='function'&&profileData()?.profiles)||[];
+ const picker=profiles.length?'<select id="design-profile" aria-label="Switch to a profile"><option value="">Switch profile…</option>'+
+  profiles.map(p=>'<option value="'+esc(p.slug)+'"'+(p.active?' disabled':'')+'>'+esc(p.name)+(p.active?' (active)':'')+'</option>').join('')+'</select><button class="button small" id="design-profile-switch">Switch…</button>':'';
+ return '<span class="design-deploy">'+picker+'<span id="design-deploy-status">'+esc(text)+'</span><button class="button small primary" id="design-deploy"'+(status?.active&&!status.draftChanged?' disabled':'')+'>Review &amp; deploy</button></span>';
 }
 
 // The inspector: what is selected on the board, edited in place.

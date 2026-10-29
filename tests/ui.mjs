@@ -379,7 +379,7 @@ try{
  checks.push('Rules has no routing section; presets add switched on; throttled agents listed; board labelled Draft; tweaks say they land on deploy');
  // One Workflow screen: tabs, and the inspector edits roles and hand-offs in place.
  await page.locator('#nav-workflow').click();await page.locator('#design-inspector').waitFor();
- assert.deepEqual(await page.locator('[data-design-tab]').allInnerTexts(),['Design','Roles','Process & deploy']);
+ assert.deepEqual(await page.locator('[data-design-tab]').allInnerTexts(),['Design','Roles','Process & deploy','Profiles']);
  const linkId=await page.locator('[data-edit-role-link]').first().getAttribute('data-edit-role-link');
  await page.locator('[data-edit-role-link="'+linkId+'"]').first().dispatchEvent('click');
  await page.locator('#i-delivery').selectOption('review');
@@ -416,6 +416,32 @@ try{
  await until(async()=>/Hand-offs are delivered from the Design tab/.test(await page.locator('#content').innerText()),'Advanced section missing');
  assert.deepEqual(errors,[]);
  checks.push('Deploy bar on the Workflow tabs; deploy review counts hand-off delivery; Advanced lists other triggers');
+ // Profiles: save the setup, change the draft, then switch back to the profile from the deploy bar in one reviewed deploy.
+ await page.locator('[data-design-tab="profiles"]').click();await page.locator('#profile-save-form').waitFor();
+ await page.locator('#f-profile-name').fill('Day shift');
+ await page.locator('#profile-save-form button[type="submit"]').click();
+ await page.locator('[data-profile-switch="day-shift"]').waitFor();
+ await page.locator('#search').fill('nothing like this');
+ await until(async()=>/No profile matches/.test(await page.locator('#content').innerText()),'Profile search does not filter');
+ await page.locator('#search').fill('');
+ await page.locator('[data-profile-switch="day-shift"]').waitFor();
+ const savedGoal=(await bootstrap()).state.fleets[0].roles.find(r=>r.id===roleId).goal;
+ await page.evaluate(id=>mutate(next=>updateFleet(next,f=>{f.roles.find(r=>r.id===id).goal='A goal the profile does not have';})),roleId);
+ await until(async()=>(await page.locator('#design-profile option[value="day-shift"]').count())>0,'Deploy bar has no profile switcher');
+ await page.locator('#design-profile').selectOption('day-shift');
+ assert.ok(await page.locator('#workflow-review').evaluate(d=>!d.open),'Choosing a profile opened the review before Switch');
+ await page.locator('#design-profile-switch').click();
+ await page.locator('#workflow-review').waitFor();
+ assert.equal(await page.locator('#workflow-review-title').innerText(),'Switch to Day shift');
+ assert.match(await page.locator('#workflow-review-body').innerText(),/Retooling to Day shift/);
+ await page.locator('#workflow-apply').click();await page.locator('#workflow-review').waitFor({state:'hidden'});
+ await until(async()=>(await bootstrap()).state.fleets[0].roles.find(r=>r.id===roleId)?.goal===savedGoal,'Switching did not restore the profile');
+ await until(async()=>/Before switching to Day shift/.test(await page.locator('#content').innerText()),'The setup before the switch is not listed');
+ assert.ok(await page.locator('.profile-card.is-active [data-profile-switch="day-shift"]').count(),'The deployed profile is not marked active');
+ await until(async()=>await page.locator('#deploy-banner').isHidden(),'Undeployed banner stayed after switching');
+ assert.match(await page.locator('#design-deploy-status').innerText(),/Deployed and up to date/);
+ assert.deepEqual(errors,[]);assert.equal((await bootstrap()).status.controls.length,0,'Tests must never send to agents');
+ checks.push('Profiles: save the setup, switch from the deploy bar through one reviewed deploy, setup before the switch listed, active profile marked');
  console.log(JSON.stringify({passed:true,checks},null,2));
 }finally{
  if(browser)await browser.close();

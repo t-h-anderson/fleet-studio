@@ -11,3 +11,4 @@ fleet-studio.json
 workflow-releases/
 *.sqlite*
 *.log
+profiles/

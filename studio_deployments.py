@@ -146,6 +146,21 @@ class Deployments:
             fleet = self.app.store.fleet(payload.get("fleetId"))
             before = export_spec(fleet)
             kind = payload.get("kind", "import")
+            extra = {}
+            if kind == "profile":
+                # Retool the draft to a saved profile and deploy it in one review, so agents never see a half-switched fleet.
+                from fleet_studio import validate_fleets
+                from studio_profiles import capture, previous_slug, retool
+                slug = payload.get("profile")
+                profile = self.app.profiles.read(slug)
+                retooled, remap = retool(fleet, profile)
+                fleet = validate_fleets([retooled], {h["id"] for h in state.get("hosts", [])})[0]
+                extra = {"profile": {"slug": slug, "name": profile.get("name") or slug, "remap": remap, "digest": digest(profile)},
+                         "previousProfile": {"slug": previous_slug(fleet["id"]),
+                                             "document": capture(self.app.store.fleet(fleet["id"]), "Before switching to " + (profile.get("name") or slug),
+                                                                 "Saved automatically before the switch, so you can switch back.")}}
+                before = export_spec(fleet)
+                kind = "deploy-profile"
             if kind == "import":
                 if payload.get("template") == "sample":
                     spec = json.loads((Path(__file__).parent / "workflows" / "sample.workflow.json").read_text(encoding="utf-8"))
@@ -159,7 +174,7 @@ class Deployments:
                 spec = validate(spec)
                 updated = apply_spec(fleet, spec)
                 changes = diff(before, spec)
-            elif kind in ("deploy", "reporting", "bounded-goals", "coordination"):
+            elif kind in ("deploy", "deploy-profile", "reporting", "bounded-goals", "coordination"):
                 spec = deepcopy(before)
                 if kind in ('bounded-goals', 'coordination'):
                     from studio_goals import POLICY
@@ -203,16 +218,16 @@ class Deployments:
                 raise ValueError("Unknown workflow preview action.")
             preview = {"id": uuid.uuid4().hex, "fleetId": fleet["id"], "kind": kind, "revision": state["revision"],
                        "createdAt": time.time(), "spec": spec, "fleet": updated, "changes": changes,
-                       "previousSpec": baseline if kind in ("deploy", "reporting", "bounded-goals", "coordination") else before,
+                       "previousSpec": baseline if kind in ("deploy", "deploy-profile", "reporting", "bounded-goals", "coordination") else before,
                        "pendingHandoffs": self.app.progress.pending_handoffs(fleet["id"]) if hasattr(self.app, "progress") else [],
                        "bindingChanges": {"before": self.release(self.data["active"][fleet["id"]])["fleet"]["agents"] if fleet["id"] in self.data["active"] else [], "after": updated["agents"]},
                        "activeAtPreview": self.data["active"].get(fleet["id"]),
                        "agents": [{"id": a["id"], "name": a["name"], "roles": a.get("roleIds", []), "linked": bool(a["sessionId"])} for a in updated["agents"]],
                        "enabledTriggers": [t["name"] for t in updated.get("triggers", []) if t["enabled"]],
-                       "document": render(spec), "gaps": spec["gaps"]}
+                       "document": render(spec), "gaps": spec["gaps"], **extra}
             self.previews = {k: v for k, v in self.previews.items() if v["createdAt"] > time.time() - 900}
             self.previews[preview["id"]] = preview
-            return {k: deepcopy(v) for k, v in preview.items() if k != "fleet"}
+            return {k: deepcopy(v) for k, v in preview.items() if k not in ("fleet", "previousProfile")}
 
     def apply(self, preview_id):
         from fleet_studio import atomic_json
@@ -223,8 +238,13 @@ class Deployments:
             state = self.app.store.snapshot()
             if preview["revision"] != state["revision"] or preview["activeAtPreview"] != self.data["active"].get(preview["fleetId"]):
                 raise ValueError("Fleet or deployment changed. Review it again.")
+            if preview.get("profile"):
+                # The file reviewed is the file deployed; a profile edited since the review needs a new review.
+                if digest(self.app.profiles.read(preview["profile"]["slug"])) != preview["profile"]["digest"]:
+                    raise ValueError("That profile changed since the review. Review it again.")
             fleet = deepcopy(preview["fleet"])
             state["fleets"] = [fleet if f["id"] == fleet["id"] else f for f in state["fleets"]]
+            result_warning = None
             if preview["kind"] == "import":
                 result = {"state": self.app.store.save(state)}
             else:
@@ -233,7 +253,8 @@ class Deployments:
                 directory = self.root / rid
                 directory.mkdir(parents=True)
                 release = {"id": rid, "fleetId": fleet["id"], "version": spec["version"], "createdAt": time.time(),
-                           "digest": digest(spec), "spec": spec, "fleet": fleet}
+                           "digest": digest(spec), "spec": spec, "fleet": fleet,
+                           **({"profile": {k: preview["profile"][k] for k in ("slug", "digest")}} if preview.get("profile") else {})}
                 atomic_json(directory / "workflow.json", spec)
                 atomic_json(directory / "release.json", release)
                 (directory / "WORKFLOW.md").write_text(render(spec), encoding="utf-8")
@@ -256,7 +277,15 @@ class Deployments:
                     self.data = previous
                     raise
                 self.cache[rid] = release
+                if preview.get("previousProfile"):
+                    # Only a switch that happened replaces the saved setup; a failed one leaves the earlier copy.
+                    try:
+                        self.app.profiles.write(preview["previousProfile"]["slug"], preview["previousProfile"]["document"])
+                    except OSError as exc:
+                        result_warning = "Deployed, but the setup before the switch could not be saved: " + str(exc)
                 result = {"state": saved, "release": {"id": rid, "directory": str(directory), "digest": release["digest"]}}
+                if result_warning:
+                    result["warning"] = result_warning
             del self.previews[preview_id]
             return result
 

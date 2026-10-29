@@ -79,7 +79,7 @@ function inspectorMarkup(){
  return (designSelection.type==='role'?roleInspector(item):linkInspector(item))+'<section id="inspector-live" class="inspector-live" aria-label="Live load"></section>';
 }
 function addInspector(){
- if(view!=='board'||boardMode!=='roles'||$('design-inspector'))return;
+ if(view!=='board'||$('design-inspector'))return;
  const content=$('content'),canvas=document.createElement('div');canvas.className='design-canvas';
  [...content.children].forEach(n=>canvas.append(n));
  const split=document.createElement('div');split.className='design-split';
@@ -114,7 +114,7 @@ async function removeInspectorLink(){
 
 // On the Design tab, clicking a role or a hand-off selects it rather than opening a dialog.
 $('content').addEventListener('click',e=>{
- if(view!=='board'||boardMode!=='roles')return;
+ if(view!=='board')return;
  const role=e.target.closest('[data-edit-role]'),link=e.target.closest('[data-edit-role-link]');
  if((role||link)&&!e.target.closest('#design-inspector')){
   e.preventDefault();e.stopImmediatePropagation();

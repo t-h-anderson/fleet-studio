@@ -57,7 +57,7 @@ async function loadHealth(){
   if(editingContent())return;
   const signature=fid+JSON.stringify(health.agents.map(a=>[a.agentId,a.health?.state]));
   if(['health','automation','throughput'].includes(view))renderContent();
-  else if(view==='board'&&!drag&&!roleDrag&&signature!==healthSignature)renderContent();
+  else if(view==='board'&&!roleDrag&&signature!==healthSignature)renderContent();
   healthSignature=signature;
  }catch(e){/* The status banner already reports a disconnected server. */}
 }
@@ -178,7 +178,7 @@ setInterval(()=>{if(state&&!stopped)loadHealth();},5000);
 const healthOriginalRenderContent=renderContent;
 let renderForced=false;
 renderContent=function(){
- if(!state||drag)return;
+ if(!state)return;
  // Background refreshes must not redraw a form someone is typing in; navigation and saves (renderAll) still do.
  if(!renderForced&&EDITABLE_VIEWS.includes(view)&&editingContent())return;
  if(view==='health')return renderHealth();

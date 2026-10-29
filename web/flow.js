@@ -69,8 +69,7 @@ function clearLive(){
 function decorateBoard(){
  if(view!=='board')return;
  const data=flowCache.get(activeId);
- // The overlay reads hand-offs, which only the roles layout draws.
- if(!liveBoard||!data||boardMode!=='roles')return clearLive();
+ if(!liveBoard||!data)return clearLive();
  $('board-live-legend')?.classList.remove('hidden');
  decorateRoles(data);decorateLinks(data);decorateStrip(data);fillInspectorLive();
 }

@@ -58,6 +58,10 @@ def preflight(app, fid, aid, now, expected=None, active=False):
         raise ValueError('Workflow is paused.')
     s = observe(app.codex_root, [agent['sessionId']])['sessions'][agent['sessionId']]
     goal = app.goals.validate_observation(s, time.time())
+    from studio_subagents import hold_reason as child_hold
+    reason = child_hold(s, require_known=True)
+    if reason:
+        raise ValueError(reason)
     if (not s.get('pids') or s.get('status') != 'attention' or
             s.get('turnStatus') not in ('failed', 'error') or not s.get('turnCompletedAt') or
             s.get('queueCount') != 0 or goal['status'] != ('active' if active else 'blocked')):

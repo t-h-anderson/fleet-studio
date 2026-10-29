@@ -227,6 +227,10 @@ class Goals:
         sid = agent['sessionId']
         observed = observe(self.app.codex_root, [sid])['sessions'].get(sid, {})
         goal = self.validate_observation(observed, time.time())
+        from studio_subagents import hold_reason as child_hold
+        reason = child_hold(observed, require_known=True)
+        if reason:
+            raise ValueError(reason)
         if observed.get('status') != 'closed' or observed.get('pids') or observed.get('turnStatus') == 'inProgress' or observed.get('queueCount') != 0:
             raise ValueError('Close the agent session at a safe boundary and empty its queue before changing a goal.')
         if any(r['status'] == 'sending' and any(t['sessionId'] == sid for t in r.get('targets', [])) for r in self.app.controls.receipts.values()) or any(j['status'] == 'running' for j in self.app.jobs.values()):

@@ -20,7 +20,8 @@ class RecoveryTests(unittest.TestCase):
         app.launch_enabled = True
         self.native['updatedAt'] = self.now - 1000
         self.session.update(status='attention', pids=[123], turnId='failed-turn',
-                            turnStatus='failed', turnCompletedAt=self.now - 1000)
+                            turnStatus='failed', turnCompletedAt=self.now - 1000,
+                            subagents={'known': True, 'observedAt': self.now, 'active': 0, 'uncertain': 0, 'children': []})
         self.rule = {'id': 'recovery-rule', 'enabled': True, 'maxFires': 3, 'cooldownMinutes': 1,
                      'when': {'forMinutes': 0}}
         self.error = {'kind': 'gateway', 'at': self.now - 1000}
@@ -74,6 +75,16 @@ class RecoveryTests(unittest.TestCase):
         self.error.update(kind='rate-limit', at=self.now - 600)
         self.native['updatedAt'] = self.error['at']
         self.run_recovery().call.assert_not_called()
+
+    def test_active_uncertain_and_missing_children_prevent_activation(self):
+        self.setup_recovery()
+        for report in (None, {'known': False},
+                       {'known': True, 'observedAt': self.now, 'active': 1},
+                       {'known': True, 'observedAt': self.now, 'uncertain': 1}):
+            with self.subTest(report=report):
+                self.session['subagents'] = report
+                self.run_recovery().call.assert_not_called()
+                self.backend.send.assert_not_called()
 
     def test_unknown_queue_and_restart_do_not_repeat(self):
         app, _ = self.setup_recovery()

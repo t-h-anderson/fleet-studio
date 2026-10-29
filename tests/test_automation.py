@@ -87,6 +87,36 @@ class AutomationTests(unittest.TestCase):
             'state': state, 'since': since, 'signals': [{'state': state, 'message': 'Ran `pytest` 5 times, failing each time.'}],
             'tokensLastHour': extra.pop('tokens', 0), **extra}
 
+    def test_active_children_hold_all_parent_interventions(self):
+        app, fleet = self.app()
+        agent = fleet['agents'][0]
+        monitor = self.monitor(fleet)
+        monitor['sessions'][agent['sessionId']]['subagents'] = {
+            'known': True, 'observedAt': time.time(), 'active': 1, 'uncertain': 0}
+        app.monitor = monitor
+        health = {'state': 'looping', 'signals': []}
+        with patch.object(app.automation, 'stop_turn') as stop, patch.object(app.automation, 'send') as send:
+            for action in ('reprompt', 'handoff', 'stop-turn', 'stop', 'pause'):
+                fire = {'action': action, 'status': 'pending'}
+                app.automation.execute(fleet, {}, agent, health, fire, monitor)
+                self.assertEqual(fire['status'], 'held')
+                self.assertIn('Subagents are working', fire['detail'])
+            stop.assert_not_called()
+            send.assert_not_called()
+        self.assertIn('Subagents are working', app.triggers.hold_reason([agent], monitor))
+
+    def test_native_interrupt_rechecks_child_activity(self):
+        app, fleet = self.app()
+        agent = fleet['agents'][0]
+        backend = app.runtimes.local['codex']
+        session = {'turnId': 'parent-turn', 'turnStatus': 'inProgress',
+                   'subagents': {'known': True, 'observedAt': time.time(), 'active': 1}}
+        from studio_agents import NotReady
+        with patch.object(backend, 'observe', return_value={'sessions': {agent['sessionId']: session}}), patch('studio_control.app_server') as rpc:
+            with self.assertRaises(NotReady):
+                backend.interrupt(agent['sessionId'])
+            rpc.assert_not_called()
+
     def test_reprompt_then_fallback_then_silence(self):
         app, fleet = self.app()
         clock = Clock()

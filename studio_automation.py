@@ -583,6 +583,13 @@ class Automation:
 
     def execute(self, fleet, rule, agent, health, fire, monitor):
         action = fire['action']
+        from studio_subagents import hold_reason as child_hold
+        from studio_bindings import session_key
+        if action in ('reprompt', 'handoff', 'stop-turn', 'stop', 'pause'):
+            reason = child_hold(monitor.get('sessions', {}).get(session_key(agent), {}), self.clock())
+            if reason:
+                fire.update(status='held', detail=reason)
+                return
         try:
             if action == 'reprompt':
                 if health['state'] == 'looping':
@@ -620,6 +627,13 @@ class Automation:
 
     def stop_turn(self, agent):
         backend = self.app.runtimes.for_agent(agent)
+        from studio_subagents import hold_reason as child_hold
+        from studio_bindings import session_key
+        with self.app.lock:
+            session = deepcopy(self.app.monitor.get('sessions', {}).get(session_key(agent), {}))
+        reason = child_hold(session)
+        if reason:
+            raise ValueError(reason)
         stop = getattr(backend, 'interrupt', None)
         if not stop:
             raise RuntimeError(agent['name'] + "'s backend cannot stop a running turn.")

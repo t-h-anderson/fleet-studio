@@ -124,6 +124,9 @@ def sessions(root):
 
 
 def observe(root, session_ids):
+    from studio_subagents import observe_children
+    session_ids = tuple(set(session_ids))
+    children = observe_children(root, session_ids)
     output = {}
     errors = []
     try:
@@ -152,7 +155,7 @@ def observe(root, session_ids):
                 "sessionId": session_id, "status": "unknown", "pids": [],
                 "observedAt": time.time(), "session": known.get(session_id),
                 "turnStatus": None, "goalStatus": None, "queueCount": None, "goalKnown": False,
-                "usage": usage.get(session_id, {}),
+                "usage": usage.get(session_id, {}), "subagents": children[session_id],
             }
             try:
                 item["pids"] = writer_owners(root / "thread-writer-locks" / (session_id + ".lock"))

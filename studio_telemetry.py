@@ -241,6 +241,8 @@ def classify_command(command):
 
 
 def classify(tool, label, script=None):
+    if tool.rsplit('.', 1)[-1] in ('spawn_agent', 'send_message', 'followup_task', 'interrupt_agent', 'list_agents', 'wait_agent') or tool in ('spawnAgent', 'sendInput', 'wait', 'closeAgent'):
+        return 'wait' if tool.rsplit('.', 1)[-1] in ('wait_agent', 'list_agents', 'wait') else 'other'
     if tool in WORK_TOOLS:
         return 'work'
     if tool in EXPLORE_TOOLS:

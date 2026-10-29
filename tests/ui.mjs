@@ -451,6 +451,17 @@ try{
  assert.match(await page.locator('#design-deploy-status').innerText(),/Deployed and up to date/);
  assert.deepEqual(errors,[]);assert.equal((await bootstrap()).status.controls.length,0,'Tests must never send to agents');
  checks.push('Profiles: save the setup, switch from the deploy bar through one reviewed deploy, setup before the switch listed, active profile marked');
+ // Child observations are metadata, not new fleet roles or controls.
+ await page.evaluate(()=>{
+  const d=healthCache.get(activeId),a=d.agents[0];
+  a.health={...a.health,state:'delegating',signals:[{kind:'subagents',state:'delegating',message:'Subagents are working; let the parent coordinate them.'}],
+   subagents:{known:true,active:1,uncertain:0,tokensUsed:1234,children:[{name:'Reviewer',path:'/root/reviewer',state:'working',tokensUsed:1234}]}};
+  healthExpanded=a.agentId;setView('health');renderHealth();
+ });
+ assert.match(await page.locator('.health-detail').innerText(),/Subagents: 1/);
+ assert.match(await page.locator('.health-detail').innerText(),/\/root\/reviewer/);
+ assert.match(await page.locator('.health-detail').innerText(),/separate from parent/);
+ checks.push('Child-aware health shows active descendants and separate token usage without creating fleet roles');
  console.log(JSON.stringify({passed:true,checks},null,2));
 }finally{
  if(browser)await browser.close();

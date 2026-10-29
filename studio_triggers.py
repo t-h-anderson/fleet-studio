@@ -170,6 +170,10 @@ class Triggers:
                 return agent["name"] + " is closed or needs attention; open/review the session first."
             if agent.get("backend", "codex") != "codex":
                 return agent["name"] + " has no safe message queue; use an explicit reviewed turn after closing the session."
+            from studio_subagents import hold_reason as child_hold
+            reason = child_hold(item)
+            if reason:
+                return agent['name'] + ': ' + reason
             if not item.get("goalKnown"):
                 return agent["name"] + " has unavailable goal-state observations."
             if item.get("goalStatus") in ("paused", "blocked", "budget_limited", "usage_limited"):

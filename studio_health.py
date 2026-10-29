@@ -13,7 +13,7 @@ import time
 
 from studio_bindings import session_key
 
-STATES = ('looping', 'burning', 'stalled', 'admin-heavy', 'waiting', 'productive', 'idle', 'offline', 'no-telemetry')
+STATES = ('looping', 'burning', 'stalled', 'admin-heavy', 'delegating', 'waiting', 'productive', 'idle', 'offline', 'no-telemetry')
 PROBLEM_STATES = ('looping', 'burning', 'stalled', 'admin-heavy')
 DEFAULTS = {
     'stallMinutes': 20,
@@ -339,16 +339,25 @@ def assess(session, turns, now, settings, open_work=False, blocked=None, since_i
     turns = sorted(turns, key=lambda turn: turn.get('lastAt') or 0, reverse=True)
     status = session.get('status') or 'unknown'
     signals = []
+    from studio_subagents import hold_reason as child_hold
+    children = session.get('subagents')
+    child_wait = child_hold(session, now)
     calls_since = call_window(turns, now)
-    loop = detect_loop(turns, now, settings, since_intervention, calls_since)
-    burn = detect_burn(turns, now, settings, calls_since)
-    stall = None if blocked or waiting_on_person(turns) else detect_stall(session, turns, now, settings, open_work)
-    admin = detect_admin(turns, now, settings, calls_since)
+    if child_wait:
+        loop = burn = stall = admin = None
+    else:
+        loop = detect_loop(turns, now, settings, since_intervention, calls_since)
+        burn = detect_burn(turns, now, settings, calls_since)
+        stall = None if blocked or waiting_on_person(turns) else detect_stall(session, turns, now, settings, open_work)
+        admin = detect_admin(turns, now, settings, calls_since)
     for state, evidence in (('looping', loop), ('burning', burn), ('stalled', stall), ('admin-heavy', admin)):
         if evidence:
             signals.append({'state': state, **evidence})
     person = waiting_on_person(turns)
-    if signals:
+    if child_wait:
+        state = 'delegating' if children and children.get('known') and children.get('active') and not children.get('uncertain') and 0 <= now - (children.get('observedAt') or 0) <= 20 else 'waiting'
+        signals.append({'state': state, 'kind': 'subagents', 'message': child_wait})
+    elif signals:
         state = signals[0]['state']
     elif person:
         state = 'waiting'
@@ -378,6 +387,7 @@ def assess(session, turns, now, settings, open_work=False, blocked=None, since_i
         'state': state,
         'signals': signals,
         'sessionStatus': status,
+        'subagents': children,
         'lastActivityAt': max((turn.get('lastAt') or 0 for turn in turns), default=None) or None,
         # Only work that succeeded counts: a failing test run is not recovery.
         'lastWorkAt': last_work(turns),

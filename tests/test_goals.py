@@ -25,7 +25,8 @@ class GoalTests(unittest.TestCase):
                        'createdAt': self.now - 5000, 'updatedAt': self.now - 1000,
                        'tokensUsed': 500, 'tokenBudget': 8000, 'timeUsedSeconds': 60}
         self.session = {'sessionId': a['sessionId'], 'status': 'closed', 'pids': [], 'goalKnown': True,
-                        'goalStatus': 'blocked', 'goal': self.native, 'queueCount': 0, 'observedAt': self.now}
+                        'goalStatus': 'blocked', 'goal': self.native, 'queueCount': 0, 'observedAt': self.now,
+                        'subagents': {'known': True, 'observedAt': self.now, 'active': 0, 'uncertain': 0, 'children': []}}
         app.monitor.update(observedAt=self.now, sessions={a['sessionId']: self.session})
         app.goals.observe([f], app.monitor)
         self.link = {**self.payload, 'goalId': self.native['id'], 'completionCriteria': 'Reviewed packet has a recipient receipt'}
@@ -39,6 +40,14 @@ class GoalTests(unittest.TestCase):
 
     def native_patch(self, app):
         return patch('studio_goals.observe', side_effect=lambda *_: deepcopy(app.monitor))
+
+    def test_manual_goal_change_waits_for_children_even_when_parent_is_closed(self):
+        app, _ = self.setup_goal()
+        self.session['subagents']['active'] = 1
+        with self.native_patch(app), patch('studio_goals.GoalRPC') as rpc:
+            with self.assertRaisesRegex(ValueError, 'Subagents are working'):
+                app.goals.preview(self.decision)
+            rpc.assert_not_called()
 
     def rpc_goal(self):
         return {'threadId': self.session['sessionId'], **{k:v for k,v in self.native.items() if k != 'id'}}

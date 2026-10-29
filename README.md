@@ -606,3 +606,26 @@ and never automatically replayed. Codex offers no atomic expected-goal write;
 external clients can still race the final check. Closed sessions are not launched.
 
 This feature does not deploy a workflow, enable a rule, or change live sessions.
+
+### Subagent supervision
+
+Local Codex parents now show their native descendants, including nested children,
+in the expanded Agent health row. A parent with active children is shown as
+**Subagents working**; silence while delegating does not trigger parent stall,
+loop or token-burn interventions. The parent still owns delegation and integration.
+Studio never assigns fleet roles to children or starts, stops or messages them.
+
+Automatic messages, reassignment, interruption and native goal changes are held
+while descendants are active, failed or have unsettled tool outcomes. Missing,
+stale, cyclic or oversized relationship metadata is uncertain and also holds
+intervention. Completed children restore ordinary parent supervision. Child
+token usage is a separate lifetime total; it is not added to the parent's fresh
+token or waste estimates. Raw child turn status remains visible alongside lifecycle
+state. Native metadata is read only; prompts and child tool outputs are not retained.
+
+This requires Codex's native `thread_spawn_edges` and turn/item metadata. Older
+local schemas are shown as uncertain. Remote nodes without descendant metadata
+keep their existing message behavior, but native goal recovery requires known
+descendant state. Graph observations are bounded to 500 descendants per parent;
+larger graphs require review. No transcript tail is used to guess that children
+have finished.

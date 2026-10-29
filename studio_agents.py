@@ -118,6 +118,10 @@ class CodexBackend(AgentBackend):
         """Stop the running turn through Codex's own app-server interface."""
         from studio_control import app_server
         turn = self.observe([session_id])["sessions"].get(session_id, {})
+        from studio_subagents import hold_reason as child_hold
+        reason = child_hold(turn, require_known=True)
+        if reason:
+            raise NotReady(reason)
         if turn.get("turnStatus") != "inProgress" or not turn.get("turnId"):
             raise NothingRunning("No Codex turn is running for this session.")
         try:

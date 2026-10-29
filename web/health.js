@@ -2,7 +2,7 @@
 // Agent health: where agents are stuck, what they spend tokens on, and quick tweaks.
 const healthCache=new Map(),automationCache=new Map(),turnCache=new Map(),rulesCache=new Map();
 let healthExpanded='';
-const HEALTH_LABELS={looping:'Looping',burning:'Burning tokens',stalled:'Stalled','admin-heavy':'Admin-heavy',waiting:'Waiting',productive:'Productive',idle:'Idle',offline:'Offline','no-telemetry':'No telemetry',unknown:'Not observed yet'};
+const HEALTH_LABELS={delegating:'Subagents working',looping:'Looping',burning:'Burning tokens',stalled:'Stalled','admin-heavy':'Admin-heavy',waiting:'Waiting',productive:'Productive',idle:'Idle',offline:'Offline','no-telemetry':'No telemetry',unknown:'Not observed yet'};
 let healthSignature='',healthSort='problems';
 // Thresholds behind each kind of signal, so the operator can see why it fired and tune it.
 const THRESHOLD_HINTS={'silent-turn':s=>'threshold '+s.silentMinutes+' min','idle-with-work':s=>'threshold '+s.stallMinutes+' min',
@@ -98,7 +98,7 @@ function healthRow(row){
    (paused?'<button class="button small" data-health-resume="'+a.id+'">Resume</button>':'')+
    '<button class="icon-button" data-agent-activity="'+a.id+'" aria-label="Activity for '+esc(a.name)+'" title="Read agent activity">'+icon('activity')+'</button>'+
   '</div></td></tr>'+
-  (expanded?'<tr class="health-detail"><td colspan="7">'+(h?.signals?.length>1?'<ul>'+h.signals.map(s=>'<li><strong>'+esc(HEALTH_LABELS[s.state]||s.state)+'</strong> '+esc(s.message)+'</li>').join('')+'</ul>':'')+turnTimeline(a.id)+'</td></tr>':'');
+  (expanded?'<tr class="health-detail"><td colspan="7">'+(h?.signals?.length>1?'<ul>'+h.signals.map(s=>'<li><strong>'+esc(HEALTH_LABELS[s.state]||s.state)+'</strong> '+esc(s.message)+'</li>').join('')+'</ul>':'')+subagentMarkup(h?.subagents)+turnTimeline(a.id)+'</td></tr>':'');
 }
 function setupChecklist(data){
  const f=current(),status=data.deployment||{};
@@ -207,3 +207,9 @@ renderAll=function(){
  if(!healthCache.has(activeId)||view==='automation'&&!rulesCache.has(activeId))loadHealth();
  if(view==='throughput'&&typeof loadProgress==='function'&&!progressCache.has(activeId))loadProgress();
 };
+
+function subagentMarkup(report){
+ if(!report)return '';
+ const children=report.children||[];
+ return '<div class="info-block"><strong>Subagents: '+children.length+'</strong><p>'+(!report.known?'Activity is uncertain. Automatic intervention is held.':report.active+' working; '+report.uncertain+' need review.')+' Child tokens used (lifetime, separate from parent): '+tokenCount(report.tokensUsed)+'.</p>'+children.map(c=>'<p style="margin-left:'+Math.min(8,c.depth||1)*12+'px">'+esc(c.path||c.name)+' ? '+esc(c.state)+' ? '+tokenCount(c.tokensUsed)+' tokens</p>').join('')+'</div>';
+}

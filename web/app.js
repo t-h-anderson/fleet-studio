@@ -16,7 +16,7 @@ let state=null,token='',monitor={sessions:{},events:[],jobs:[]},catalogue=[];
 let activeId=localStorage.getItem('fleet-active')||'',view=localStorage.getItem('fleet-view')||'health';
 // The old Triggers view is now part of the Workflow screen.
 if(view==='triggers')view='board';
-if(!['roster','board','sessions','roles','backlog','activity','workflow','progress','health','automation','throughput'].includes(view))view='health';
+if(!['roster','board','sessions','roles','backlog','activity','workflow','profiles','progress','health','automation','throughput'].includes(view))view='health';
 let query='',filter='all',selected=new Set(),editing=null,zoom=1,drag=null,pendingJob=null,stopped=false,saveQueue=Promise.resolve();
 function current(){return state.fleets.find((f)=>f.id===activeId)||state.fleets[0];}
 function sessionKey(a){const sid=a.sessionId??a.id??'',host=a.hostId||'local',backend=a.backend||'codex';return host==='local'&&backend==='codex'?sid:[host,backend,sid].join(':');}
@@ -126,7 +126,7 @@ function editingContent(){
   [...document.querySelectorAll('#design-inspector select')].some(n=>[...n.options].some(o=>o.selected!==o.defaultSelected));
 }
 // Views whose timed redraws wait while someone is editing on them.
-const EDITABLE_VIEWS=['health','automation','throughput','board'];
+const EDITABLE_VIEWS=['health','automation','throughput','board','profiles'];
 async function refresh(full=false){
  if(stopped)return;
  try{

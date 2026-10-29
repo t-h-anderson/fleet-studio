@@ -98,6 +98,8 @@ class ProfileTests(unittest.TestCase):
         brief = Path(result['release']['directory'], 'agents', agents['Writer A']['id'] + '.md').read_text(encoding='utf-8')
         self.assertIn('Integrator', brief)
         self.assertEqual(app.deployments.data['active'][fleet['id']], result['release']['id'])
+        # The deployed release is the retooled draft, so nothing is left undeployed.
+        self.assertFalse(app.deployments.draft_status(after)['draftChanged'])
 
     def test_what_cannot_be_matched_is_listed(self):
         app, fleet = self.app()

@@ -130,7 +130,7 @@ async function launch(ids){
 function field(label,name,value,extra=''){return '<div class="field"><label for="f-'+name+'">'+label+'</label><input id="f-'+name+'" name="'+name+'" value="'+esc(value)+'" '+extra+'></div>';}
 function openEditor(type,id=null,preSession=null){
  const f=current();
- editing={type,id,item:type==='agent'?(id?clone(f.agents.find((a)=>a.id===id)):{id:uid(),name:preSession?preSession.name.slice(0,80):'',role:'Agent',directory:preSession?preSession.directory:'',sessionId:preSession?preSession.id:'',backend:preSession?.backend||'codex',hostId:preSession?.hostId||'local',enabled:true,notes:'',position:{x:80+(f.agents.length%3)*320,y:60+Math.floor(f.agents.length/3)*200}}):type==='fleet'?(id?clone(f):{id:uid(),name:'',description:'',windowName:'',agents:[],links:[]}):(id?clone(f.links.find((l)=>l.id===id)):{id:uid(),source:'',target:'',label:''})};
+ editing={type,id,item:type==='agent'?(id?clone(f.agents.find((a)=>a.id===id)):{id:uid(),name:preSession?preSession.name.slice(0,80):'',role:'Agent',directory:preSession?preSession.directory:'',sessionId:preSession?preSession.id:'',backend:preSession?.backend||'codex',hostId:preSession?.hostId||'local',enabled:true,notes:'',position:{x:80+(f.agents.length%3)*320,y:60+Math.floor(f.agents.length/3)*200}}):id?clone(f):{id:uid(),name:'',description:'',windowName:'',agents:[]}};
  $('editor-title').textContent=(id?'Edit ':'New ')+{agent:'agent',fleet:'fleet'}[type];
  $('editor-eyebrow').textContent='FLEET CONFIGURATION';
  $('delete-item').classList.toggle('hidden',!id);$('delete-item').textContent=type==='fleet'?'Delete fleet':'Remove agent';$('delete-item').disabled=type==='fleet'&&state.fleets.length===1;

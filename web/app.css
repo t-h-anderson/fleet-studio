@@ -45,7 +45,7 @@ dialog{border:1px solid #dce5d8;padding:0;box-shadow:0 30px 100px #122b1c35;bord
 .health-admin-heavy,.health-chip.health-admin-heavy{background:#efe4f8;color:#6b3a8c}
 .health-burning,.health-chip.health-burning{background:#fde2ea;color:#9a1e4a}
 .health-waiting,.health-chip.health-waiting{background:#e5eefb;color:#2d5c99}
-.health-productive,.health-chip.health-productive{background:#dff2e6;color:#20764f}
+.health-productive,.health-chip.health-productive,.health-delegating,.health-chip.health-delegating{background:#dff2e6;color:#20764f}
 .health-idle,.health-chip.health-idle{background:#eef3ef;color:#4f6b5e}
 .health-offline,.health-unknown,.health-chip.health-offline{background:#f0f1f2;color:#6d7478}
 .health-summary{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:8px;margin:4px 0 18px}

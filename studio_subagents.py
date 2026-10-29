@@ -11,11 +11,25 @@ def observe_children(root, session_ids):
     from studio_runtime import connect
     result = {sid: {'known': False, 'observedAt': time.time(), 'children': [],
                     'active': 0, 'uncertain': 0, 'tokensUsed': None} for sid in session_ids}
+    if not (root / 'state_5.sqlite').is_file():
+        # No Codex state database means no relationship metadata to read, not uncertain children.
+        for report in result.values():
+            report.update(supported=False, error='No Codex state database records subagent relationships here.')
+        return result
     try:
         with closing(connect(root, 'state_5.sqlite')) as state, closing(connect(root, 'thread_history_1.sqlite')) as history:
             # Capability detection is intentional: missing schemas are unknown,
-            # rather than proof that this parent has no children.
-            state.execute('SELECT parent_thread_id,child_thread_id,status FROM thread_spawn_edges LIMIT 0')
+            # rather than proof that this parent has no children. A Codex that never
+            # records spawn edges is marked unsupported, so only actions that need
+            # known children are held there, not the whole fleet's supervision.
+            try:
+                state.execute('SELECT parent_thread_id,child_thread_id,status FROM thread_spawn_edges LIMIT 0')
+            except sqlite3.OperationalError as exc:
+                if 'no such table' not in str(exc):
+                    raise
+                for report in result.values():
+                    report.update(supported=False, error='This Codex version records no subagent relationships.')
+                return result
             columns = {r[1] for r in state.execute('PRAGMA table_info(threads)')}
             fields = [k for k in ('id', 'agent_nickname', 'agent_path', 'model', 'tokens_used', 'updated_at', 'updated_at_ms') if k in columns]
             item_columns = {r[1] for r in history.execute('PRAGMA table_info(thread_items)')}
@@ -82,15 +96,20 @@ def observe_children(root, session_ids):
     return result
 
 
-def hold_reason(session, now=None, require_known=False):
+def hold_reason(session, now=None, require_known=False, risky=False):
     """Legacy/remote observations without this capability remain compatible.
 
     Native goal recovery explicitly requires a known, fresh descendant graph.
     Local observations always supply the field, including capability failures.
+    A local Codex that records no spawn edges is unsupported: ordinary supervision
+    continues there, and only risky actions (automatic stops) or callers that
+    require known children are held.
     """
     report = session.get('subagents')
     if report is None and not require_known:
         return ''
+    if report and report.get('supported') is False:
+        return 'Subagent tracking is unavailable on this Codex version; review before intervening.' if require_known or risky else ''
     now = time.time() if now is None else now
     if not report or not report.get('known') or not 0 <= now - (report.get('observedAt') or 0) <= 20:
         return 'Subagent activity is unavailable or uncertain; review before intervening.'

@@ -91,8 +91,35 @@ class SubagentTests(unittest.TestCase):
         self.assertEqual(hold_reason({'subagents': self.observe()}), '')
         with closing(sqlite3.connect(self.root / 'state_5.sqlite')) as db, db:
             db.execute('DROP TABLE thread_spawn_edges')
-        self.assertFalse(self.observe()['known'])
-        self.assertTrue(hold_reason({'subagents': self.observe()}))
+        report = self.observe()
+        self.assertFalse(report['known'])
+        self.assertIs(report['supported'], False)
+        # A Codex without subagent metadata keeps ordinary supervision; only risky actions need known children.
+        self.assertEqual(hold_reason({'subagents': report}), '')
+        self.assertIn('unavailable on this Codex version', hold_reason({'subagents': report}, require_known=True))
+
+    def test_unsupported_codex_keeps_ordinary_health_detection(self):
+        self.graph()
+        with closing(sqlite3.connect(self.root / 'state_5.sqlite')) as db, db:
+            db.execute('DROP TABLE thread_spawn_edges')
+        health = assess({'status': 'idle', 'subagents': self.observe()}, [], self.now, DEFAULTS, open_work=True)
+        self.assertEqual(health['state'], 'stalled')
+
+    def test_no_codex_state_database_is_unsupported_not_uncertain(self):
+        # No graph() here: this Codex home has no state database to read at all.
+        self.now = time.time()
+        report = self.observe()
+        self.assertIs(report['supported'], False)
+        self.assertEqual(hold_reason({'subagents': report}), '')
+        self.assertTrue(hold_reason({'subagents': report}, require_known=True))
+
+    def test_a_transient_read_failure_still_holds(self):
+        self.graph()
+        with patch('studio_runtime.connect', side_effect=sqlite3.OperationalError('database is locked')):
+            report = observe_children(self.root, ['parent'])['parent']
+        self.assertFalse(report['known'])
+        self.assertNotIn('supported', report)
+        self.assertTrue(hold_reason({'subagents': report}))
 
     def test_cycles_and_truncation_fail_closed(self):
         self.graph()

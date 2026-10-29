@@ -117,6 +117,33 @@ class AutomationTests(unittest.TestCase):
                 backend.interrupt(agent['sessionId'])
             rpc.assert_not_called()
 
+    def test_codex_without_subagent_metadata_holds_only_automatic_stops(self):
+        app, fleet = self.app()
+        agent = fleet['agents'][0]
+        monitor = self.monitor(fleet)
+        unsupported = {'known': False, 'supported': False, 'observedAt': time.time(), 'active': 0, 'uncertain': 0}
+        monitor['sessions'][agent['sessionId']]['subagents'] = unsupported
+        app.monitor = monitor
+        health = {'state': 'looping', 'signals': [], 'since': time.time() - 60}
+        with patch.object(app.automation, 'stop_turn') as stop, patch.object(app.automation, 'send') as send:
+            for action in ('stop-turn', 'stop'):
+                fire = {'action': action, 'status': 'pending'}
+                app.automation.execute(fleet, {}, agent, health, fire, monitor)
+                self.assertEqual(fire['status'], 'held')
+                self.assertIn('unavailable on this Codex version', fire['detail'])
+            stop.assert_not_called()
+            fire = {'action': 'reprompt', 'status': 'pending'}
+            app.automation.execute(fleet, rule(message=''), agent, health, fire, monitor)
+            self.assertNotEqual(fire['status'], 'held')
+            send.assert_called()
+        self.assertNotIn('Subagent', app.triggers.hold_reason([agent], monitor))
+        # The operator's Stop still reaches Codex.
+        backend = app.runtimes.local['codex']
+        session = {'turnId': 'parent-turn', 'turnStatus': 'inProgress', 'subagents': unsupported}
+        with patch.object(backend, 'observe', return_value={'sessions': {agent['sessionId']: session}}), patch('studio_control.app_server') as rpc:
+            backend.interrupt(agent['sessionId'])
+            rpc.assert_called_once()
+
     def test_reprompt_then_fallback_then_silence(self):
         app, fleet = self.app()
         clock = Clock()

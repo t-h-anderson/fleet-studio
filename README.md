@@ -580,3 +580,29 @@ Follow `nextCursor` using `--cursor`; changed assignment/stop/evidence snapshots
 Monitoring includes durable counts of duplicate events/reports actually suppressed and manual reconciliations actually observed, with a counter-start timestamp. Retained delivery states and current blocker intervals are qualified separately; unavailable time stays unknown. These are neither lifetime totals nor estimates of saved time, cost or technical correctness.
 
 The existing `python -m unittest discover -s tests` suite includes composed scenarios for accepted dependencies during a stop, repeated/out-of-order reports, restart around dispatch, uncertain native acknowledgement, changed assignments, policy changes, evidence retention and bounded-context pagination. `node tests/ui.mjs` uses the installed Playwright/Edge tooling for browser verification. All fixtures are synthetic and native boundaries are mocked; no model calls, tracker mutations, package downloads or MATLAB processes are needed. Acceptance remains at completed module/substantial-part boundaries.
+
+### Opt-in native goal recovery
+
+In Automations, select **Blocked by a transient model error** and **Resume the
+same native goal**. No default rule enables this action. Profiles preserve it
+with the other automation rules. Fleet and agent pauses remain in force.
+
+Recovery requires a linked local Codex goal whose transition to `blocked`
+coincides with a structured 502 or `rate_limit_exceeded` error in its latest
+settled failed turn. The existing session must be open with an empty queue.
+Reported blockers, paused/limited goals, missing evidence, unmatched tool calls
+and any tools in the failed turn require operator review. Transcripts larger
+than 8 MB also require review; recovery never guesses from a partial tail.
+
+Studio activates the same goal through the existing native goal RPC, verifies
+its objective, creation time, usage and budget, rechecks safety, then queues one
+continuation message. A queued message confirms delivery, not resumed work.
+The configured cooldown is a minimum; gateway errors wait at least one minute,
+rate limits at least fifteen minutes, with exponential backoff. At most three
+attempts are allowed per goal (or the configured smaller limit), across restarts
+and rule edits, then Studio escalates locally for operator review. The rolling
+window setting does not reset this per-goal cap. Unknown outcomes are retained
+and never automatically replayed. Codex offers no atomic expected-goal write;
+external clients can still race the final check. Closed sessions are not launched.
+
+This feature does not deploy a workflow, enable a rule, or change live sessions.

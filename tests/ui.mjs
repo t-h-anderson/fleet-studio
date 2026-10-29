@@ -341,7 +341,12 @@ try{
  await page.locator('#f-auto-role').selectOption(writerRole);
  const offered=await page.locator('#f-auto-agent option').evaluateAll(options=>options.map(o=>o.value).filter(Boolean));
  assert.deepEqual(offered,[fixture.writerId]);
+ await page.locator('#f-auto-signal').selectOption('transient-goal-error');
+ assert.equal(await page.locator('#f-auto-action').inputValue(),'resume-goal');
+ assert.equal(await page.locator('#f-auto-then').inputValue(),'escalate');
+ assert.equal(await page.locator('#f-auto-max').inputValue(),'3');
  await page.locator('#cancel-editor').click();
+ checks.push('Opt-in goal recovery pairs its transient signal with native resume and a finite retry limit');
  // A role that a rule and a token limit refer to can still be removed; both references go with it.
  const tempRole=await page.evaluate(async()=>{
   const id=crypto.randomUUID();

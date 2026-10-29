@@ -18,8 +18,8 @@ import uuid
 
 from studio_health import PROBLEM_STATES
 
-SIGNALS = PROBLEM_STATES + ('waiting', 'any-problem')
-ACTIONS = ('reprompt', 'handoff', 'stop-turn', 'stop', 'pause', 'escalate')
+SIGNALS = PROBLEM_STATES + ('waiting', 'any-problem', 'transient-goal-error')
+ACTIONS = ('reprompt', 'handoff', 'stop-turn', 'stop', 'pause', 'escalate', 'resume-goal')
 THEN_ACTIONS = ('escalate', 'handoff', 'stop', 'pause', 'none')
 OUTCOME_SECONDS = 1800
 MARKER = '[Fleet Studio]'
@@ -93,6 +93,10 @@ def clean_automations(raw, role_ids, agent_ids=None):
         action, then = row.get('action'), row.get('thenAction', 'escalate')
         if action not in ACTIONS or then not in THEN_ACTIONS:
             raise ValueError('Choose a supported automation action.')
+        if (signal == 'transient-goal-error') != (action == 'resume-goal'):
+            raise ValueError('Transient goal errors require the resume-goal action.')
+        if action == 'resume-goal' and (type(row.get('maxFires', 3)) is not int or row.get('maxFires', 3) < 1 or then != 'escalate'):
+            raise ValueError('Goal recovery requires a finite retry limit and operator escalation.')
         handoff_role = row.get('handoffRoleId', '')
         if handoff_role and handoff_role not in role_ids:
             raise ValueError('The handoff role must belong to this fleet.')
@@ -333,6 +337,10 @@ class Automation:
                         if not agent['enabled'] or not agent.get('sessionId'):
                             continue
                         if not watches(rule, agent):
+                            continue
+                        if rule['action'] == 'resume-goal':
+                            from studio_goal_recovery import recover
+                            recover(self.app, fleet, rule, agent, now)
                             continue
                         health = self.app.health.get(fleet['id'], agent['id'])
                         if not matches(rule, health) or now - health['since'] < rule['when']['forMinutes'] * 60:
@@ -800,6 +808,14 @@ class Automation:
             last = {}
             for fire in fires:
                 last[fire['ruleId']] = {k: fire[k] for k in ('at', 'status', 'detail', 'action', 'agentName')}
+            for receipt in list(self.app.goals.receipts.values()):
+                if receipt.get('fleetId') == fleet_id and receipt.get('recoveryGoal') and receipt.get('ruleId'):
+                    previous = last.get(receipt['ruleId'], {})
+                    if receipt['startedAt'] >= previous.get('at', 0):
+                        last[receipt['ruleId']] = {
+                            'at': receipt['startedAt'], 'status': receipt['status'],
+                            'detail': receipt.get('detail', ''), 'action': 'resume-goal',
+                            'agentName': receipt['agentName']}
             throttled_seconds = sum(t['end'] - max(t['start'], now - 86400) for t in day) + sum(now - max(t['since'], now - 86400) for t in throttled)
             return deepcopy({
                 'fires': fires[::-1],

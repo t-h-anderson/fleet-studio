@@ -1,11 +1,12 @@
 'use strict';
 // Health automations, throttles and the throughput view.
-const SIGNAL_LABELS={looping:'Looping',stalled:'Stalled','admin-heavy':'Admin-heavy',burning:'Burning tokens',waiting:'Waiting on a blocker','any-problem':'Any problem'};
-const ACTION_LABELS={reprompt:'Reprompt with evidence',handoff:'Reassign the work to a healthy agent','stop-turn':'Stop the running turn',stop:'Stop the turn and mute Studio messages',pause:'Mute Studio messages to the agent',escalate:'Escalate to me',none:'Do nothing more'};
+const SIGNAL_LABELS={'transient-goal-error':'Blocked by a transient model error',looping:'Looping',stalled:'Stalled','admin-heavy':'Admin-heavy',burning:'Burning tokens',waiting:'Waiting on a blocker','any-problem':'Any problem'};
+const ACTION_LABELS={'resume-goal':'Resume the same native goal',reprompt:'Reprompt with evidence',handoff:'Reassign the work to a healthy agent','stop-turn':'Stop the running turn',stop:'Stop the turn and mute Studio messages',pause:'Mute Studio messages to the agent',escalate:'Escalate to me',none:'Do nothing more'};
 const backtests=new Map();
 
 function roleLabel(id){return id?(current().roles.find(r=>r.id===id)?.name||'Missing role'):'All roles';}
 function ruleSummary(r){
+ if(r.action==='resume-goal')return 'Resume the same blocked native goal after confirmed 502 or rate-limit failures. At most '+Math.min(3,r.maxFires)+' attempts per goal, with increasing backoff; then operator review. Tool calls, reported blockers and uncertain outcomes require review.';
  const agent=r.agentId&&current().agents.find(a=>a.id===r.agentId);
  return 'When '+(agent?agent.name+' is ':roleLabel(r.roleId).toLowerCase()+' '+(r.roleId?'agents are ':'are '))+SIGNAL_LABELS[r.when.signal].toLowerCase()+
   (r.when.forMinutes?' for '+r.when.forMinutes+' min':'')+': '+ACTION_LABELS[r.action].toLowerCase()+
@@ -139,6 +140,8 @@ openEditor=function(type,id=null,preSession=null){
   field('Pause length (minutes)','auto-pause',item.pauseMinutes,'type="number" min="1" max="10080"')+'</div>'+
   '<label class="checkbox-field"><input id="f-auto-park" type="checkbox" '+(item.parkSource?'checked':'')+'>Pause the stuck agent after handing off its work</label>'+
   '<label class="checkbox-field"><input id="f-auto-enabled" type="checkbox" '+(item.enabled?'checked':'')+'>Running</label>';
+ $('f-auto-signal').onchange=()=>{if($('f-auto-signal').value==='transient-goal-error'){$('f-auto-action').value='resume-goal';$('f-auto-then').value='escalate';$('f-auto-max').value=3;}};
+ $('f-auto-action').onchange=()=>{if($('f-auto-action').value==='resume-goal'){$('f-auto-signal').value='transient-goal-error';$('f-auto-then').value='escalate';$('f-auto-max').value=3;}};
  // Only agents in the chosen role can be picked, so a rule never names an agent its role excludes.
  $('f-auto-role').onchange=()=>{$('f-auto-agent').innerHTML=agentOptions(f,$('f-auto-role').value,$('f-auto-agent').value);};
  $('editor').showModal();

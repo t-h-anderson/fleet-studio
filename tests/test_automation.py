@@ -137,6 +137,12 @@ class AutomationTests(unittest.TestCase):
             self.assertNotEqual(fire['status'], 'held')
             send.assert_called()
         self.assertNotIn('Subagent', app.triggers.hold_reason([agent], monitor))
+        # Unpatched: the looping reprompt's own stop is held, yet the reprompt is still sent.
+        with patch.object(type(app.runtimes.local['codex']), 'interrupt') as interrupt, patch.object(app.automation, 'send') as send:
+            fire = {'action': 'reprompt', 'status': 'pending'}
+            app.automation.execute(fleet, rule(message=''), agent, health, fire, monitor)
+            interrupt.assert_not_called()
+            send.assert_called_once()
         # The operator's Stop still reaches Codex.
         backend = app.runtimes.local['codex']
         session = {'turnId': 'parent-turn', 'turnStatus': 'inProgress', 'subagents': unsupported}

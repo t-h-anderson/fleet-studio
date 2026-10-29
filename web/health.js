@@ -211,7 +211,7 @@ renderAll=function(){
 function subagentMarkup(report){
  if(!report)return '';
  // An older Codex records no spawn edges: ordinary supervision continues, only risky actions wait.
- if(report.supported===false)return '<div class="info-block"><strong>Subagents</strong><p>Subagent tracking is unavailable on this Codex version; automatic goal recovery and automatic stops stay held.</p></div>';
+ if(report.supported===false)return '<div class="info-block"><strong>Subagents</strong><p>Subagent tracking is unavailable on this Codex version. Health, reprompts, hand-offs and Stop work as usual; automatic stops, goal recovery and goal changes stay held.</p></div>';
  const children=report.children||[];
  return '<div class="info-block"><strong>Subagents: '+children.length+'</strong><p>'+(!report.known?'Activity is uncertain. Automatic intervention is held.':report.active+' working; '+report.uncertain+' need review.')+' Child tokens used (lifetime, separate from parent): '+tokenCount(report.tokensUsed)+'.</p>'+children.map(c=>'<p style="margin-left:'+Math.min(8,c.depth||1)*12+'px">'+esc(c.path||c.name)+' · '+esc(c.state)+' · '+tokenCount(c.tokensUsed)+' tokens</p>').join('')+'</div>';
 }

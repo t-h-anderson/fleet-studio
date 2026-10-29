@@ -113,6 +113,25 @@ class SubagentTests(unittest.TestCase):
         self.assertEqual(hold_reason({'subagents': report}), '')
         self.assertTrue(hold_reason({'subagents': report}, require_known=True))
 
+    def test_missing_history_database_follows_the_edges_table(self):
+        self.graph()
+        (self.root / 'thread_history_1.sqlite').unlink()
+        # The edges table exists, so children may be there: fail closed.
+        self.assertFalse(self.observe()['known'])
+        self.assertTrue(hold_reason({'subagents': self.observe()}))
+        with closing(sqlite3.connect(self.root / 'state_5.sqlite')) as db, db:
+            db.execute('DROP TABLE thread_spawn_edges')
+        # No edges table at all: this Codex records no subagents, history or not.
+        self.assertIs(self.observe()['supported'], False)
+        self.assertEqual(hold_reason({'subagents': self.observe()}), '')
+
+    def test_an_unreadable_codex_home_is_uncertain_not_a_crash(self):
+        self.graph()
+        with patch('pathlib.Path.is_file', side_effect=PermissionError('denied')):
+            report = observe_children(self.root, ['parent'])['parent']
+        self.assertFalse(report['known'])
+        self.assertTrue(hold_reason({'subagents': report}))
+
     def test_a_transient_read_failure_still_holds(self):
         self.graph()
         with patch('studio_runtime.connect', side_effect=sqlite3.OperationalError('database is locked')):

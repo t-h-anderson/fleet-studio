@@ -1,5 +1,5 @@
 """Read-only native descendant observations; never opens or controls a child."""
-from contextlib import closing
+from contextlib import ExitStack, closing
 import sqlite3
 import time
 
@@ -11,25 +11,29 @@ def observe_children(root, session_ids):
     from studio_runtime import connect
     result = {sid: {'known': False, 'observedAt': time.time(), 'children': [],
                     'active': 0, 'uncertain': 0, 'tokensUsed': None} for sid in session_ids}
-    if not (root / 'state_5.sqlite').is_file():
-        # No Codex state database means no relationship metadata to read, not uncertain children.
+    def unsupported(error):
         for report in result.values():
-            report.update(supported=False, error='No Codex state database records subagent relationships here.')
+            report.update(supported=False, error=error)
         return result
     try:
-        with closing(connect(root, 'state_5.sqlite')) as state, closing(connect(root, 'thread_history_1.sqlite')) as history:
+        if not (root / 'state_5.sqlite').is_file():
+            # No Codex state database means no relationship metadata to read, not uncertain children.
+            return unsupported('No Codex state database records subagent relationships here.')
+        with ExitStack() as stack:
+            state = stack.enter_context(closing(connect(root, 'state_5.sqlite')))
             # Capability detection is intentional: missing schemas are unknown,
             # rather than proof that this parent has no children. A Codex that never
             # records spawn edges is marked unsupported, so only actions that need
             # known children are held there, not the whole fleet's supervision.
+            # The probe runs before the history database opens, so a Codex without
+            # either is unsupported, while one with edges but no history fails closed.
             try:
                 state.execute('SELECT parent_thread_id,child_thread_id,status FROM thread_spawn_edges LIMIT 0')
             except sqlite3.OperationalError as exc:
                 if 'no such table' not in str(exc):
                     raise
-                for report in result.values():
-                    report.update(supported=False, error='This Codex version records no subagent relationships.')
-                return result
+                return unsupported('This Codex version records no subagent relationships.')
+            history = stack.enter_context(closing(connect(root, 'thread_history_1.sqlite')))
             columns = {r[1] for r in state.execute('PRAGMA table_info(threads)')}
             fields = [k for k in ('id', 'agent_nickname', 'agent_path', 'model', 'tokens_used', 'updated_at', 'updated_at_ms') if k in columns]
             item_columns = {r[1] for r in history.execute('PRAGMA table_info(thread_items)')}

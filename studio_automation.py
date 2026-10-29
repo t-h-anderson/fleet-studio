@@ -586,7 +586,9 @@ class Automation:
         from studio_subagents import hold_reason as child_hold
         from studio_bindings import session_key
         if action in ('reprompt', 'handoff', 'stop-turn', 'stop', 'pause'):
-            reason = child_hold(monitor.get('sessions', {}).get(session_key(agent), {}), self.clock())
+            # Stopping a turn could orphan children, so it needs known child state; messages only need none active.
+            reason = child_hold(monitor.get('sessions', {}).get(session_key(agent), {}), self.clock(),
+                                risky=action in ('stop-turn', 'stop'))
             if reason:
                 fire.update(status='held', detail=reason)
                 return
@@ -631,9 +633,11 @@ class Automation:
         from studio_bindings import session_key
         with self.app.lock:
             session = deepcopy(self.app.monitor.get('sessions', {}).get(session_key(agent), {}))
-        reason = child_hold(session)
+        reason = child_hold(session, risky=True)
         if reason:
-            raise ValueError(reason)
+            # NotReady lets a looping reprompt skip the stop and still send, rather than fail.
+            from studio_agents import NotReady
+            raise NotReady(reason)
         stop = getattr(backend, 'interrupt', None)
         if not stop:
             raise RuntimeError(agent['name'] + "'s backend cannot stop a running turn.")

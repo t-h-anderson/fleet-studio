@@ -623,9 +623,13 @@ token usage is a separate lifetime total; it is not added to the parent's fresh
 token or waste estimates. Raw child turn status remains visible alongside lifecycle
 state. Native metadata is read only; prompts and child tool outputs are not retained.
 
-This requires Codex's native `thread_spawn_edges` and turn/item metadata. Older
-local schemas are shown as uncertain. Remote nodes without descendant metadata
-keep their existing message behavior, but native goal recovery requires known
-descendant state. Graph observations are bounded to 500 descendants per parent;
+This requires Codex's native `thread_spawn_edges` and turn/item metadata. A local
+Codex without that table (or without a state database) is shown as "subagent
+tracking unavailable": health detection, reprompts, hand-off deliveries and the
+operator's Stop work as before, while automatic stops and native goal recovery stay
+held because they need known descendant state. Read errors, cycles and truncated
+graphs on a Codex that does record spawn edges remain uncertain and hold every
+intervention. Remote nodes without descendant metadata keep their existing message
+behavior. Graph observations are bounded to 500 descendants per parent;
 larger graphs require review. No transcript tail is used to guess that children
 have finished.

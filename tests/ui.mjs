@@ -461,6 +461,14 @@ try{
  assert.match(await page.locator('.health-detail').innerText(),/Subagents: 1/);
  assert.match(await page.locator('.health-detail').innerText(),/\/root\/reviewer/);
  assert.match(await page.locator('.health-detail').innerText(),/separate from parent/);
+ assert.match(await page.locator('.health-detail').innerText(),/\/root\/reviewer · working · /);
+ // A Codex without spawn-edge metadata says so instead of claiming uncertainty for every agent.
+ await page.evaluate(()=>{
+  const a=healthCache.get(activeId).agents[0];
+  a.health={...a.health,state:'stalled',subagents:{known:false,supported:false,children:[]}};
+  renderHealth();
+ });
+ assert.match(await page.locator('.health-detail').innerText(),/unavailable on this Codex version/);
  checks.push('Child-aware health shows active descendants and separate token usage without creating fleet roles');
  console.log(JSON.stringify({passed:true,checks},null,2));
 }finally{

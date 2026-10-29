@@ -119,7 +119,8 @@ class CodexBackend(AgentBackend):
         from studio_control import app_server
         turn = self.observe([session_id])["sessions"].get(session_id, {})
         from studio_subagents import hold_reason as child_hold
-        reason = child_hold(turn, require_known=True)
+        # The operator's Stop still works on a Codex without subagent metadata; known busy children block it.
+        reason = child_hold(turn)
         if reason:
             raise NotReady(reason)
         if turn.get("turnStatus") != "inProgress" or not turn.get("turnId"):

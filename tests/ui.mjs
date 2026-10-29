@@ -295,6 +295,37 @@ try{
  await until(async()=>(await page.locator('[data-role-node] .live-stats').count())>0,'Live counts missing on the board');
  assert.match(await page.locator('[data-role-node] .live-stats').first().innerText(),/waiting/);
  assert.match(await page.locator('#live-edges').innerText(),/Hand-offs in flight/);
+ // A delivery needing attention colours its arrow, badges it, and is reviewable from the inspector.
+ // The fixture's own delivery is reconciled above, so the live numbers are stubbed here; flow() itself is unit-tested.
+ const liveLink=(await page.locator('#board-links .workflow-connection[data-link-ids]').first().getAttribute('data-link-ids')).split(' ')[0];
+ await page.route('**/api/flow?**',async route=>{
+  const response=await route.fetch(),data=await response.json(),now=Date.now()/1000;
+  // More deliveries than the server lists, so counts must come from the totals, not the item list.
+  data.links[liveLink]={pending:0,held:11,attention:1,oldestAt:now-300,recent:2,items:[{actionId:'stub-action',status:'needs-attention',at:now-300,from:'Writer',to:'Integrator'}]};
+  await fulfillStub(route,{response,json:data});
+ });
+ await page.evaluate(()=>loadFlow());
+ await until(async()=>(await page.locator('#board-links .workflow-connection.live-attention').count())>0,'Hand-off needing attention not coloured');
+ assert.match(await page.locator('#board-links .live-badge.live-attention').first().textContent(),/12 · 5m/);
+ assert.match(await page.locator('#live-edges').innerText(),/12 waiting/);
+ // Held alone is ordinary back-pressure, not an alarm.
+ assert.equal(await page.evaluate(()=>liveState({pending:0,held:2,attention:0,oldestAt:Date.now()/1000},{})),'live-pending');
+ await page.locator('#live-edges [data-live-link]').first().click();
+ await page.locator('#inspector-live [data-review-trigger="stub-action"]').waitFor();
+ assert.match(await page.locator('#inspector-live').innerText(),/12 waiting[\s\S]*11 held[\s\S]*1 need attention/);
+ // A poll leaves a focused button focused.
+ await page.locator('#inspector-live [data-review-trigger="stub-action"]').focus();
+ await page.evaluate(()=>loadFlow());
+ assert.equal(await page.evaluate(()=>document.activeElement?.dataset.reviewTrigger),'stub-action','A poll stole focus from the inspector');
+ assert.ok(!(await page.locator('#board-live-legend').isHidden()),'Live legend hidden while Live is on');
+ await page.locator('#board-live').uncheck();
+ assert.equal(await page.locator('#board-links .live-badge, #board-links .live-attention, .live-stats').count(),0,'Live off left live marks');
+ assert.equal(await page.locator('#inspector-live').innerText(),'','Live off left the inspector live section');
+ await page.locator('#board-live').check();
+ await until(async()=>(await page.locator('#board-links .live-badge').count())>0,'Live on did not restore badges');
+ await page.unroute('**/api/flow?**');
+ assert.deepEqual(errors,[]);
+ checks.push('Live board: hand-off arrows coloured and badged by waiting deliveries, strip selects the hand-off, inspector lists it with Review, Live off clears it');
  await page.locator('#nav-automation').click();
  await until(async()=>/Recovery[\s\S]*Dispatch[\s\S]*Timeline/.test(await page.locator('#content').innerText()),'Rules sections missing');
  await until(async()=>(await page.locator('#content').innerText()).includes('OUTCOME'),'Timeline did not load');
@@ -365,7 +396,7 @@ try{
  // A timed refresh must not wipe what someone has typed but not yet saved, even after focus moves on.
  await page.locator('#i-condition').fill('Typed but not saved');
  await page.locator('#i-condition').evaluate(n=>n.blur());
- await page.evaluate(()=>refresh());
+ await page.evaluate(async()=>{await refresh();await loadFlow();});
  assert.equal(await page.locator('#i-condition').inputValue(),'Typed but not saved','A refresh wiped unsaved inspector edits');
  const roleId=await page.locator('[data-edit-role]').first().getAttribute('data-edit-role');
  await page.locator('[data-edit-role="'+roleId+'"]').first().click();

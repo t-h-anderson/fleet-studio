@@ -294,6 +294,11 @@ function workflowRoutingNote(graph){
  const count=workflowGeometry(graph).routes.filter(r=>r.unrouted).length;
  return count?'<div class="board-note">'+count+' connection(s) have no clear path. Move cards apart or use Arrange. Their contracts remain in the handoff list.</div>':'';
 }
+// Dashed for hand-offs that wait for review, faint for those switched off; a mixed group keeps the plain line.
+function deliveryClass(link){
+ const links=current().roleLinks,values=new Set((link.members||[link]).map(l=>links.find(x=>x.id===l.id)?.delivery||'off'));
+ return values.size===1?' delivery-'+[...values][0]:'';
+}
 function workflowMarkup(graph,attribute='data-edit-role-link'){
  const geometry=workflowGeometry(graph),paths=[],labels=[];
  const name=id=>graph.agents.find(n=>n.id===id)?.name||'Role';
@@ -304,10 +309,13 @@ function workflowMarkup(graph,attribute='data-edit-role-link'){
   const title=link.members?link.members.map(l=>name(l.source)+' \u2192 '+name(l.target)+': '+l.label).join('\n'):link.label;
   const roleGraph=attribute==='data-edit-role-link',focused=roleGraph&&(focusedRoleId||selectedRolePairId);
   const related=!focused||(selectedRolePairId?link.id===selectedRolePairId:link.source===focusedRoleId||link.target===focusedRoleId);
-  const cls=(!related?' is-muted':'')+(focused&&related?' is-highlighted':'');
-  paths.push('<g class="workflow-connection'+cls+'"><path class="workflow-path" data-route="'+esc(link.id)+'" d="'+path+'" marker-end="url(#workflow-arrow)"'+(link.reverse?' marker-start="url(#workflow-arrow)"':'')+'></path><path class="link-hit" d="'+path+'" '+attr+(link.members?' tabindex="0" role="button" aria-label="'+esc('Inspect '+link.members.length+' handoffs between '+name(link.source)+' and '+name(link.target))+'"':'')+'><title>'+esc(title)+'</title></path></g>');
+  const cls=(!related?' is-muted':'')+(focused&&related?' is-highlighted':'')+(roleGraph?deliveryClass(link):'');
+  // The live overlay finds each connection's hand-offs and where to put its badge from these attributes.
+  const mid=points[Math.floor(points.length/2)],badge=label?{x:label.box.x+label.box.w,y:label.box.y}:mid;
+  const live=roleGraph?' data-link-ids="'+esc((link.members||[link]).map(l=>l.id).join(' '))+'" data-badge-x="'+badge.x+'" data-badge-y="'+badge.y+'"':'';
+  paths.push('<g class="workflow-connection'+cls+'"'+live+'><path class="workflow-path" data-route="'+esc(link.id)+'" d="'+path+'" marker-end="url(#workflow-arrow)"'+(link.reverse?' marker-start="url(#workflow-arrow)"':'')+'></path><path class="link-hit" d="'+path+'" '+attr+(link.members?' tabindex="0" role="button" aria-label="'+esc('Inspect '+link.members.length+' handoffs between '+name(link.source)+' and '+name(link.target))+'"':'')+'><title>'+esc(title)+'</title></path></g>');
   if(label){const b=label.box,cx=b.x+b.w/2,cy=b.y+b.h/2;
-   labels.push('<g class="workflow-label'+cls+'" '+attr+'><title>'+esc(title)+'</title>'+(label.anchor.x!==cx||label.anchor.y!==cy?'<path class="label-leader" d="M '+label.anchor.x+' '+label.anchor.y+' L '+cx+' '+cy+'"></path>':'')+'<rect x="'+b.x+'" y="'+b.y+'" width="'+b.w+'" height="'+b.h+'" rx="5"></rect><text x="'+(b.x+10)+'" y="'+(b.y+17)+'">'+label.lines.map((line,i)=>'<tspan x="'+(b.x+10)+'" dy="'+(i?15:0)+'">'+esc(line)+'</tspan>').join('')+'</text></g>');
+   labels.push('<g class="workflow-label'+cls+'" '+attr+(roleGraph?' data-link-ids="'+esc((link.members||[link]).map(l=>l.id).join(' '))+'"':'')+'><title>'+esc(title)+'</title>'+(label.anchor.x!==cx||label.anchor.y!==cy?'<path class="label-leader" d="M '+label.anchor.x+' '+label.anchor.y+' L '+cx+' '+cy+'"></path>':'')+'<rect x="'+b.x+'" y="'+b.y+'" width="'+b.w+'" height="'+b.h+'" rx="5"></rect><text x="'+(b.x+10)+'" y="'+(b.y+17)+'">'+label.lines.map((line,i)=>'<tspan x="'+(b.x+10)+'" dy="'+(i?15:0)+'">'+esc(line)+'</tspan>').join('')+'</text></g>');
   }
  }
  return '<defs><marker id="workflow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:#78987a;stroke:none"></path></marker></defs>'+paths.join('')+labels.join('');

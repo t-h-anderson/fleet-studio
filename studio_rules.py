@@ -60,22 +60,35 @@ def timeline(app, fleet_id, limit=100):
     return sorted(rows, key=lambda row: row['at'], reverse=True)[:limit]
 
 
+SLOW_MINUTES = 15
+WAITING = ('pending', 'held', 'sending', 'needs-attention')
+
+
 def flow(app, fleet):
-    """Live numbers for the design board: per role and per hand-off between roles."""
+    """Live numbers for the design board: per role, per hand-off and the hotspots worth a look."""
     from studio_dispatch import clean_dispatch
     from studio_health import PROBLEM_STATES
-    now = app.dispatch.clock()
-    roles = {r['id']: {'waiting': 0, 'stuck': 0, 'working': 0, 'claimed': 0} for r in fleet.get('roles', [])}
     from studio_bindings import session_key
+    now = app.dispatch.clock()
     agents = {a['id']: a for a in fleet['agents']}
+    roles = {r['id']: {'waiting': 0, 'stuck': 0, 'working': 0, 'claimed': 0, 'throttled': 0,
+                       'tokens24h': 0, 'wasteTokens24h': 0, 'agents': []} for r in fleet.get('roles', [])}
     sessions = app.status().get('sessions', {})
+    # The snapshot takes both automation locks; the throttle map changes under the hold lock alone.
+    automation = app.automation.snapshot(fleet['id'])
+    throttled = {row['agentId'] for row in automation['throttled']}
     for agent in fleet['agents']:
         health = app.health.get(fleet['id'], agent['id']) or {}
         for role_id in agent.get('roleIds', []):
             if role_id in roles:
-                roles[role_id]['stuck'] += health.get('state') in PROBLEM_STATES
+                row = roles[role_id]
+                row['stuck'] += health.get('state') in PROBLEM_STATES
                 # Same source as the header's count: a session processing a turn right now.
-                roles[role_id]['working'] += sessions.get(session_key(agent), {}).get('status') == 'working'
+                row['working'] += sessions.get(session_key(agent), {}).get('status') == 'working'
+                row['throttled'] += agent['id'] in throttled
+                row['tokens24h'] += health.get('tokens24h') or 0
+                row['wasteTokens24h'] += health.get('wasteTokens24h') or 0
+                row['agents'].append({'id': agent['id'], 'name': agent['name'], 'state': health.get('state') or 'unknown'})
     try:
         waiting = app.dispatch.tickets_by_role(fleet, clean_dispatch(fleet.get('dispatch')))
     except Exception:
@@ -89,6 +102,8 @@ def flow(app, fleet):
             for role_id in agents[row['agent']].get('roleIds', []):
                 if role_id in roles:
                     roles[role_id]['claimed'] += 1
+
+    # Role-pair edges keep every waiting delivery, including ones no single hand-off explains.
     edges = {}
     def add(source_agent, target_agent, at):
         source, target = agents.get(source_agent), agents.get(target_agent)
@@ -99,10 +114,53 @@ def flow(app, fleet):
                 edge = edges.setdefault(s + '>' + t, {'pending': 0, 'oldestAt': None})
                 edge['pending'] += 1
                 edge['oldestAt'] = min(edge['oldestAt'] or at, at)
-    for fire in app.automation.snapshot(fleet['id'])['fires']:
-        if fire['status'] in ('pending', 'sending', 'held') and fire.get('recipientId'):
+
+    # Per hand-off: deliveries found through their trigger, or the one link joining two roles.
+    links = {l['id']: {'pending': 0, 'held': 0, 'attention': 0, 'oldestAt': None, 'recent': 0, 'items': []}
+             for l in fleet.get('roleLinks', [])}
+    by_trigger = {t['id']: t['workflowLinkId'] for t in fleet.get('triggers', []) if t.get('workflowLinkId') in links}
+    joining = {}
+    for link in fleet.get('roleLinks', []):
+        joining.setdefault((link['source'], link['target']), []).append(link['id'])
+    def pair_link(source_agent, target_agent):
+        source, target = agents.get(source_agent), agents.get(target_agent)
+        if not source or not target:
+            return None
+        found = {l for s in source.get('roleIds', []) for t in target.get('roleIds', []) for l in joining.get((s, t), [])}
+        return found.pop() if len(found) == 1 else None
+    def count(link_id, item_id, status, source_agent, target_agent, target_name, at, delivered):
+        if not link_id:
+            return
+        row = links[link_id]
+        if status in WAITING:
+            row[{'held': 'held', 'needs-attention': 'attention'}.get(status, 'pending')] += 1
+            row['oldestAt'] = min(row['oldestAt'] or at, at)
+            row['items'].append({'actionId': item_id, 'status': status, 'at': at,
+                                 'from': agents.get(source_agent, {}).get('name', ''),
+                                 'to': target_name or agents.get(target_agent, {}).get('name', '')})
+        elif delivered and at >= now - 86400:
+            row['recent'] += 1
+
+    for fire in automation['fires']:
+        if not fire.get('recipientId'):
+            continue
+        if fire['status'] in ('pending', 'sending', 'held'):
             add(fire['agentId'], fire['recipientId'], fire['at'])
-    for action in app.triggers.snapshot()['actions']:
-        if action.get('fleetId') == fleet['id'] and action['status'] in ('pending', 'held', 'sending', 'needs-attention') and action.get('sourceAgentId'):
+        # Recovery hand-offs are not routing actions, so they are never reviewed from the board.
+        count(pair_link(fire['agentId'], fire['recipientId']), '', fire['status'], fire['agentId'], fire['recipientId'],
+              fire.get('recipientName', ''), fire['at'], fire['status'] == 'sent')
+    with app.triggers.lock:
+        actions = [dict(a) for a in app.triggers.data['actions'] if a.get('fleetId') == fleet['id']]
+    for action in actions:
+        if action['status'] in WAITING and action.get('sourceAgentId'):
             add(action['sourceAgentId'], action.get('targetAgentId'), action['createdAt'])
-    return {'roles': roles, 'edges': edges, 'observedAt': now}
+        count(by_trigger.get(action.get('triggerId')), action['id'], action['status'], action.get('sourceAgentId'),
+              action.get('targetAgentId'), action.get('targetName', ''), action['createdAt'], action['status'] in ('queued', 'reconciled'))
+    for row in links.values():
+        row['items'] = sorted(row['items'], key=lambda item: item['at'])[:10]
+
+    queued = max(roles, key=lambda r: roles[r]['waiting'], default=None)
+    slow = [(row['oldestAt'], link_id) for link_id, row in links.items() if row['oldestAt'] and row['oldestAt'] <= now - SLOW_MINUTES * 60]
+    hot = {'role': queued if queued and roles[queued]['waiting'] else None, 'link': min(slow)[1] if slow else None,
+           'slowMinutes': SLOW_MINUTES}
+    return {'roles': roles, 'edges': edges, 'links': links, 'hot': hot, 'observedAt': now}

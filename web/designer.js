@@ -64,7 +64,8 @@ function inspectorMarkup(){
  const f=current();
  const item=designSelection?.type==='role'?f.roles.find(r=>r.id===designSelection.id):designSelection?.type==='rolelink'?f.roleLinks.find(l=>l.id===designSelection.id):null;
  if(!item){designSelection=null;return '<p class="field-hint">Select a role or a hand-off on the board to edit it here. Use Add handoff to connect two roles.</p>';}
- return designSelection.type==='role'?roleInspector(item):linkInspector(item);
+ // Live numbers go in their own section, refilled on every poll without touching the form.
+ return (designSelection.type==='role'?roleInspector(item):linkInspector(item))+'<section id="inspector-live" class="inspector-live" aria-label="Live load"></section>';
 }
 function addInspector(){
  if(view!=='board'||boardMode!=='roles'||$('design-inspector'))return;
@@ -74,8 +75,9 @@ function addInspector(){
  const panel=document.createElement('aside');panel.id='design-inspector';panel.className='design-inspector';panel.setAttribute('aria-label','Selected role or hand-off');
  panel.innerHTML=inspectorMarkup();
  split.append(canvas,panel);content.append(split);
+ if(typeof fillInspectorLive==='function')fillInspectorLive();
 }
-function selectDesign(type,id){designSelection={type,id};const panel=$('design-inspector');if(panel){panel.innerHTML=inspectorMarkup();panel.querySelector('textarea,input')?.focus({preventScroll:true});}}
+function selectDesign(type,id){designSelection={type,id};const panel=$('design-inspector');if(panel){panel.innerHTML=inspectorMarkup();if(typeof fillInspectorLive==='function')fillInspectorLive();panel.querySelector('textarea,input')?.focus({preventScroll:true});}}
 
 async function saveInspector(){
  const selection=designSelection;if(!selection)return;

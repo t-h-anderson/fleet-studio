@@ -34,6 +34,7 @@ from studio_telemetry import Telemetry
 from studio_health import Health, clean_health_settings
 from studio_reports import Reports
 from studio_dispatch import Dispatch, clean_dispatch
+from studio_profiles import Profiles
 from studio_automation import Automation, backtest, clean_alerts, clean_automations, clean_throttles, default_automations, watches
 from studio_reconciliation import Reconciliation
 from studio_goals import Goals
@@ -351,6 +352,7 @@ class Application:
         self.launch_enabled = launch_enabled
         self.monitor = {"observedAt": None, "sessions": {}, "catalogue": [], "errors": []}
         self.deployments = Deployments(self)
+        self.profiles = Profiles(self)
         self.entrypoints = EntryPoints(self)
         self.controls = Controls(self)
         self.triggers = Triggers(self)
@@ -609,6 +611,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/health/agents":
                 fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
                 return self.json(200, app.health.snapshot(fleet_id))
+            if path == "/api/profiles":
+                fleet_id = parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0]
+                return self.json(200, app.profiles.list(app.store.fleet(fleet_id) if fleet_id else None))
             if path == "/api/flow":
                 fleet = app.store.fleet(parse_qs(urlsplit(self.path).query).get("fleetId", [None])[0])
                 from studio_rules import flow
@@ -626,7 +631,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, app.backlog.snapshot(fleet_id))
             if path == "/api/sessions":
                 return self.json(200, {"sessions": app.catalogue()})
-            if path in ("/", "/app.js", "/roles.js", "/layout.js", "/backlog.js", "/activity.js", "/workflow.js", "/progress.js", "/metrics.js", "/reconciliation.js", "/goals.js", "/health.js", "/automation.js", "/flow.js", "/designer.js", "/app.css", "/icon.svg"):
+            if path in ("/", "/app.js", "/roles.js", "/layout.js", "/backlog.js", "/activity.js", "/workflow.js", "/progress.js", "/metrics.js", "/reconciliation.js", "/goals.js", "/health.js", "/automation.js", "/flow.js", "/profiles.js", "/designer.js", "/app.css", "/icon.svg"):
                 name = "index.html" if path == "/" else path[1:]
                 mime = {".html": "text/html", ".js": "application/javascript",
                         ".css": "text/css", ".svg": "image/svg+xml"}[Path(name).suffix]
@@ -701,6 +706,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, app.entrypoints.apply(payload.get("previewId")))
             if path == "/api/workflow/inspect":
                 return self.json(200, app.deployments.overview(app.store.fleet(payload.get("fleetId"))))
+            if path == "/api/profiles/save":
+                return self.json(200, app.profiles.save(payload))
+            if path == "/api/profiles/delete":
+                return self.json(200, app.profiles.delete(payload))
             if path == "/api/workflow/preview":
                 return self.json(200, app.deployments.preview(payload))
             if path == "/api/workflow/apply":

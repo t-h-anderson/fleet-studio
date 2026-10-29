@@ -134,24 +134,7 @@ def validate_fleets(value, host_ids=()):
                 "notes": text(agent.get("notes", ""), "Notes", 4000, required=False),
                 "position": coordinates,
             })
-        links, seen_links, link_ids = [], set(), set()
-        links_raw = raw.get("links", [])
-        if not isinstance(links_raw, list) or len(links_raw) > 300:
-            raise ValidationError("A fleet can contain at most 300 handoff links.")
-        for link in links_raw:
-            link_id = identifier(link.get("id"))
-            if link_id in link_ids:
-                raise ValidationError("Handoff IDs must be unique within a fleet.")
-            link_ids.add(link_id)
-            source, target = link.get("source"), link.get("target")
-            if source not in agent_ids or target not in agent_ids or source == target:
-                raise ValidationError("Handoff links need two different agents from this fleet.")
-            pair = (source, target)
-            if pair in seen_links:
-                raise ValidationError("This handoff link already exists.")
-            seen_links.add(pair)
-            links.append({"id": link_id, "source": source, "target": target,
-                          "label": text(link.get("label", ""), "Link label", 60, required=False)})
+        # The retired agent layout stored planning links between agents; they never routed work and are dropped.
         try:
             design = clean_design(raw, agents)
             triggers = validate_triggers(raw.get("triggers", []), {r["id"] for r in design["roles"]}, agent_ids)
@@ -172,7 +155,7 @@ def validate_fleets(value, host_ids=()):
             "health": health, "automations": automations, "throttles": throttles, "alerts": alerts, "dispatch": dispatch,
             "id": fid, "name": text(raw.get("name"), "Fleet name", 80),
             "description": text(raw.get("description", ""), "Description", 600, required=False),
-            "windowName": window_name, "agents": agents, "links": links,
+            "windowName": window_name, "agents": agents,
         }
         for row in design["roles"] + design["roleLinks"] + triggers:
             if "specId" in row:
@@ -217,8 +200,8 @@ def seed_state(legacy):
             "enabled": old.get("enabled", True), "position": {"x": x, "y": y},
         })
     fleet = {"id": fleet_id, "name": "My fleet", "description": "Local development fleet",
-             "windowName": legacy["windowName"], "agents": agents, "links": []}
-    # Start with a spatial role layout. Handoff links are created explicitly in the UI.
+             "windowName": legacy["windowName"], "agents": agents}
+    # Start with a spatial role layout. Hand-offs between roles are drawn on the Workflow screen.
     return {"version": 1, "revision": 1, "defaultFleetId": fleet_id, "fleets": [fleet]}
 
 

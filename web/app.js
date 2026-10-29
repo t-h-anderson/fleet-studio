@@ -17,7 +17,7 @@ let activeId=localStorage.getItem('fleet-active')||'',view=localStorage.getItem(
 // The old Triggers view is now part of the Workflow screen.
 if(view==='triggers')view='board';
 if(!['roster','board','sessions','roles','backlog','activity','workflow','profiles','progress','health','automation','throughput'].includes(view))view='health';
-let query='',filter='all',selected=new Set(),editing=null,zoom=1,drag=null,pendingJob=null,stopped=false,saveQueue=Promise.resolve();
+let query='',filter='all',selected=new Set(),editing=null,zoom=1,pendingJob=null,stopped=false,saveQueue=Promise.resolve();
 function current(){return state.fleets.find((f)=>f.id===activeId)||state.fleets[0];}
 function sessionKey(a){const sid=a.sessionId??a.id??'',host=a.hostId||'local',backend=a.backend||'codex';return host==='local'&&backend==='codex'?sid:[host,backend,sid].join(':');}
 function sessionFor(a){return monitor.sessions[sessionKey(a)]||{};}
@@ -66,8 +66,7 @@ function renderMetrics(){
  const errors=monitor.errors||[];$('monitor-banner').classList.toggle('hidden',!errors.length&&!old);$('monitor-banner').textContent=errors.length?errors.join(' · '):old?'Status is delayed. Displayed observations may be out of date.':'';
 }
 function renderContent(){
- if(!state||drag)return;const focused=document.activeElement?.dataset.node;if(view==='board')renderBoard();else if(view==='sessions')renderSessions();else if(view==='roles')renderRoles();else if(view==='backlog')renderBacklog();else if(view==='activity')renderAgentActivity();else if(view==='workflow')renderWorkflow();else if(view==='progress')renderProgress();else renderTable();
- if(focused)document.querySelector('[data-node="'+focused+'"]')?.focus({preventScroll:true});
+ if(!state)return;if(view==='board')renderBoard();else if(view==='sessions')renderSessions();else if(view==='roles')renderRoles();else if(view==='backlog')renderBacklog();else if(view==='activity')renderAgentActivity();else if(view==='workflow')renderWorkflow();else if(view==='progress')renderProgress();else renderTable();
  const valid=new Set(current().agents.map((a)=>a.id));selected=new Set([...selected].filter((id)=>valid.has(id)));$('selection-bar').classList.toggle('hidden',!selected.size||view!=='roster');$('selection-count').textContent=selected.size+' selected';
 }
 function empty(title,description,button){return '<div class="empty-state">'+icon('nodes')+'<h3>'+esc(title)+'</h3><p>'+esc(description)+'</p>'+(button?'<button class="button primary" data-action="add">'+icon('plus')+'Add an agent</button>':'')+'</div>';}
@@ -86,15 +85,6 @@ function renderSessions(){
  const linked=new Set(current().agents.map(sessionKey));
  $('content').innerHTML='<div class="table-wrap"><table><thead><tr><th>CONVERSATION</th><th>MODEL</th><th>ACTIVITY</th><th>TICKETS</th><th></th></tr></thead><tbody>'+rows.map((s)=>'<tr><td><div class="session-name" title="'+esc(s.name)+'">'+esc(s.name)+'</div><div class="session-directory" title="'+esc(s.directory)+'">'+esc(s.directory)+'</div></td><td class="model-name">'+esc(s.model||'—')+'</td><td class="muted">'+ago(s.updatedAt)+'</td><td><button class="button small session-add" data-add-session="'+esc(sessionKey(s))+'" '+(linked.has(sessionKey(s))?'disabled':'')+'>'+icon('plus')+(linked.has(sessionKey(s))?'In this fleet':'Add to fleet')+'</button></td></tr>').join('')+'</tbody></table></div>';
 }
-function nodePosition(a){return drag&&drag.id===a.id?drag.position:a.position;}
-function linksMarkup(f){
- return '<defs><marker id="arrow-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" style="fill:#a6bea0;stroke:none"></path></marker></defs>'+f.links.map((l)=>{
- const s=f.agents.find((a)=>a.id===l.source),t=f.agents.find((a)=>a.id===l.target);if(!s||!t)return '';
- const sp=nodePosition(s),tp=nodePosition(t),forward=sp.y<=tp.y,x1=sp.x+122,y1=sp.y+(forward?127:0),x2=tp.x+122,y2=tp.y+(forward?0:127),bend=Math.max(45,Math.abs(y2-y1)/2)*(forward?1:-1);
- const p='M '+x1+' '+y1+' C '+x1+' '+(y1+bend)+' '+x2+' '+(y2-bend)+' '+x2+' '+y2;
- return '<g><path d="'+p+'" marker-end="url(#arrow-head)"></path><path class="link-hit" d="'+p+'" data-edit-link="'+l.id+'"></path><text x="'+((x1+x2)/2+8)+'" y="'+((y1+y2)/2-5)+'" data-edit-link="'+l.id+'">'+esc(l.label||'Handoff')+'</text></g>';
- }).join('');
-}
 function handoffsMarkup(f){
  const links=f.links.filter((l)=>f.agents.some((a)=>a.id===l.source)&&f.agents.some((a)=>a.id===l.target));
  if(!links.length)return '';
@@ -103,12 +93,8 @@ function handoffsMarkup(f){
   return '<button class="button small" data-edit-link="'+l.id+'"><span class="handoff-number">'+(i+1)+'</span>'+esc(source.name)+' &rarr; '+esc(target.name)+'<span>'+esc(l.label||'Edit handoff')+'</span></button>';
  }).join('')+'</div>';
 }
-function renderBoard(){
- const f={...current(),agents:filteredAgents()};$('visible-count').textContent=f.agents.length;if(!f.agents.length){$('content').innerHTML=empty(current().agents.length?'No agents match':'Design your first agent',current().agents.length?'Try another name, role or status.':'Define a role now. Link a saved Codex session when it is ready to run.',!current().agents.length);return;}
- const geometry=workflowGeometry(f),maxX=geometry.width,maxY=geometry.height,old=$('board-viewport'),sx=old?old.scrollLeft:0,sy=old?old.scrollTop:0;
- $('content').innerHTML='<div class="board-viewport" id="board-viewport"><div style="width:'+(maxX*zoom)+'px;height:'+(maxY*zoom)+'px"><div class="board" id="board" style="width:'+maxX+'px;height:'+maxY+'px;transform:scale('+zoom+')"><svg class="board-links" id="board-links">'+linksMarkup(f)+'</svg>'+f.agents.map((a)=>'<div class="board-node" data-node="'+a.id+'" tabindex="0" role="group" aria-label="'+esc(a.name)+'. Drag or use arrow keys to move." style="left:'+a.position.x+'px;top:'+a.position.y+'px"><span class="node-connector top"></span><div class="node-top">'+avatar(a.name)+'<div><button class="agent-name" data-edit="'+a.id+'">'+esc(a.name)+'</button><div class="node-role">'+esc(displayedRole(a))+(!a.enabled?' · Excluded':'')+'</div></div><button class="icon-button" data-edit="'+a.id+'" aria-label="Edit '+esc(a.name)+'">'+icon('more')+'</button></div><div class="node-footer">'+statusLabel(a)+'<button class="icon-button" data-open="'+a.id+'" title="Open in PowerShell" aria-label="Open '+esc(a.name)+'" '+(!launchable(a)?'disabled':'')+'>'+icon('play')+'</button></div><div class="node-tickets">'+agentTicketBadge(a.id)+'</div><span class="node-connector bottom"></span></div>').join('')+'</div></div></div>'+workflowRoutingNote(f)+handoffsMarkup(f);
- $('board-viewport').scrollLeft=sx;$('board-viewport').scrollTop=sy;$('zoom-value').textContent=Math.round(zoom*100)+'%';
-}
+// The Workflow Design board is drawn by roles.js; this is the name it extends.
+function renderBoard(){}
 function renderInsights(){
  if(!state)return;const agents=current().agents,keys=['working','idle','closed','attention','draft','unknown'],c={};keys.forEach((s)=>c[s]=agents.filter((a)=>statusOf(a)===s).length);
  $('pulse-track').innerHTML=keys.filter((s)=>c[s]).map((s)=>'<span class="pulse-segment '+s+'" style="flex:'+c[s]+'" title="'+labels[s]+': '+c[s]+'"></span>').join('');
@@ -145,9 +131,9 @@ function field(label,name,value,extra=''){return '<div class="field"><label for=
 function openEditor(type,id=null,preSession=null){
  const f=current();
  editing={type,id,item:type==='agent'?(id?clone(f.agents.find((a)=>a.id===id)):{id:uid(),name:preSession?preSession.name.slice(0,80):'',role:'Agent',directory:preSession?preSession.directory:'',sessionId:preSession?preSession.id:'',backend:preSession?.backend||'codex',hostId:preSession?.hostId||'local',enabled:true,notes:'',position:{x:80+(f.agents.length%3)*320,y:60+Math.floor(f.agents.length/3)*200}}):type==='fleet'?(id?clone(f):{id:uid(),name:'',description:'',windowName:'',agents:[],links:[]}):(id?clone(f.links.find((l)=>l.id===id)):{id:uid(),source:'',target:'',label:''})};
- $('editor-title').textContent=(id?'Edit ':'New ')+{agent:'agent',fleet:'fleet',link:'handoff'}[type];
- $('editor-eyebrow').textContent=type==='link'?'ROLES & RELATIONSHIPS':'FLEET CONFIGURATION';
- $('delete-item').classList.toggle('hidden',!id);$('delete-item').textContent=type==='fleet'?'Delete fleet':type==='link'?'Remove handoff':'Remove agent';$('delete-item').disabled=type==='fleet'&&state.fleets.length===1;
+ $('editor-title').textContent=(id?'Edit ':'New ')+{agent:'agent',fleet:'fleet'}[type];
+ $('editor-eyebrow').textContent='FLEET CONFIGURATION';
+ $('delete-item').classList.toggle('hidden',!id);$('delete-item').textContent=type==='fleet'?'Delete fleet':'Remove agent';$('delete-item').disabled=type==='fleet'&&state.fleets.length===1;
  const item=editing.item;
  if(type==='agent'){
   $('editor-fields').innerHTML='<div class="form-row">'+field('Agent name','name',item.name,'required maxlength="80"')+field('Role','role',item.role,'required maxlength="60" list="role-options"')+'</div><datalist id="role-options">'+['Coordination','Writer','Review','Integration','Preparation','Data','Operations','Agent'].map((r)=>'<option value="'+r+'">').join('')+'</datalist>'+runtimeFields(item)+field('Workspace folder','directory',item.directory,'list="folder-options" placeholder="Folder on the agent\'s host"')+'<datalist id="folder-options">'+[...new Set(catalogue.map((s)=>s.directory))].map((p)=>'<option value="'+esc(p)+'">').join('')+'</datalist><div class="field"><label for="session-search">Link a saved session</label><input id="session-search" type="search" placeholder="Search conversations or folders…"><div id="selected-session"></div><div id="session-picker" class="session-picker"></div><p class="field-hint">Leave unlinked to plan a role. Link a session and workspace to open it.</p></div><div class="field"><label for="f-notes">Role notes</label><textarea id="f-notes" name="notes" maxlength="4000" placeholder="Responsibilities, scope, or handoff expectations…">'+esc(item.notes)+'</textarea></div><label class="checkbox-field"><input id="f-enabled" type="checkbox" '+(item.enabled?'checked':'')+'>Include in fleet launch</label>';
@@ -155,10 +141,6 @@ function openEditor(type,id=null,preSession=null){
   api('/api/sessions').then((data)=>{catalogue=data.sessions;if(editing&&editing.type==='agent')renderPicker();}).catch((e)=>toast(e.message,true));
  }else if(type==='fleet'){
   $('editor-fields').innerHTML=field('Fleet name','name',item.name,'required maxlength="80" placeholder="e.g. Payments service"')+field('Description','description',item.description,'maxlength="600" placeholder="What this fleet works on"')+field('Terminal window name','windowName',item.windowName,'maxlength="80" pattern="[A-Za-z0-9][A-Za-z0-9_-]*" placeholder="Generated from the fleet name"')+'<p class="field-hint">Agents open together in this named Windows Terminal window or tmux session.</p>'+hostsField()+'<label class="checkbox-field"><input id="f-default" type="checkbox" '+(item.id===state.defaultFleetId?'checked':'')+'>Default fleet for the app and desktop launcher</label>';
- }else{
-  const opts='<option value="">Choose an agent…</option>'+f.agents.map((a)=>'<option value="'+a.id+'">'+esc(a.name)+'</option>').join('');
-  $('editor-fields').innerHTML='<div class="form-row"><div class="field"><label for="f-source">From</label><select id="f-source" required>'+opts+'</select></div><div class="field"><label for="f-target">To</label><select id="f-target" required>'+opts+'</select></div></div>'+field('Handoff label','label',item.label,'maxlength="60" placeholder="e.g. Ready for review"')+'<p class="field-hint">A planning connection between roles. No message or task is sent.</p>';
-  $('f-source').value=item.source;$('f-target').value=item.target;
  }
  $('editor').showModal();$('editor-fields').querySelector('input,select')?.focus();
 }
@@ -187,23 +169,22 @@ async function saveEditor(event){
  event.preventDefault();if(!editing)return;const action=clone(editing),item=action.item;
  if(action.type==='agent'){item.name=$('f-name').value.trim();item.role=$('f-role').value.trim();item.directory=$('f-directory').value.trim();item.notes=$('f-notes').value.trim();item.enabled=$('f-enabled').checked;item.backend=$('f-backend').value;item.hostId=$('f-host').value;}
  else if(action.type==='fleet'){item.name=$('f-name').value.trim();item.description=$('f-description').value.trim();item.windowName=$('f-windowName').value.trim()||'codex-'+item.name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');}
- else{item.source=$('f-source').value;item.target=$('f-target').value;item.label=$('f-label').value.trim();}
  const makeDefault=action.type==='fleet'&&$('f-default').checked;let hosts=null;if(action.type==='fleet'){try{hosts=parseHosts($('f-hosts').value);}catch(e){toast(e.message,true);return;}}$('save-editor').disabled=true;
  try{
   await mutate((next)=>{
    if(hosts)next.hosts=hosts;if(action.type==='fleet'){if(action.id)next.fleets[next.fleets.findIndex((f)=>f.id===item.id)]=item;else next.fleets.push(item);if(makeDefault)next.defaultFleetId=item.id;}
-   else updateFleet(next,(f)=>{const list=action.type==='agent'?f.agents:f.links;if(action.id)list[list.findIndex((a)=>a.id===item.id)]=item;else list.push(item);});
-  },action.type==='link'?'Handoff saved.':action.type==='agent'?'Agent saved.':'Fleet saved.');
+   else updateFleet(next,(f)=>{const list=f.agents;if(action.id)list[list.findIndex((a)=>a.id===item.id)]=item;else list.push(item);});
+  },action.type==='agent'?'Agent saved.':'Fleet saved.');
   if(action.type==='fleet')setFleet(item.id);$('editor').close();editing=null;
  }catch(e){toast(e.message,true);}finally{$('save-editor').disabled=false;}
 }
 async function deleteItem(){
  if(!editing?.id)return;const action=clone(editing);
- const prompt=action.type==='agent'?'Remove this agent from the fleet? Its Codex conversation will be kept.':action.type==='fleet'?'Delete this fleet configuration? Its Codex conversations will be kept.':'Remove this handoff connection?';
+ const prompt=action.type==='agent'?'Remove this agent from the fleet? Its Codex conversation will be kept.':'Delete this fleet configuration? Its Codex conversations will be kept.';
  if(!window.confirm(prompt))return;
  try{await mutate((next)=>{
   if(action.type==='fleet'){next.fleets=next.fleets.filter((f)=>f.id!==action.id);if(next.defaultFleetId===action.id)next.defaultFleetId=next.fleets[0].id;}
-  else updateFleet(next,(f)=>{if(action.type==='agent'){f.agents=f.agents.filter((a)=>a.id!==action.id);f.links=f.links.filter((l)=>l.source!==action.id&&l.target!==action.id);forgetAgent(f,action.id);}else f.links=f.links.filter((l)=>l.id!==action.id);});
+  else updateFleet(next,(f)=>{if(action.type==='agent'){f.agents=f.agents.filter((a)=>a.id!==action.id);forgetAgent(f,action.id);}});
  },'Removed from the fleet.');$('editor').close();editing=null;selected.delete(action.id);}catch(e){toast(e.message,true);}
 }
 function exportFleet(){const blob=new Blob([JSON.stringify(current(),null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=current().windowName+'.json';a.click();URL.revokeObjectURL(url);}
@@ -212,7 +193,7 @@ async function importFile(file){
  try{
   if(file.size>2000000)throw new Error('Choose a JSON file smaller than 2 MB.');
   const data=JSON.parse(await file.text()),raw=data.fleets||[data];
-  const imported=raw.map((f,i)=>({id:uid(),name:f.name||'Imported fleet '+(i+1),description:f.description||'',windowName:f.windowName||'codex-import-'+uid().slice(0,8),agents:(f.agents||[]).map((a,j)=>({id:a.id||uid(),name:a.name,role:a.role||'Agent',roleIds:a.roleIds||[],notes:a.notes||'',sessionId:a.sessionId||'',directory:a.directory||'',backend:a.backend||'codex',hostId:a.hostId||'local',enabled:a.enabled!==false,position:a.position||{x:80+(j%3)*320,y:60+Math.floor(j/3)*200}})),links:f.links||[],roles:f.roles||[],roleLinks:f.roleLinks||[],roleSource:f.roleSource||null,backlog:f.backlog||null,triggers:(f.triggers||[]).map((t)=>({...t,id:uid(),enabled:false}))}));
+  const imported=raw.map((f,i)=>({id:uid(),name:f.name||'Imported fleet '+(i+1),description:f.description||'',windowName:f.windowName||'codex-import-'+uid().slice(0,8),agents:(f.agents||[]).map((a,j)=>({id:a.id||uid(),name:a.name,role:a.role||'Agent',roleIds:a.roleIds||[],notes:a.notes||'',sessionId:a.sessionId||'',directory:a.directory||'',backend:a.backend||'codex',hostId:a.hostId||'local',enabled:a.enabled!==false,position:a.position||{x:80+(j%3)*320,y:60+Math.floor(j/3)*200}})),roles:f.roles||[],roleLinks:f.roleLinks||[],roleSource:f.roleSource||null,backlog:f.backlog||null,triggers:(f.triggers||[]).map((t)=>({...t,id:uid(),enabled:false}))}));
   await mutate((next)=>next.fleets.push(...imported),'Fleet imported.');setFleet(imported[0].id);
  }catch(e){toast(e.message,true);}finally{$('import-file').value='';}
 }
@@ -225,9 +206,9 @@ function wireEvents(){
  $('refresh').onclick=()=>refresh(true);$('open-fleet').onclick=()=>launch(current().agents.filter(launchable).map((a)=>a.id));
  $('open-selected').onclick=()=>launch([...selected]);$('clear-selection').onclick=()=>{selected.clear();renderContent();};
  $('content').onclick=(e)=>{
-  const t=e.target.closest('button,[data-edit-link]');if(!t)return;
+  const t=e.target.closest('button');if(!t)return;
   if(t.dataset.edit)openEditor('agent',t.dataset.edit);if(t.dataset.open)launch([t.dataset.open]);
-  if(t.dataset.editLink)openEditor('link',t.dataset.editLink);if(t.dataset.action==='add')openEditor('agent');
+  if(t.dataset.action==='add')openEditor('agent');
   if(t.dataset.addSession)openEditor('agent',null,catalogue.find((s)=>sessionKey(s)===t.dataset.addSession));
  };
  $('content').onchange=(e)=>{
@@ -243,33 +224,9 @@ function wireEvents(){
   if(pick&&editing?.type==='agent'){const s=catalogue.find((s)=>sessionKey(s)===pick.dataset.pickSession),previous=catalogue.find((s)=>sessionKey(s)===sessionKey(editing.item));editing.item.sessionId=s.id;editing.item.backend=s.backend||'codex';editing.item.hostId=s.hostId||'local';$('f-backend').value=editing.item.backend;$('f-host').value=editing.item.hostId;if(!$('f-directory').value||$('f-directory').value===previous?.directory)$('f-directory').value=s.directory;if(!$('f-name').value)$('f-name').value=s.name.slice(0,80);renderPicker();}
   if(e.target.closest('#unlink-session')&&editing?.type==='agent'){editing.item.sessionId='';renderPicker();}
  };
- $('add-link').onclick=()=>{if(current().agents.length<2)return toast('Add at least two agents to create a handoff.');openEditor('link');};
  $('editor-fields').onchange=(e)=>{if(editing?.type==='agent'&&['f-backend','f-host'].includes(e.target.id)){editing.item.backend=$('f-backend').value;editing.item.hostId=$('f-host').value;editing.item.sessionId='';renderPicker();}};
- $('arrange').onclick=()=>mutate((next)=>updateFleet(next,(f)=>f.agents.forEach((a,i)=>a.position={x:80+(i%3)*320,y:60+Math.floor(i/3)*210})),'Board arranged.').catch((e)=>toast(e.message,true));
  $('zoom-in').onclick=()=>{zoom=Math.min(1.5,Math.round((zoom+.1)*10)/10);renderBoard();};
  $('zoom-out').onclick=()=>{zoom=Math.max(.2,Math.round((zoom-.1)*10)/10);renderBoard();};
- $('content').addEventListener('pointerdown',(e)=>{
-  const node=e.target.closest('[data-node]');if(!node||e.target.closest('button')||e.button!==0)return;
-  const a=current().agents.find((a)=>a.id===node.dataset.node);drag={id:a.id,node,origin:{...a.position},position:{...a.position},x:e.clientX,y:e.clientY,pointer:e.pointerId};
-  node.setPointerCapture(e.pointerId);node.classList.add('dragging');e.preventDefault();
- });
- $('content').addEventListener('pointermove',(e)=>{
-  if(!drag||drag.saving||drag.pointer!==e.pointerId)return;
-  drag.position={x:Math.max(0,Math.min(4000,Math.round(drag.origin.x+(e.clientX-drag.x)/zoom))),y:Math.max(0,Math.min(4000,Math.round(drag.origin.y+(e.clientY-drag.y)/zoom)))};
-  drag.node.style.left=drag.position.x+'px';drag.node.style.top=drag.position.y+'px';$('board-links').innerHTML=linksMarkup({...current(),agents:filteredAgents()});
- });
- async function finishDrag(e){
-  if(!drag||drag.saving||drag.pointer!==e.pointerId)return;
-  const change={id:drag.id,position:{...drag.position}},moved=change.position.x!==drag.origin.x||change.position.y!==drag.origin.y;drag.saving=true;
-  try{if(moved)await mutate((next)=>updateFleet(next,(f)=>{f.agents.find((a)=>a.id===change.id).position=change.position;}));}
-  catch(error){toast(error.message,true);}finally{drag=null;renderContent();}
- }
- $('content').addEventListener('pointerup',finishDrag);$('content').addEventListener('pointercancel',finishDrag);
- $('content').addEventListener('keydown',(e)=>{
-  const node=e.target.closest('[data-node]');if(!node||e.target.closest('button')||!['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key))return;
-  e.preventDefault();const id=node.dataset.node,d={ArrowUp:[0,-20],ArrowDown:[0,20],ArrowLeft:[-20,0],ArrowRight:[20,0]}[e.key];
-  mutate((next)=>updateFleet(next,(f)=>{const a=f.agents.find((a)=>a.id===id);a.position={x:Math.max(0,Math.min(4000,a.position.x+d[0])),y:Math.max(0,Math.min(4000,a.position.y+d[1]))};})).catch((e)=>toast(e.message,true));
- });
  $('about').onclick=()=>$('about-dialog').showModal();$('close-about').onclick=()=>$('about-dialog').close();$('export-fleet').onclick=exportFleet;
  $('import-fleet').onclick=()=>$('import-file').click();$('import-file').onchange=()=>importFile($('import-file').files[0]);
  $('stop-app').onclick=async()=>{try{await api('/api/shutdown',{});stopped=true;$('about-dialog').close();$('live-pill').textContent='App stopped';toast('Fleet Studio stopped. Your agent tabs are still running.');}catch(e){toast(e.message,true);}};

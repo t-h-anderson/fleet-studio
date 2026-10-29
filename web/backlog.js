@@ -33,7 +33,7 @@ async function loadBacklog(force=false){
  try{
   const data=await api(force?'/api/backlog/refresh':'/api/backlog?fleetId='+encodeURIComponent(fleetId),force?{fleetId}:undefined);
   backlogCache.set(fleetId,data);
-  if(activeId===fleetId&&!drag&&!roleDrag)renderContent();
+  if(activeId===fleetId&&!roleDrag)renderContent();
   if(data.loading)setTimeout(()=>{if(activeId===fleetId)loadBacklog();},2000);
  }catch(e){if(force)toast(e.message,true);}
  finally{backlogRequests.delete(fleetId);}
@@ -117,7 +117,7 @@ renderAll=function(){
 };
 const beforeBacklogRenderContent=renderContent;
 renderContent=function(){
- beforeBacklogRenderContent();if(!state||drag||roleDrag)return;
+ beforeBacklogRenderContent();if(!state||roleDrag)return;
  if(['roster','roles','board'].includes(view))$('content').insertAdjacentHTML('beforeend',backlogSummary());
  if(['roles','board'].includes(view)){
   const unmapped=current().agents.filter(a=>!(a.roleIds||[]).length);

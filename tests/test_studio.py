@@ -65,8 +65,6 @@ class StudioTests(unittest.TestCase):
         fleet = state["fleets"][0]
         fleet["agents"][0]["name"] = "Reviewer's desk"
         fleet["agents"][0]["position"] = {"x": 333, "y": 444}
-        fleet["links"].append({"id": str(uuid.uuid4()), "source": fleet["agents"][0]["id"],
-                               "target": fleet["agents"][1]["id"], "label": "Ready for review"})
         saved = self.store.save(state)
         self.assertEqual(saved["revision"], 2)
         self.assertEqual(Store(self.root).snapshot(), saved)
@@ -101,13 +99,16 @@ class StudioTests(unittest.TestCase):
             self.store.launch_config(fleet, [fleet["agents"][0]["id"]])
         self.assertEqual(len(json.loads((self.root / "fleet.json").read_text())["agents"]), 1)
 
-    def test_handoff_requires_existing_distinct_agents(self):
+    def test_retired_agent_links_are_dropped_on_save(self):
+        # The agent layout's planning links never routed work; old saves still load, and the links go on the next save.
         state = self.store.snapshot()
         fleet = state["fleets"][0]
-        aid = fleet["agents"][0]["id"]
-        fleet["links"] = [{"id": str(uuid.uuid4()), "source": aid, "target": aid, "label": "self"}]
-        with self.assertRaises(ValidationError):
-            validate_fleets(state["fleets"])
+        first, second = [agent["id"] for agent in fleet["agents"]]
+        fleet["links"] = [{"id": str(uuid.uuid4()), "source": first, "target": first, "label": "self"},
+                          {"id": str(uuid.uuid4()), "source": first, "target": second, "label": "Review"}]
+        saved = self.store.save(state)
+        self.assertNotIn("links", saved["fleets"][0])
+        self.assertNotIn("links", Store(self.root).snapshot()["fleets"][0])
 
 
     def test_relative_folders_are_resolved_before_launch_snapshot(self):
@@ -115,18 +116,6 @@ class StudioTests(unittest.TestCase):
         state["fleets"][0]["agents"][0]["directory"] = "."
         saved = self.store.save(state)
         self.assertEqual(saved["fleets"][0]["agents"][0]["directory"], str(Path.cwd().resolve()))
-
-    def test_duplicate_handoff_ids_are_rejected(self):
-        state = self.store.snapshot()
-        fleet = state["fleets"][0]
-        first, second = [agent["id"] for agent in fleet["agents"]]
-        link_id = str(uuid.uuid4())
-        fleet["links"] = [
-            {"id": link_id, "source": first, "target": second, "label": "Review"},
-            {"id": link_id, "source": second, "target": first, "label": "Feedback"},
-        ]
-        with self.assertRaises(ValidationError):
-            self.store.save(state)
 
     def test_invalid_terminal_name_and_nonfinite_positions(self):
         for change in ("window", "position", "directory", "name"):

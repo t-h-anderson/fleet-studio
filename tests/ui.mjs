@@ -421,10 +421,16 @@ try{
  await page.locator('#f-profile-name').fill('Day shift');
  await page.locator('#profile-save-form button[type="submit"]').click();
  await page.locator('[data-profile-switch="day-shift"]').waitFor();
+ await page.locator('#search').fill('nothing like this');
+ await until(async()=>/No profile matches/.test(await page.locator('#content').innerText()),'Profile search does not filter');
+ await page.locator('#search').fill('');
+ await page.locator('[data-profile-switch="day-shift"]').waitFor();
  const savedGoal=(await bootstrap()).state.fleets[0].roles.find(r=>r.id===roleId).goal;
  await page.evaluate(id=>mutate(next=>updateFleet(next,f=>{f.roles.find(r=>r.id===id).goal='A goal the profile does not have';})),roleId);
  await until(async()=>(await page.locator('#design-profile option[value="day-shift"]').count())>0,'Deploy bar has no profile switcher');
  await page.locator('#design-profile').selectOption('day-shift');
+ assert.ok(await page.locator('#workflow-review').evaluate(d=>!d.open),'Choosing a profile opened the review before Switch');
+ await page.locator('#design-profile-switch').click();
  await page.locator('#workflow-review').waitFor();
  assert.equal(await page.locator('#workflow-review-title').innerText(),'Switch to Day shift');
  assert.match(await page.locator('#workflow-review-body').innerText(),/Retooling to Day shift/);

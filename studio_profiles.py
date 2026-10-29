@@ -15,6 +15,13 @@ SCHEMA = 'fleet-studio-profile/1'
 SLUG = re.compile(r'[a-z0-9-]{1,60}')
 # The setup saved automatically before a switch; people cannot save over it by name.
 PREVIOUS = 'before-switch-'
+MAX_BYTES = 2_000_000
+# What a profile sets up; its name, description and save time do not change what agents get.
+SETUP = ('spec', 'assignments', 'delivery', 'triggers', 'automations', 'throttles', 'dispatch', 'health', 'notes')
+
+
+def setup_digest(profile):
+    return digest({key: profile.get(key) for key in SETUP})
 
 
 def slugify(name):
@@ -49,6 +56,8 @@ def capture(fleet, name, description=''):
         'schema': SCHEMA, 'name': str(name).strip()[:80], 'description': str(description).strip()[:600], 'savedAt': time.time(),
         'source': fleet['name'], 'spec': spec,
         'assignments': {a['name']: [roles[r] for r in a.get('roleIds', []) if r in roles] for a in fleet['agents']},
+        # Scope notes are written for a role, so they travel with the assignments rather than staying behind.
+        'notes': {a['name']: a.get('notes', '') for a in fleet['agents']},
         'delivery': {stable(l, 'handoff'): l.get('delivery', 'off') for l in fleet['roleLinks']},
         'triggers': {stable(t, 'trigger'): t['enabled'] for t in fleet.get('triggers', []) if not t.get('workflowLinkId')},
         'positions': {roles[r['id']]: deepcopy(r['position']) for r in fleet['roles'] if r.get('position')},
@@ -68,15 +77,21 @@ def retool(fleet, profile):
         agent['roleIds'] = []
     updated = apply_spec(base, spec)
     by_spec = {r['specId']: r['id'] for r in updated['roles']}
-    agents = {a['name']: a for a in updated['agents']}
-    assignments = profile.get('assignments') or {}
+    # Agent names are unique regardless of case, so a hand-written profile need not match case exactly.
+    agents = {a['name'].lower(): a for a in updated['agents']}
+    assignments = {str(k).lower(): v for k, v in (profile.get('assignments') or {}).items()}
     for agent in updated['agents']:
-        wanted = assignments.get(agent['name'])
+        wanted = assignments.get(agent['name'].lower())
         if wanted is None:
             remap.append(agent['name'] + ' has no role in this profile.')
             continue
         agent['roleIds'] = [by_spec[r] for r in wanted if r in by_spec]
-    remap += [name + ' is in the profile but not in this fleet; its roles are left unassigned.' for name in assignments if name not in agents]
+    remap += [name + ' is in the profile but not in this fleet; its roles are left unassigned.'
+              for name in (profile.get('assignments') or {}) if str(name).lower() not in agents]
+    if 'notes' in profile:
+        notes = {str(k).lower(): v for k, v in (profile['notes'] or {}).items()}
+        for agent in updated['agents']:
+            agent['notes'] = str(notes.get(agent['name'].lower(), ''))
     delivery = profile.get('delivery') or {}
     for link in updated['roleLinks']:
         link['delivery'] = delivery.get(link['specId'], 'off')
@@ -97,6 +112,7 @@ def retool(fleet, profile):
             remap.append('Recovery rule "' + rule.get('name', '') + '" dropped: its role is not in this profile.')
             continue
         if name is not None:
+            name = str(name).lower()
             if name not in agents:
                 remap.append('Recovery rule "' + rule.get('name', '') + '" dropped: it watches ' + name + ', who is not in this fleet.')
                 continue
@@ -106,6 +122,9 @@ def retool(fleet, profile):
                 rule[key] = by_spec[rule[key]]
         automations.append(rule)
     updated['automations'] = automations
+    if 'automations' not in profile:
+        # A profile that never set rules gets the recommended ones, as a new fleet does.
+        updated.pop('automations')
     throttles = deepcopy(profile.get('throttles') or {})
     if throttles.get('roleTokensPerHour'):
         limits = throttles['roleTokensPerHour']
@@ -134,28 +153,39 @@ class Profiles:
         path = self.path(slug)
         if not path.is_file():
             raise ValueError('That profile no longer exists. Reload the list.')
+        if path.stat().st_size > MAX_BYTES:
+            raise ValueError('This profile file is too large.')
         profile = json.loads(path.read_text(encoding='utf-8'))
         if not isinstance(profile, dict) or profile.get('schema') != SCHEMA:
             raise ValueError('This file is not a Fleet Studio profile.')
         return profile
 
     def list(self, fleet=None):
-        active = None
+        marker, deployed = None, None
         if fleet and fleet['id'] in self.app.deployments.data['active']:
-            active = self.app.deployments.release(self.app.deployments.data['active'][fleet['id']])['digest']
+            release = self.app.deployments.release(self.app.deployments.data['active'][fleet['id']])
+            # Active means this exact setup is deployed: switched to from this file, or saved from what is deployed.
+            marker = release.get('profile')
+            try:
+                deployed = setup_digest(capture(release['fleet'], ''))
+            except (ValueError, KeyError, TypeError):
+                deployed = None
         rows, problems = [], []
         for path in sorted(self.root.glob('*.profile.json')) if self.root.is_dir() else []:
             slug = path.name[:-len('.profile.json')]
             try:
                 profile = self.read(slug)
                 spec = validate(profile['spec'])
-            except (ValueError, KeyError, TypeError, OSError) as exc:
-                problems.append(path.name + ': ' + str(exc))
+            except Exception as exc:
+                # Files are copied in by hand, so one bad file is reported without hiding the rest.
+                problems.append(path.name + ': ' + (str(exc) if isinstance(exc, ValueError) else 'not a readable profile')[:200])
                 continue
-            rows.append({'slug': slug, 'name': profile.get('name') or slug, 'description': profile.get('description', ''),
-                         'savedAt': profile.get('savedAt'), 'source': profile.get('source', ''),
-                         'roles': len(spec['roles']), 'agents': len(profile.get('assignments') or {}),
-                         'automatic': slug.startswith(PREVIOUS), 'active': active == digest(spec)})
+            switched = bool(marker and marker.get('slug') == slug and marker.get('digest') == digest(profile))
+            rows.append({'slug': slug, 'name': str(profile.get('name') or slug)[:80], 'description': str(profile.get('description') or '')[:600],
+                         'savedAt': profile.get('savedAt') if isinstance(profile.get('savedAt'), (int, float)) else None,
+                         'source': str(profile.get('source') or '')[:80],
+                         'roles': len(spec['roles']), 'agents': len(profile.get('assignments') or {}) if isinstance(profile.get('assignments'), dict) else 0,
+                         'automatic': slug.startswith(PREVIOUS), 'active': switched or (deployed is not None and deployed == setup_digest(profile))})
         # The setup saved before the last switch comes first, so switching back is one pick.
         rows.sort(key=lambda r: (not r['automatic'], (r['name'] or '').lower()))
         return {'profiles': rows, 'problems': problems}

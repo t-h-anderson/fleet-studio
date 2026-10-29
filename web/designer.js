@@ -13,10 +13,10 @@ function updateDesignTabs(){
    const tab=e.target.closest('[data-design-tab]');if(tab)setView(tab.dataset.designTab);
    if(e.target.closest('#design-deploy'))openDeployReview();
   });
-  // Choosing a profile opens the same review as Switch to this…; the choice resets so it can be picked again.
-  tabs.addEventListener('change',e=>{
-   if(e.target.id!=='design-profile'||!e.target.value)return;
-   const slug=e.target.value;e.target.value='';
+  // The switch waits for the button, so moving through the list with arrow keys never opens a review.
+  tabs.addEventListener('click',e=>{
+   if(!e.target.closest('#design-profile-switch'))return;
+   const slug=$('design-profile').value;if(!slug)return toast('Choose a profile to switch to.',true);
    switchProfile(slug).catch(error=>toast(error.message,true));
   });
  }
@@ -32,7 +32,7 @@ function deployBar(){
  const text=!status?'Checking deployment…':!status.active?'Not deployed yet: agents have no brief.':status.draftChanged?'Undeployed changes: agents still follow the last deploy.':'Deployed and up to date.';
  const profiles=(typeof profileData==='function'&&profileData()?.profiles)||[];
  const picker=profiles.length?'<select id="design-profile" aria-label="Switch to a profile"><option value="">Switch profile…</option>'+
-  profiles.map(p=>'<option value="'+esc(p.slug)+'"'+(p.active?' disabled':'')+'>'+esc(p.name)+(p.active?' (active)':'')+'</option>').join('')+'</select>':'';
+  profiles.map(p=>'<option value="'+esc(p.slug)+'"'+(p.active?' disabled':'')+'>'+esc(p.name)+(p.active?' (active)':'')+'</option>').join('')+'</select><button class="button small" id="design-profile-switch">Switch…</button>':'';
  return '<span class="design-deploy">'+picker+'<span id="design-deploy-status">'+esc(text)+'</span><button class="button small primary" id="design-deploy"'+(status?.active&&!status.draftChanged?' disabled':'')+'>Review &amp; deploy</button></span>';
 }
 

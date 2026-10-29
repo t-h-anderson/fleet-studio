@@ -242,9 +242,9 @@ class Deployments:
                 # The file reviewed is the file deployed; a profile edited since the review needs a new review.
                 if digest(self.app.profiles.read(preview["profile"]["slug"])) != preview["profile"]["digest"]:
                     raise ValueError("That profile changed since the review. Review it again.")
-                self.app.profiles.write(preview["previousProfile"]["slug"], preview["previousProfile"]["document"])
             fleet = deepcopy(preview["fleet"])
             state["fleets"] = [fleet if f["id"] == fleet["id"] else f for f in state["fleets"]]
+            result_warning = None
             if preview["kind"] == "import":
                 result = {"state": self.app.store.save(state)}
             else:
@@ -253,7 +253,8 @@ class Deployments:
                 directory = self.root / rid
                 directory.mkdir(parents=True)
                 release = {"id": rid, "fleetId": fleet["id"], "version": spec["version"], "createdAt": time.time(),
-                           "digest": digest(spec), "spec": spec, "fleet": fleet}
+                           "digest": digest(spec), "spec": spec, "fleet": fleet,
+                           **({"profile": {k: preview["profile"][k] for k in ("slug", "digest")}} if preview.get("profile") else {})}
                 atomic_json(directory / "workflow.json", spec)
                 atomic_json(directory / "release.json", release)
                 (directory / "WORKFLOW.md").write_text(render(spec), encoding="utf-8")
@@ -276,7 +277,15 @@ class Deployments:
                     self.data = previous
                     raise
                 self.cache[rid] = release
+                if preview.get("previousProfile"):
+                    # Only a switch that happened replaces the saved setup; a failed one leaves the earlier copy.
+                    try:
+                        self.app.profiles.write(preview["previousProfile"]["slug"], preview["previousProfile"]["document"])
+                    except OSError as exc:
+                        result_warning = "Deployed, but the setup before the switch could not be saved: " + str(exc)
                 result = {"state": saved, "release": {"id": rid, "directory": str(directory), "digest": release["digest"]}}
+                if result_warning:
+                    result["warning"] = result_warning
             del self.previews[preview_id]
             return result
 

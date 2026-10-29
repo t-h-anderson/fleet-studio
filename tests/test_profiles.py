@@ -135,6 +135,60 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(names(back), assignments)
         self.assertEqual(back['roleLinks'][3]['delivery'], 'review')
 
+    def test_only_the_deployed_setup_is_active_not_every_profile_sharing_its_workflow(self):
+        app, fleet = self.app()
+        self.save(app, fleet, 'Day shift')
+        self.edit(app, lambda f: [a.update(roleIds=list(reversed(f['agents']))[i]['roleIds']) for i, a in enumerate(f['agents'])])
+        self.save(app, app.store.fleet(fleet['id']), 'Night shift')
+        self.switch(app, fleet, 'night-shift')
+        active = {p['slug']: p['active'] for p in app.profiles.list(fleet)['profiles']}
+        self.assertEqual((active['day-shift'], active['night-shift']), (False, True))
+
+    def test_unreadable_files_are_reported_without_breaking_the_list(self):
+        app, fleet = self.app()
+        self.save(app, fleet, 'Day shift')
+        folder = app.root / 'profiles'
+        (folder / 'deep.profile.json').write_text('[' * 100000 + ']' * 100000, encoding='utf-8')
+        (folder / 'odd.profile.json').write_text(json.dumps({'schema': SCHEMA, 'name': 5, 'spec': SAMPLE}), encoding='utf-8')
+        (folder / 'huge.profile.json').write_text(' ' * 3000000, encoding='utf-8')
+        listed = app.profiles.list(fleet)
+        self.assertIn('day-shift', [p['slug'] for p in listed['profiles']])
+        self.assertEqual(next(p for p in listed['profiles'] if p['slug'] == 'odd')['name'], '5')
+        self.assertEqual(len(listed['problems']), 2)
+
+    def test_a_profile_without_rules_gets_the_recommended_rules(self):
+        app, fleet = self.app()
+        profile = self.sample_profile(app)
+        profile.pop('automations')
+        app.profiles.write('sample-delivery', profile)
+        _, _, after = self.switch(app, fleet, 'sample-delivery')
+        self.assertEqual(len(after['automations']), len(fleet['automations']))
+        self.assertTrue(after['automations'])
+
+    def test_a_failed_switch_keeps_the_earlier_saved_setup(self):
+        app, fleet = self.app()
+        self.sample_profile(app)
+        previous = app.root / 'profiles' / (previous_slug(fleet['id']) + '.profile.json')
+        previous.write_text(json.dumps({'schema': SCHEMA, 'name': 'Earlier', 'spec': SAMPLE}), encoding='utf-8')
+        preview = app.deployments.preview({'fleetId': fleet['id'], 'revision': self.revision(app), 'kind': 'profile', 'profile': 'sample-delivery'})
+        from unittest.mock import patch
+        with patch.object(app.store, 'save', side_effect=OSError('disk full')), self.assertRaises(OSError):
+            app.deployments.apply(preview['id'])
+        self.assertEqual(json.loads(previous.read_text(encoding='utf-8'))['name'], 'Earlier')
+
+    def test_scope_notes_travel_with_the_profile_and_names_match_regardless_of_case(self):
+        app, fleet = self.app()
+        fleet = self.edit(app, lambda f: f['agents'][0].update(notes='Parser work only'))
+        self.save(app, fleet, 'Day shift')
+        self.edit(app, lambda f: f['agents'][0].update(notes='Something else'))
+        _, _, after = self.switch(app, fleet, 'day-shift')
+        self.assertEqual(after['agents'][0]['notes'], 'Parser work only')
+        profile = self.sample_profile(app)
+        profile['assignments'] = {'writer a': ['writer'], 'WRITER B': ['integrator']}
+        app.profiles.write('sample-delivery', profile)
+        preview = app.deployments.preview({'fleetId': fleet['id'], 'revision': self.revision(app), 'kind': 'profile', 'profile': 'sample-delivery'})
+        self.assertEqual(preview['profile']['remap'], [])
+
     def test_a_profile_or_draft_changed_after_review_is_refused(self):
         app, fleet = self.app()
         profile = self.sample_profile(app)

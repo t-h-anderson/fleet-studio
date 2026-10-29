@@ -300,15 +300,23 @@ try{
  const liveLink=(await page.locator('#board-links .workflow-connection[data-link-ids]').first().getAttribute('data-link-ids')).split(' ')[0];
  await page.route('**/api/flow?**',async route=>{
   const response=await route.fetch(),data=await response.json(),now=Date.now()/1000;
-  data.links[liveLink]={pending:0,held:0,attention:1,oldestAt:now-300,recent:2,items:[{actionId:'stub-action',status:'needs-attention',at:now-300,from:'Writer',to:'Integrator'}]};
+  // More deliveries than the server lists, so counts must come from the totals, not the item list.
+  data.links[liveLink]={pending:0,held:11,attention:1,oldestAt:now-300,recent:2,items:[{actionId:'stub-action',status:'needs-attention',at:now-300,from:'Writer',to:'Integrator'}]};
   await fulfillStub(route,{response,json:data});
  });
  await page.evaluate(()=>loadFlow());
  await until(async()=>(await page.locator('#board-links .workflow-connection.live-attention').count())>0,'Hand-off needing attention not coloured');
- assert.match(await page.locator('#board-links .live-badge.live-attention').first().textContent(),/1 · 5m/);
+ assert.match(await page.locator('#board-links .live-badge.live-attention').first().textContent(),/12 · 5m/);
+ assert.match(await page.locator('#live-edges').innerText(),/12 waiting/);
+ // Held alone is ordinary back-pressure, not an alarm.
+ assert.equal(await page.evaluate(()=>liveState({pending:0,held:2,attention:0,oldestAt:Date.now()/1000},{})),'live-pending');
  await page.locator('#live-edges [data-live-link]').first().click();
  await page.locator('#inspector-live [data-review-trigger="stub-action"]').waitFor();
- assert.match(await page.locator('#inspector-live').innerText(),/1 waiting[\s\S]*1 need attention/);
+ assert.match(await page.locator('#inspector-live').innerText(),/12 waiting[\s\S]*11 held[\s\S]*1 need attention/);
+ // A poll leaves a focused button focused.
+ await page.locator('#inspector-live [data-review-trigger="stub-action"]').focus();
+ await page.evaluate(()=>loadFlow());
+ assert.equal(await page.evaluate(()=>document.activeElement?.dataset.reviewTrigger),'stub-action','A poll stole focus from the inspector');
  assert.ok(!(await page.locator('#board-live-legend').isHidden()),'Live legend hidden while Live is on');
  await page.locator('#board-live').uncheck();
  assert.equal(await page.locator('#board-links .live-badge, #board-links .live-attention, .live-stats').count(),0,'Live off left live marks');

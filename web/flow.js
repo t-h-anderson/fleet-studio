@@ -49,7 +49,8 @@ function liveLinkStats(data,ids){
 }
 function liveState(stats,data){
  const waiting=stats.pending+stats.held+stats.attention;
- if(stats.held||stats.attention)return 'live-attention';
+ // Held is ordinary back-pressure (recipient busy, throttled); only a delivery needing attention is red.
+ if(stats.attention)return 'live-attention';
  if(!waiting)return 'live-quiet';
  return Date.now()/1000-stats.oldestAt>=60*(data.hot?.slowMinutes||15)?'live-slow':'live-pending';
 }
@@ -59,15 +60,17 @@ function liveTitle(stats){
   '; '+stats.recent+' delivered in 24h';
 }
 function clearLive(){
- document.querySelectorAll('#board-links [data-link-ids],[data-role-node]').forEach(n=>n.classList.remove(...LIVE_CLASSES));
+ document.querySelectorAll('#board-links [data-link-ids]').forEach(n=>n.classList.remove(...LIVE_CLASSES));
+ document.querySelectorAll('[data-role-node]').forEach(n=>{n.classList.remove(...LIVE_CLASSES);n.removeAttribute('title');});
  document.querySelectorAll('.live-badge,.live-stats,#live-edges').forEach(n=>n.remove());
  const legend=$('board-live-legend');if(legend)legend.classList.add('hidden');
- const panel=$('inspector-live');if(panel)panel.innerHTML='';
+ const panel=$('inspector-live');if(panel)setMarkup(panel,'');
 }
 function decorateBoard(){
  if(view!=='board')return;
  const data=flowCache.get(activeId);
- if(!liveBoard||!data)return clearLive();
+ // The overlay reads hand-offs, which only the roles layout draws.
+ if(!liveBoard||!data||boardMode!=='roles')return clearLive();
  $('board-live-legend')?.classList.remove('hidden');
  decorateRoles(data);decorateLinks(data);decorateStrip(data);fillInspectorLive();
 }
@@ -112,15 +115,18 @@ function decorateStrip(data){
  let strip=$('live-edges');
  if(!strip){strip=document.createElement('div');strip.id='live-edges';strip.className='live-edges';viewport.insertAdjacentElement('afterend',strip);}
  const f=current(),roles=Object.fromEntries((f.roles||[]).map(r=>[r.id,r.name]));
- const busy=f.roleLinks.map(l=>({link:l,stats:liveLinkStats(data,[l.id])})).filter(r=>r.stats.items.length).sort((a,b)=>a.stats.oldestAt-b.stats.oldestAt);
- // Deliveries no single hand-off explains still show, by role pair.
- const explained=new Set(busy.map(r=>r.link.source+'>'+r.link.target));
- const other=Object.entries(data.edges).filter(([key,e])=>e.pending&&!explained.has(key));
- strip.innerHTML='<strong>Hand-offs in flight</strong>'+(busy.length||other.length?
-  busy.map(({link,stats})=>'<button class="text-button live-'+liveState(stats,data).slice(5)+'" data-live-link="'+link.id+'" title="'+esc(liveTitle(stats))+'">'+esc(roles[link.source]||'?')+' &rarr; '+esc(roles[link.target]||'?')+': '+stats.items.length+' waiting · oldest '+elapsed(stats.oldestAt)+'</button>').join('')+
+ const waiting=stats=>stats.pending+stats.held+stats.attention;
+ const busy=f.roleLinks.map(l=>({link:l,stats:liveLinkStats(data,[l.id])})).filter(r=>waiting(r.stats)).sort((a,b)=>a.stats.oldestAt-b.stats.oldestAt);
+ // Deliveries no hand-off explains still show by role pair, counting only the remainder.
+ const explained={};busy.forEach(r=>{const key=r.link.source+'>'+r.link.target;explained[key]=(explained[key]||0)+waiting(r.stats);});
+ const other=Object.entries(data.edges).map(([key,e])=>[key,{...e,pending:e.pending-(explained[key]||0)}]).filter(([,e])=>e.pending>0);
+ setMarkup(strip,'<strong>Hand-offs in flight</strong>'+(busy.length||other.length?
+  busy.map(({link,stats})=>'<button class="text-button live-'+liveState(stats,data).slice(5)+'" data-live-link="'+link.id+'" title="'+esc(liveTitle(stats))+'">'+esc(roles[link.source]||'?')+' &rarr; '+esc(roles[link.target]||'?')+': '+waiting(stats)+' waiting · oldest '+elapsed(stats.oldestAt)+'</button>').join('')+
   other.map(([key,e])=>{const [s,t]=key.split('>');return '<span>'+esc(roles[s]||'?')+' &rarr; '+esc(roles[t]||'?')+': '+e.pending+' waiting · oldest '+elapsed(e.oldestAt)+'</span>';}).join(''):
-  '<span class="muted">None waiting</span>');
+  '<span class="muted">None waiting</span>'));
 }
+// Polls rewrite only what changed, so a focused button keeps its focus.
+function setMarkup(node,markup){if(node.dataset.markup!==markup){node.innerHTML=markup;node.dataset.markup=markup;}}
 $('content').addEventListener('click',e=>{
  const b=e.target.closest('[data-live-link]');
  if(b&&typeof selectDesign==='function')selectDesign('rolelink',b.dataset.liveLink);
@@ -130,19 +136,19 @@ $('content').addEventListener('click',e=>{
 // The inspector's live section sits outside its form fields, so refilling it never touches unsaved edits.
 function fillInspectorLive(){
  const panel=$('inspector-live'),data=flowCache.get(activeId);if(!panel)return;
- if(!liveBoard||!data||typeof designSelection==='undefined'||!designSelection){panel.innerHTML='';return;}
+ if(!liveBoard||!data||typeof designSelection==='undefined'||!designSelection){setMarkup(panel,'');return;}
  const note=deploymentStatus()?.draftChanged?'<p class="field-hint">Live numbers follow the deployed workflow; undeployed changes show after you deploy.</p>':'';
  if(designSelection.type==='role'){
-  const stats=data.roles[designSelection.id];if(!stats){panel.innerHTML='';return;}
-  panel.innerHTML='<h4>Live</h4><p class="live-line">'+stats.waiting+' tickets waiting · '+stats.claimed+' claimed · '+stats.working+' agents working'+(stats.throttled?' · '+stats.throttled+' throttled':'')+'</p>'+
+  const stats=data.roles[designSelection.id];if(!stats){setMarkup(panel,'');return;}
+  setMarkup(panel,'<h4>Live</h4><p class="live-line">'+stats.waiting+' tickets waiting · '+stats.claimed+' claimed · '+stats.working+' agents working'+(stats.throttled?' · '+stats.throttled+' throttled':'')+'</p>'+
    '<p class="live-line">24h: '+tokenCount(stats.tokens24h)+' fresh tokens'+(stats.tokens24h?', ≈'+Math.round(100*stats.wasteTokens24h/stats.tokens24h)+'% waste':'')+'</p>'+
-   (stats.agents.length?'<ul class="inspector-links">'+stats.agents.map(a=>'<li><span class="'+healthChipClass(a.id)+'">'+esc(a.name)+'</span> <button class="text-button" data-live-health="'+esc(a.name)+'">Agent health</button></li>').join('')+'</ul>':'')+note;
+   (stats.agents.length?'<ul class="inspector-links">'+stats.agents.map(a=>'<li><span class="'+healthChipClass(a.id)+'">'+esc(a.name)+'</span> <button class="text-button" data-live-health="'+esc(a.name)+'">Agent health</button></li>').join('')+'</ul>':'')+note);
   return;
  }
  const stats=liveLinkStats(data,[designSelection.id]);
- panel.innerHTML='<h4>Live</h4><p class="live-line">'+esc(liveTitle(stats))+'.</p>'+
+ setMarkup(panel,'<h4>Live</h4><p class="live-line">'+esc(liveTitle(stats))+'.</p>'+
   (stats.items.length?'<ul class="inspector-links live-items">'+stats.items.map(item=>'<li><span>'+esc(item.from||'?')+' &rarr; '+esc(item.to||'?')+' · '+esc(item.status)+' · '+elapsed(item.at)+'</span>'+
-   (item.actionId?' <button class="button small" data-review-trigger="'+esc(item.actionId)+'">Review</button><button class="button small" data-dismiss-trigger="'+esc(item.actionId)+'">Dismiss</button>':'')+'</li>').join('')+'</ul>':'')+note;
+   (item.actionId?' <button class="button small" data-review-trigger="'+esc(item.actionId)+'">Review</button><button class="button small" data-dismiss-trigger="'+esc(item.actionId)+'">Dismiss</button>':'')+'</li>').join('')+'</ul>':'')+note)
 }
 function boardLiveToggle(){
  const bar=$('board-toolbar');if(!bar||$('board-live'))return;

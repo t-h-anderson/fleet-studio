@@ -40,10 +40,11 @@ class LiveFlowTests(unittest.TestCase):
         self.action(app, fleet, trigger, writer, integrator, 'held', now - 120)
         self.action(app, fleet, trigger, writer, integrator, 'needs-attention', now - 30)
         self.action(app, fleet, trigger, writer, integrator, 'queued', now - 3600)
+        self.action(app, fleet, trigger, writer, integrator, 'reconciled', now - 1800)
         self.action(app, fleet, trigger, writer, integrator, 'queued', now - 90000)
         self.action(app, {'id': 'elsewhere'}, trigger, writer, integrator, 'pending', now - 10)
         row = flow(app, fleet)['links'][link['id']]
-        self.assertEqual((row['pending'], row['held'], row['attention'], row['recent']), (1, 1, 1, 1))
+        self.assertEqual((row['pending'], row['held'], row['attention'], row['recent']), (1, 1, 1, 2))
         self.assertEqual(row['oldestAt'], now - 120)
         self.assertEqual([i['status'] for i in row['items']], ['held', 'pending', 'needs-attention'])
         self.assertEqual((row['items'][0]['from'], row['items'][0]['to']), (writer['name'], integrator['name']))

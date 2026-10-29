@@ -74,8 +74,9 @@ def flow(app, fleet):
     roles = {r['id']: {'waiting': 0, 'stuck': 0, 'working': 0, 'claimed': 0, 'throttled': 0,
                        'tokens24h': 0, 'wasteTokens24h': 0, 'agents': []} for r in fleet.get('roles', [])}
     sessions = app.status().get('sessions', {})
-    with app.automation.lock:
-        throttled = {key.split(':', 1)[1] for key in app.automation.data['throttled'] if key.startswith(fleet['id'] + ':')}
+    # The snapshot takes both automation locks; the throttle map changes under the hold lock alone.
+    automation = app.automation.snapshot(fleet['id'])
+    throttled = {row['agentId'] for row in automation['throttled']}
     for agent in fleet['agents']:
         health = app.health.get(fleet['id'], agent['id']) or {}
         for role_id in agent.get('roleIds', []):
@@ -140,7 +141,7 @@ def flow(app, fleet):
         elif delivered and at >= now - 86400:
             row['recent'] += 1
 
-    for fire in app.automation.snapshot(fleet['id'])['fires']:
+    for fire in automation['fires']:
         if not fire.get('recipientId'):
             continue
         if fire['status'] in ('pending', 'sending', 'held'):
@@ -154,7 +155,7 @@ def flow(app, fleet):
         if action['status'] in WAITING and action.get('sourceAgentId'):
             add(action['sourceAgentId'], action.get('targetAgentId'), action['createdAt'])
         count(by_trigger.get(action.get('triggerId')), action['id'], action['status'], action.get('sourceAgentId'),
-              action.get('targetAgentId'), action.get('targetName', ''), action['createdAt'], action['status'] == 'queued')
+              action.get('targetAgentId'), action.get('targetName', ''), action['createdAt'], action['status'] in ('queued', 'reconciled'))
     for row in links.values():
         row['items'] = sorted(row['items'], key=lambda item: item['at'])[:10]
 

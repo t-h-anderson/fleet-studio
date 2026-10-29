@@ -65,7 +65,7 @@ function inspectorMarkup(){
  const item=designSelection?.type==='role'?f.roles.find(r=>r.id===designSelection.id):designSelection?.type==='rolelink'?f.roleLinks.find(l=>l.id===designSelection.id):null;
  if(!item){designSelection=null;return '<p class="field-hint">Select a role or a hand-off on the board to edit it here. Use Add handoff to connect two roles.</p>';}
  // Live numbers go in their own section, refilled on every poll without touching the form.
- return (designSelection.type==='role'?roleInspector(item):linkInspector(item))+'<section id="inspector-live" class="inspector-live" aria-live="polite"></section>';
+ return (designSelection.type==='role'?roleInspector(item):linkInspector(item))+'<section id="inspector-live" class="inspector-live" aria-label="Live load"></section>';
 }
 function addInspector(){
  if(view!=='board'||boardMode!=='roles'||$('design-inspector'))return;

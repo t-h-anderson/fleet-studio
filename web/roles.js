@@ -1,6 +1,6 @@
 'use strict';
-let boardMode=localStorage.getItem('fleet-board-mode')||'roles',roleDrag=null,controlPreview=null,policyDraft=null;
-if(boardMode==='roles')zoom=.8;
+let roleDrag=null,controlPreview=null,policyDraft=null;
+zoom=.8;
 let groupRoleHandoffs=localStorage.getItem('fleet-group-handoffs')!=='false',focusedRoleId='',selectedRolePairId='',roleBoardContext='';
 let showInternalRoles=localStorage.getItem('fleet-internal-roles')==='true';
 const boardRoles=roles=>FleetLayout.visibleRoles(roles,showInternalRoles);
@@ -21,11 +21,8 @@ const originalRenderAll=renderAll;
 renderAll=function(){
  originalRenderAll();
  if(!state)return;
- $('board-mode').value=boardMode;
  $('show-internal-roles').checked=showInternalRoles;
  $('group-role-handoffs').checked=groupRoleHandoffs;
- $('group-handoffs-control').classList.toggle('hidden',boardMode!=='roles');
- $('internal-roles-control').classList.toggle('hidden',boardMode!=='roles');
  if(view==='roles'){
   $('fleet-title').textContent='Roles';
   $('fleet-description').textContent='Shared definitions, project policy and agent assignments.';
@@ -34,14 +31,12 @@ renderAll=function(){
   $('workspace-layout').classList.add('board-layout');
  }
 };
-const originalRenderBoard=renderBoard;
 function roleBoardGraph(roles,links){return {agents:roles,links:groupRoleHandoffs?FleetLayout.bundles(roles,links):links};}
 function roleInFocus(id){
  if(selectedRolePairId){const pair=FleetLayout.bundles(current().roles,current().roleLinks).find(p=>p.id===selectedRolePairId);return !pair||[pair.source,pair.target].includes(id);}
  return !focusedRoleId||id===focusedRoleId||current().roleLinks.some(l=>(l.source===focusedRoleId&&l.target===id)||(l.target===focusedRoleId&&l.source===id));
 }
 renderBoard=function(){
- if(boardMode==='agents'){focusedRoleId='';selectedRolePairId='';roleBoardContext='';return originalRenderBoard();}
  if(roleDrag)return;
  const activeElement=document.activeElement,focusAttribute=['data-focus-role','data-role-node','data-inspect-role-pair'].find(attr=>activeElement?.hasAttribute(attr));
  const focusValue=focusAttribute?activeElement.getAttribute(focusAttribute):null;
@@ -192,28 +187,26 @@ function downloadText(filename,value){const url=URL.createObjectURL(new Blob([va
 $('close-policy').onclick=()=>$('policy-dialog').close();
 $('download-policy').onclick=()=>downloadText('role-policy-'+policyDraft.baseCommit.slice(0,9)+'.patch',policyDraft.patch);
 $('download-policy-document').onclick=()=>downloadText('ROLES_AND_RESPONSIBILITIES.proposed.md',policyDraft.document);
-$('board-mode').onchange=()=>{boardMode=$('board-mode').value;zoom=boardMode==='roles'?.8:1;localStorage.setItem('fleet-board-mode',boardMode);renderAll();};
 $('group-role-handoffs').onchange=()=>{groupRoleHandoffs=$('group-role-handoffs').checked;selectedRolePairId='';localStorage.setItem('fleet-group-handoffs',String(groupRoleHandoffs));renderBoard();};
 $('fit-board').onclick=fitBoard;
 $('zoom-value').onclick=()=>{zoom=1;renderBoard();};
 $('close-handoff-group').onclick=()=>$('handoff-group-dialog').close();
 $('handoff-group-dialog').addEventListener('close',()=>{
  const pairId=selectedRolePairId;selectedRolePairId='';
- if(view==='board'&&boardMode==='roles'){
+ if(view==='board'){
   renderBoard();
   if(pairId&&!$('editor').open)document.querySelector('path[data-inspect-role-pair="'+CSS.escape(pairId)+'"]')?.focus({preventScroll:true});
  }
 });
 $('handoff-group-body').addEventListener('click',e=>{const b=e.target.closest('[data-inspector-edit]');if(b){$('handoff-group-dialog').close();openEditor('rolelink',b.dataset.inspectorEdit);}});
 $('show-internal-roles').onchange=()=>{showInternalRoles=$('show-internal-roles').checked;localStorage.setItem('fleet-internal-roles',String(showInternalRoles));renderBoard();};
-const oldAddLink=$('add-link').onclick;
-$('add-link').onclick=()=>boardMode==='roles'?openEditor('rolelink'):oldAddLink();
+$('add-link').onclick=()=>openEditor('rolelink');
 $('arrange').onclick=async()=>{
- const fleetId=activeId,mode=boardMode,includeInternal=showInternalRoles;
+ const fleetId=activeId,includeInternal=showInternalRoles;
  $('arrange').disabled=true;
  try{await mutate(next=>{
-  const f=next.fleets.find(f=>f.id===fleetId),all=mode==='roles'?f.roles:f.agents,nodes=mode==='roles'?FleetLayout.visibleRoles(all,includeInternal):all;
-  const positions=FleetLayout.arrange(nodes,mode==='roles'?f.roleLinks:f.links);
+  const f=next.fleets.find(f=>f.id===fleetId),all=f.roles,nodes=FleetLayout.visibleRoles(all,includeInternal);
+  const positions=FleetLayout.arrange(nodes,f.roleLinks);
   nodes.forEach(n=>n.position=positions[n.id]);
   // Keep hidden internal cards clear, ready to be shown without stacking.
   const placed=[...nodes];
@@ -285,7 +278,7 @@ $('content').addEventListener('keydown',e=>{
  mutate(next=>updateFleet(next,f=>{const r=f.roles.find(r=>r.id===id);r.position={x:Math.max(0,Math.min(4000,r.position.x+delta[0])),y:Math.max(0,Math.min(4000,r.position.y+delta[1]))};})).then(()=>document.querySelector('[data-role-node="'+id+'"]')?.focus({preventScroll:true})).catch(error=>toast(error.message,true));
 });let geometryCache={key:'',value:null};
 function workflowGeometry(graph){
- const nodes=graph.agents.map(n=>({...n,position:nodePosition(n)}));
+ const nodes=graph.agents.map(n=>({...n,position:n.position}));
  const key=JSON.stringify([nodes.map(n=>[n.id,n.position.x,n.position.y]),graph.links.map(l=>[l.id,l.source,l.target,l.label,l.members?.map(m=>[m.id,m.source,m.target,m.label])])]);
  if(key!==geometryCache.key)geometryCache={key,value:FleetLayout.route(nodes,graph.links)};
  return geometryCache.value;
@@ -320,4 +313,3 @@ function workflowMarkup(graph,attribute='data-edit-role-link'){
  }
  return '<defs><marker id="workflow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:#78987a;stroke:none"></path></marker></defs>'+paths.join('')+labels.join('');
 }
-linksMarkup=function(graph){return workflowMarkup(graph,'data-edit-link');};

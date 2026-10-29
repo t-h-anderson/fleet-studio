@@ -206,7 +206,9 @@ try{
  await page.locator('#nav-progress').click();
  checks.push('Assignment cards expose wait ownership at narrow widths; tracker acceptance rules are explicit draft changes');
  await page.locator('[data-progress-tab="attention"]').click();
- const metrics=await page.locator('.progress-metrics').boundingBox(),tabs=await page.locator('.progress-tabs').boundingBox();
+ // Progress redraws as data arrives; measure once both parts are on the page, not mid-redraw.
+ let metrics=null,tabs=null;
+ await until(async()=>{metrics=await page.locator('.progress-metrics').boundingBox();tabs=await page.locator('.progress-tabs').boundingBox();return metrics&&tabs;},'Progress metrics and tabs did not render');
  assert.ok(tabs.y>=metrics.y+metrics.height,'Tabs must be below the metric grid');
  await page.screenshot({path:path.join(root,'tests/progress.png'),fullPage:true});
  await page.setViewportSize({width:720,height:1000});await page.screenshot({path:path.join(root,'tests/progress-mobile.png'),fullPage:true});
@@ -380,6 +382,8 @@ try{
  // One Workflow screen: tabs, and the inspector edits roles and hand-offs in place.
  await page.locator('#nav-workflow').click();await page.locator('#design-inspector').waitFor();
  assert.deepEqual(await page.locator('[data-design-tab]').allInnerTexts(),['Design','Roles','Process & deploy','Profiles']);
+ // The retired agent layout has no switch left; the Design tab always shows the role workflow.
+ assert.equal(await page.locator('#board-mode').count(),0,'The agent layout switch is still shown');
  const linkId=await page.locator('[data-edit-role-link]').first().getAttribute('data-edit-role-link');
  await page.locator('[data-edit-role-link="'+linkId+'"]').first().dispatchEvent('click');
  await page.locator('#i-delivery').selectOption('review');
